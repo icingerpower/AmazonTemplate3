@@ -1,0 +1,15 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-gravity-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_PREFIX_PATH": "/home/cedric/Qt/6.7.3/gcc_64"
+      }
+    }
+  ]
+}
+

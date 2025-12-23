@@ -1,0 +1,4 @@
+tests
+*.user
+.vscode
+build/
