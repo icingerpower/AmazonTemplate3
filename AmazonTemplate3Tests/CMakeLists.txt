@@ -33,7 +33,7 @@ target_link_libraries(AmazonTemplate3Tests PRIVATE AmazonTemplate3Lib)
 target_include_directories(AmazonTemplate3Tests PRIVATE ../AmazonTemplate3Lib)
 target_include_directories(AmazonTemplate3Tests PRIVATE ../../common/openai/)
 
-add_test(NAME AmazonTemplate3Tests COMMAND TestOpenAi2)
+add_test(NAME AmazonTemplate3Tests COMMAND AmazonTemplate3Tests)
 
 target_link_libraries(AmazonTemplate3Tests PRIVATE
     Qt${QT_VERSION_MAJOR}::Test

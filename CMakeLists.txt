@@ -4,6 +4,8 @@ project(AmazonTemplate3)
 
 include(common.cmake)
 
+enable_testing()
+
 add_subdirectory(AmazonTemplate3Lib)
 add_subdirectory(AmazonTemplate3)
 add_subdirectory(AmazonTemplate3Tests)

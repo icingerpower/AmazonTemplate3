@@ -1,4 +1,4 @@
 tests
 *.user
 .vscode
-build/
+*build*
