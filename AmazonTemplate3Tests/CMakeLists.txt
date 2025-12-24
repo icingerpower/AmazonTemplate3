@@ -4,8 +4,8 @@ project(TestOpenAi2 LANGUAGES CXX)
 
 enable_testing()
 
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Network Test)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Network Test)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Network Test Gui)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Network Test Gui)
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
@@ -37,5 +37,6 @@ add_test(NAME AmazonTemplate3Tests COMMAND AmazonTemplate3Tests)
 
 target_link_libraries(AmazonTemplate3Tests PRIVATE
     Qt${QT_VERSION_MAJOR}::Test
-    Qt${QT_VERSION_MAJOR}::Network)
+    Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::Gui)
 
