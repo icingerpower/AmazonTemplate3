@@ -2,6 +2,22 @@ cmake_minimum_required(VERSION 3.5)
 
 project(TestOpenAi2 LANGUAGES CXX)
 
+# Option to run real contract tests (requires API key)
+# Option to run real contract tests (requires API key)
+option(DO_REAL_TESTS "Run real OpenAI contract tests" OFF)
+
+if(DO_REAL_TESTS)
+    add_definitions(-DDO_REAL_TESTS=1)
+    if(DEFINED OPEN_AI_API_KEY)
+        add_definitions(-DOPEN_AI_API_KEY="${OPEN_AI_API_KEY}")
+        message(STATUS "DO_REAL_TESTS is ON. API Key injected.")
+    else()
+        message(WARNING "DO_REAL_TESTS is ON but OPEN_AI_API_KEY is NOT defined. Tests may fail to compile or run.")
+    endif()
+else()
+    message(STATUS "DO_REAL_TESTS is OFF. Contract tests will be skipped.")
+endif()
+
 enable_testing()
 
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Network Test Gui)
