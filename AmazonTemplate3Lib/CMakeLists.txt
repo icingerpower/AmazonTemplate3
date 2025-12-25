@@ -54,6 +54,8 @@ add_library(AmazonTemplate3Lib STATIC
   Attribute.cpp
   TemplateFiller.h
   TemplateFiller.cpp
+  MandatoryAttributesManager.h
+  MandatoryAttributesManager.cpp
 )
 
 target_link_libraries(AmazonTemplate3Lib PRIVATE
