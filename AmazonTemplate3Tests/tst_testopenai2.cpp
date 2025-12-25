@@ -49,6 +49,7 @@ private slots:
     void multiple_ask_collects_valid();
     void multiple_ask_choose_best();
     void multiple_ask_ai_prompt();
+    void multiple_ask_custom_choose_best();
     void batch_jsonl_roundtrip();
     void reject_ask_before_init_strict();
     void test_image_generation();
@@ -1226,6 +1227,67 @@ void TestOpenAi2::test_image_generation()
     QCOMPARE(resultColor, QString("red"));
 }
 
+void TestOpenAi2::multiple_ask_custom_choose_best()
+{
+    auto ai = OpenAi2::instance();
+    ai->resetForTests();
+    ai->init("k");
+    QEventLoop loop;
+    QTimer timer;
+    timer.setSingleShot(true);
+    connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit); 
+
+    auto step = QSharedPointer<OpenAi2::StepMultipleAsk>::create();
+    step->id = ""; // Disable caching to ensure we get A, B, B sequence
+    step->neededReplies = 3;
+    step->getPrompt = [](int){ return "p"; };
+    step->validate = [](const QString&, const QString&){ return true; }; // All valid
+
+    // Logic to choose most common
+    step->chooseBest = [](const QList<QString>& replies) -> QString {
+        QMap<QString, int> counts;
+        for(const auto& r : replies) counts[r]++;
+        
+        QString best;
+        int max = -1;
+        for(auto it = counts.begin(); it != counts.end(); ++it) {
+            if (it.value() > max) {
+                max = it.value();
+                best = it.key();
+            }
+        }
+        return best;
+    };
+
+    QString chosen;
+    step->apply = [&](QString r){ 
+        chosen = r; 
+        loop.quit();
+    };
+
+    int callCount = 0;
+    setFakeTransport([&](const QString&, const QString&, const QList<QString>&, std::function<void(QString)> ok, std::function<void(QString)>){
+        callCount++;
+        // Return A, B, B
+        QString reply = (callCount == 1) ? "A" : "B";
+        ok(reply);
+    });
+
+    QList<QSharedPointer<OpenAi2::StepMultipleAsk>> steps;
+    steps << step;
+
+    
+    // Run
+    ai->askGptMultipleTime(steps, "model");
+    
+    timer.start(5000);
+    loop.exec();
+    
+    if (chosen.isEmpty()) {
+        QFAIL("Timeout: chooseBest test failed to produce a result.");
+    }
+    QCOMPARE(chosen, "B");
+}
 
 QTEST_MAIN(TestOpenAi2)
 
