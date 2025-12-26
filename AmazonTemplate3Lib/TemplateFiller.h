@@ -30,6 +30,7 @@ public:
     QString checkSkus() const; // check child / parent are correct without duplicates
 
      // Return all field with values or ask AI after reading field ids
+    QStringList findPreviousTemplatePath() const;
     QList<AttributeFound> findAttributesMandatory(
             const QStringList &previousTemplatePaths) const;
 

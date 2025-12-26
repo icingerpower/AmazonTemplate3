@@ -266,6 +266,13 @@ void TemplateFiller::checkPreviewImages()
     }
 }
 
+QStringList TemplateFiller::findPreviousTemplatePath() const
+{
+    QStringList templatePaths;
+    // TODO from the parent folder for m_workingDir, will browse all folder
+    return templatePaths;
+}
+
 int TemplateFiller::_getIndCol(
         const QHash<QString, int> &fieldId_index
         , const QStringList &possibleValues) const

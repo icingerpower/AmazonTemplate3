@@ -21,6 +21,26 @@ AttributePossibleMissingTable::AttributePossibleMissingTable(
     _loadFromFile();
 }
 
+bool AttributePossibleMissingTable::contains(
+        const QString &marketplaceId
+        , const QString &countryCode
+        , const QString &langCode
+        , const QString &attrId) const
+{
+    for (const auto &row : std::as_const(m_listOfStringList))
+    {
+        if (row.size() >= 4 &&
+            row[0] == marketplaceId &&
+            row[1] == countryCode &&
+            row[2] == langCode &&
+            row[3] == attrId)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 void AttributePossibleMissingTable::recordAttribute(
         const QString &marketplaceId,
         const QString &countryCode,
@@ -28,13 +48,16 @@ void AttributePossibleMissingTable::recordAttribute(
         const QString &attrId,
         const QStringList &possibleValues)
 {
-    QStringList newRow;
-    newRow << marketplaceId << countryCode << langCode << attrId << possibleValues.join(";");
+    if (!contains(marketplaceId, countryCode, langCode, attrId))
+    {
+        QStringList newRow;
+        newRow << marketplaceId << countryCode << langCode << attrId << possibleValues.join(";");
 
-    beginInsertRows(QModelIndex{}, 0, 0);
-    m_listOfStringList.insert(0, newRow);
-    _saveInFile();
-    endInsertRows();
+        beginInsertRows(QModelIndex{}, 0, 0);
+        m_listOfStringList.insert(0, newRow);
+        _saveInFile();
+        endInsertRows();
+    }
 }
 
 QVariant AttributePossibleMissingTable::headerData(

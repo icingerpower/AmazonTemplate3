@@ -22,6 +22,28 @@ AttributeValueReplacedTable::AttributeValueReplacedTable(
     _loadFromFile();
 }
 
+bool AttributeValueReplacedTable::contains(
+        const QString &marketplaceId
+        , const QString &countryCode
+        , const QString &langCode
+        , const QString &attrId
+        , const QString &valueFrom) const
+{
+    for (const auto &row : std::as_const(m_listOfStringList))
+    {
+        if (row.size() >= 5 &&
+            row[0] == marketplaceId &&
+            row[1] == countryCode &&
+            row[2] == langCode &&
+            row[3] == attrId &&
+            row[4] == valueFrom)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 void AttributeValueReplacedTable::recordAttribute(
         const QString &marketplaceId,
         const QString &countryCode,
@@ -30,13 +52,16 @@ void AttributeValueReplacedTable::recordAttribute(
         const QString &valueFrom,
         const QString &valueTo)
 {
-    QStringList newRow;
-    newRow << marketplaceId << countryCode << langCode << attrId << valueFrom << valueTo;
+    if (!contains(marketplaceId, countryCode, langCode, attrId, valueFrom))
+    {
+        QStringList newRow;
+        newRow << marketplaceId << countryCode << langCode << attrId << valueFrom << valueTo;
 
-    beginInsertRows(QModelIndex{}, 0, 0);
-    m_listOfStringList.insert(0, newRow);
-    _saveInFile();
-    endInsertRows();
+        beginInsertRows(QModelIndex{}, 0, 0);
+        m_listOfStringList.insert(0, newRow);
+        _saveInFile();
+        endInsertRows();
+    }
 }
 
 QVariant AttributeValueReplacedTable::headerData(

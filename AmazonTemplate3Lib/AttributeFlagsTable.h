@@ -18,6 +18,7 @@ public:
             const QString &workingDirectory, QObject *parent = nullptr);
 
     void recordAttribute(const QHash<QString, QString> ids, Attribute::Flag flag);
+    int getPosAttr(const QHash<QString, QString> &ids) const;
 
     // Header:
     QVariant headerData(

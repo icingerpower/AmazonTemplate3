@@ -19,36 +19,107 @@ AttributeFlagsTable::AttributeFlagsTable(
     }
 }
 
+int AttributeFlagsTable::getPosAttr(const QHash<QString, QString> &ids) const
+{
+    int rowIdx = 0;
+    for (const auto &variantList : std::as_const(m_listOfVariantList))
+    {
+        bool compatible = true;
+        bool hasAtLeastOneMatch = false;
+
+        for (int i=0; i<m_indFirstFlag; ++i)
+        {
+            const auto &colName = m_colNames[i];
+            const QString &val = variantList[i].toString();
+            
+            if (ids.contains(colName))
+            {
+                if (!val.isEmpty())
+                {
+                    if (val != ids[colName])
+                    {
+                        compatible = false;
+                        break;
+                    }
+                    else
+                    {
+                        hasAtLeastOneMatch = true;
+                    }
+                }
+            }
+        }
+        
+        if (compatible && hasAtLeastOneMatch)
+        {
+            return rowIdx;
+        }
+        rowIdx++;
+    }
+    return -1;
+}
+
 void AttributeFlagsTable::recordAttribute(
         const QHash<QString, QString> ids, Attribute::Flag flag)
 {
-    QVariantList variantList;
-    for (int i=0; i<m_indFirstFlag; ++i)
+    int pos = getPosAttr(ids);
+    if (pos >= 0)
     {
-        const auto &colName = m_colNames[i];
-        if (ids.contains(colName))
+        for (int i=0; i<m_indFirstFlag; ++i)
         {
-            variantList << ids[colName];
+            const auto &colName = m_colNames[i];
+            if (ids.contains(colName))
+            {
+                QModelIndex idx = index(pos, i);
+                if (data(idx).toString().isEmpty())
+                {
+                    setData(idx, ids[colName]);
+                }
+            }
         }
-        else
+
+        /* // We don't update flags for now
+        for (int i=m_indFirstFlag; i<m_colNames.size(); ++i)
         {
-            variantList << QString{};
+             QString flagName = m_colNames[i];
+             Attribute::Flag curFlag = Attribute::STRING_FLAG.value(flagName);
+             if ((flag & curFlag) == curFlag)
+             {
+                 QModelIndex idx = index(pos, i);
+                 if (!data(idx).toBool())
+                 {
+                    setData(idx, true);
+                 }
+             }
         }
+        //*/
     }
-    for (int i=m_indFirstFlag; i<m_colNames.size(); ++i)
+    else
     {
-        for (auto it = Attribute::STRING_FLAG.begin();
-             it != Attribute::STRING_FLAG.end(); ++it)
+        QVariantList variantList;
+        for (int i=0; i<m_indFirstFlag; ++i)
         {
-            Attribute::Flag curFlag = it.value();
+            const auto &colName = m_colNames[i];
+            if (ids.contains(colName))
+            {
+                variantList << ids[colName];
+            }
+            else
+            {
+                variantList << QString{};
+            }
+        }
+        for (int i=m_indFirstFlag; i<m_colNames.size(); ++i)
+        {
+            QString flagName = m_colNames[i];
+            Attribute::Flag curFlag = Attribute::STRING_FLAG.value(flagName);
             bool contains = (flag & curFlag) == curFlag;
             variantList << contains;
         }
+        beginInsertRows(QModelIndex{}, 0, 0);
+        m_listOfVariantList.insert(0, variantList);
+        _saveInFile();
+        endInsertRows();
     }
-    beginInsertRows(QModelIndex{}, 0, 0);
-    m_listOfVariantList.insert(0, variantList);
-    _saveInFile();
-    endInsertRows();
 }
 
 QVariant AttributeFlagsTable::headerData(

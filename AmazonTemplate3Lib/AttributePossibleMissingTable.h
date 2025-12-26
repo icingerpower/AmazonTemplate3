@@ -11,6 +11,10 @@ class AttributePossibleMissingTable : public QAbstractTableModel
 public:
     explicit AttributePossibleMissingTable(
             const QString &workingDirectory, QObject *parent = nullptr);
+    bool contains(const QString &marketplaceId,
+                           const QString &countryCode,
+                           const QString &langCode,
+                           const QString &attrId) const;
 
     void recordAttribute(const QString &marketplaceId,
                          const QString &countryCode,

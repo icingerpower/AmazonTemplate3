@@ -11,6 +11,11 @@ class AttributeValueReplacedTable : public QAbstractTableModel
 public:
     explicit AttributeValueReplacedTable(
             const QString &workingDirectory, QObject *parent = nullptr);
+    bool contains(const QString &marketplaceId,
+                  const QString &countryCode,
+                  const QString &langCode,
+                  const QString &attrId,
+                  const QString &valueFrom) const;
 
     void recordAttribute(const QString &marketplaceId,
                          const QString &countryCode,
