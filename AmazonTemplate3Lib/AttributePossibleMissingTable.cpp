@@ -3,35 +3,33 @@
 #include <QTextStream>
 #include <algorithm>
 
-#include "AttributeValueReplacedTable.h"
+#include "AttributePossibleMissingTable.h"
 
-const QStringList AttributeValueReplacedTable::HEADERS{
+const QStringList AttributePossibleMissingTable::HEADERS{
     QObject::tr("marketplace")
     , QObject::tr("country")
     , QObject::tr("lang")
     , QObject::tr("attribute")
-    , QObject::tr("from")
-    , QObject::tr("to")
+    , QObject::tr("possible values")
 };
 
-AttributeValueReplacedTable::AttributeValueReplacedTable(
+AttributePossibleMissingTable::AttributePossibleMissingTable(
         const QString &workingDirectory, QObject *parent)
     : QAbstractTableModel(parent)
 {
-    m_filePath = QDir{workingDirectory}.absoluteFilePath("attributeReplacement.csv");
+    m_filePath = QDir{workingDirectory}.absoluteFilePath("attributePossibleMissing.csv");
     _loadFromFile();
 }
 
-void AttributeValueReplacedTable::recordAttribute(
+void AttributePossibleMissingTable::recordAttribute(
         const QString &marketplaceId,
         const QString &countryCode,
         const QString &langCode,
         const QString &attrId,
-        const QString &valueFrom,
-        const QString &valueTo)
+        const QStringList &possibleValues)
 {
     QStringList newRow;
-    newRow << marketplaceId << countryCode << langCode << attrId << valueFrom << valueTo;
+    newRow << marketplaceId << countryCode << langCode << attrId << possibleValues.join(";");
 
     beginInsertRows(QModelIndex{}, 0, 0);
     m_listOfStringList.insert(0, newRow);
@@ -39,7 +37,7 @@ void AttributeValueReplacedTable::recordAttribute(
     endInsertRows();
 }
 
-QVariant AttributeValueReplacedTable::headerData(
+QVariant AttributePossibleMissingTable::headerData(
         int section, Qt::Orientation orientation, int role) const
 {
     if (orientation == Qt::Horizontal && role == Qt::DisplayRole)
@@ -52,17 +50,17 @@ QVariant AttributeValueReplacedTable::headerData(
     return QVariant{};
 }
 
-int AttributeValueReplacedTable::rowCount(const QModelIndex &) const
+int AttributePossibleMissingTable::rowCount(const QModelIndex &) const
 {
     return m_listOfStringList.size();
 }
 
-int AttributeValueReplacedTable::columnCount(const QModelIndex &) const
+int AttributePossibleMissingTable::columnCount(const QModelIndex &) const
 {
     return HEADERS.size();
 }
 
-QVariant AttributeValueReplacedTable::data(const QModelIndex &index, int role) const
+QVariant AttributePossibleMissingTable::data(const QModelIndex &index, int role) const
 {
     if (role == Qt::EditRole || role == Qt::DisplayRole)
     {
@@ -75,7 +73,7 @@ QVariant AttributeValueReplacedTable::data(const QModelIndex &index, int role) c
     return QVariant{};
 }
 
-bool AttributeValueReplacedTable::setData(
+bool AttributePossibleMissingTable::setData(
         const QModelIndex &index, const QVariant &value, int role)
 {
     if (data(index, role) != value)
@@ -92,35 +90,25 @@ bool AttributeValueReplacedTable::setData(
     return false;
 }
 
-Qt::ItemFlags AttributeValueReplacedTable::flags(const QModelIndex &) const
+Qt::ItemFlags AttributePossibleMissingTable::flags(const QModelIndex &) const
 {
     return Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsEditable;
 }
 
-void AttributeValueReplacedTable::_loadFromFile()
+void AttributePossibleMissingTable::_loadFromFile()
 {
     QFile file{m_filePath};
     if (file.open(QFile::ReadOnly))
     {
         QTextStream stream{&file};
         const auto &lines = stream.readAll().split("\n");
-        // Skip header if needed or verify it. Implementation typically just reads data.
-        // Assuming file starts with headers, we skip line 0.
-        // However, AttributeFlagsTable logic was complex with mapping. Here headers are static.
-        // We will assume first line is header and skip it, then read rest.
         
         if (!lines.isEmpty())
         {
-            // Verify headers/format or just skip first line if it matches HEADERS join
-            // For simplicity and robustness like existing code often does, we iterate from 1.
+            // Skip first line (header)
             for (int i=1; i<lines.size(); ++i)
             {
                 if (lines[i].trimmed().isEmpty()) continue;
-                
-                // Use CsvReader logic or manual split? 
-                // AttributeFlagsTable used split(COL_SEP). COL_SEP is likely defined in CsvReader.h or utils.cmake defines it?
-                // The user code showed `add_definitions(-DCOL_SEP=",")` in CMakeLists.txt.
-                // So we can use COL_SEP.
                 
                 const auto &elements = lines[i].split(COL_SEP);
                 if (elements.size() == HEADERS.size())
@@ -134,7 +122,7 @@ void AttributeValueReplacedTable::_loadFromFile()
     }
 }
 
-void AttributeValueReplacedTable::_saveInFile()
+void AttributePossibleMissingTable::_saveInFile()
 {
     QFile file{m_filePath};
     if (file.open(QFile::WriteOnly))

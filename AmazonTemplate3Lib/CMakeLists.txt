@@ -71,6 +71,8 @@ add_library(AmazonTemplate3Lib STATIC
   AttributeFlagsTable.cpp
   AttributeValueReplacedTable.h
   AttributeValueReplacedTable.cpp
+  AttributePossibleMissingTable.h
+  AttributePossibleMissingTable.cpp
 )
 
 target_link_libraries(AmazonTemplate3Lib PRIVATE
