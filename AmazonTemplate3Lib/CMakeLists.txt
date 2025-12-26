@@ -70,11 +70,14 @@ target_link_libraries(AmazonTemplate3Lib PRIVATE
     Qt${QT_VERSION_MAJOR}::Gui
     Qt${QT_VERSION_MAJOR}::Network
     Qt${QT_VERSION_MAJOR}::Core
+    PUBLIC
     QXlsx::QXlsx
     QCoro::Network
 )
 
 target_compile_definitions(AmazonTemplate3Lib PRIVATE AMAZONTEMPLATE3LIB_LIBRARY)
+
+target_include_directories(AmazonTemplate3Lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Library variant for unit tests (exposes protected hooks)
 add_library(AmazonTemplate3Lib_Tests STATIC
