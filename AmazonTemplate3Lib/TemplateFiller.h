@@ -3,17 +3,24 @@
 
 #include <QString>
 #include <QStringList>
+#include <QDir>
 
+#include <xlsxdocument.h>
 
 class TemplateFiller
 {
 public:
+    TemplateFiller(const QString &templateFromPath
+                      , const QStringList &templateToPaths);
     struct AttributeFound{
         QString id;
         QString marketplaceId;
         bool isAiGuessed;
     };
-    static TemplateFiller *instance();
+    enum VersionAmz{
+        V01
+        , V02
+    };
     void setTemplates(const QString &templateFromPath
                       , const QStringList &templateToPaths);
     void checkParentSkus(); // TODO raise exeption
@@ -34,7 +41,10 @@ public:
             const QStringList &previousTemplatePaths) const;
 
 private:
-    TemplateFiller();
+    QHash<QString, QHash<QString, QString>> m_countryCode_langCode_keywords;
+    QHash<QString, QHash<QString, QHash<QString, QString>>> m_skuPattern_countryCode_langCode_keywords;
+    QDir m_workingDir;
+    QDir m_workingDirImage;
     QString m_templateFromPath;
     QStringList m_templateToPaths;
     QString m_langCodeFrom;
@@ -42,6 +52,17 @@ private:
     QString _getCountryCode(const QString &templateFilePath) const;
     QString _getLangCode(const QString &templateFilePath) const;
     QString _getLangCodeFromText(const QString &langInfos) const;
+    void _selectTemplateSheet(QXlsx::Document &doc) const;
+    QHash<QString, QSet<QString> > _readKeywords(const QStringList &filePaths);
+    TemplateFiller::VersionAmz _getDocumentVersion(QXlsx::Document &document) const;
+    int _getRowFieldId(VersionAmz version) const;
+    QHash<QString, int> _get_fieldId_index(QXlsx::Document &doc) const;
+    void _formatFieldId(QString &fieldId) const;
+    int _getIndCol(const QHash<QString, int> &fieldId_index
+                   , const QStringList &possibleValues) const;
+    int _getIndColSku(const QHash<QString, int> &fieldId_index) const;
+    int _getIndColSkuParent(const QHash<QString, int> &fieldId_index) const;
+    int _getIndColColorName(const QHash<QString, int> &fieldId_index) const;
 };
 
 #endif // TEMPLATEFILLER_H

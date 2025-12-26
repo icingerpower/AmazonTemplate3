@@ -3,12 +3,15 @@
 
 #include <QSet>
 #include <QString>
+#include <QCoro/QCoroTask>
+#include <QCoro/QCoroSignal>
+#include <QCoro/QCoroCore>
 
 class MandatoryAttributesManager
 {
 public:
     static MandatoryAttributesManager *instance();
-    void load(
+    QCoro::Task<void> load(
             const QString &settingPath
             , const QString &productType
             , const QSet<QString> &curTemplateFieldIds

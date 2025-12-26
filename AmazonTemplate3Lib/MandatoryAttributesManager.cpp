@@ -10,7 +10,7 @@ MandatoryAttributesManager *MandatoryAttributesManager::instance()
     return &instance;
 }
 
-void MandatoryAttributesManager::load(
+QCoro::Task<void> MandatoryAttributesManager::load(
         const QString &settingPath,
         const QString &productType,
         const QSet<QString> &curTemplateFieldIds,
@@ -51,7 +51,7 @@ void MandatoryAttributesManager::load(
     if (!m_mandatoryIdsPreviousTemplates.isEmpty())
     {
         _saveInSettings();
-        return;
+        co_return;
     }
 
     // Classify only attributes that are NOT already mandatory in current template.
@@ -66,7 +66,7 @@ void MandatoryAttributesManager::load(
     if (toClassify.isEmpty())
     {
         _saveInSettings();
-        return;
+        co_return;
     }
 
     auto normalizeYesNo = [](const QString& s) -> QString {
@@ -88,6 +88,11 @@ void MandatoryAttributesManager::load(
 
     // Track undecided IDs after phase 1.
     // Use shared_ptr to keep it alive until lambdas execute.
+    // NOTE: In coroutine, local stack variables are preserved across co_await if captured by value or reference in a way that respects lifetime?
+    // Actually, in QCoro, the coroutine frame preserves locals. But we are passing lambdas to OpenAi2 which might execute asynchronously.
+    // However, OpenAi2 is processing them. The callbacks (apply/validate) are stored in Step object.
+    // Since Step object is kept alive by OpenAi2 until finished, and we await it, it's safe if we capture properly.
+    // Using shared_ptr for undecided is safe and good practice here.
     auto undecided = QSharedPointer<QSet<QString>>::create();
 
     // ------------------------
@@ -101,7 +106,6 @@ void MandatoryAttributesManager::load(
         auto step = QSharedPointer<OpenAi2::StepMultipleAsk>::create();
         step->id   = attrId;
         step->name = "Mandatory attribute classification (3x unanimous)";
-        step->cachingKey = QString("mandatory_attr_v1__%1__%2").arg(productTypeLower, attrId);
 
         step->neededReplies = 3;
         step->maxRetries    = 3;
@@ -137,89 +141,65 @@ void MandatoryAttributesManager::load(
         phase1.push_back(step);
     }
 
-    // You need OpenAi2 to provide a completion callback.
-    // If you do NOT have this yet, implement an overload:
-    // askGptMultipleTime(steps, model, onAllSuccess, onAllFailure)
-    //
-    // Assuming you have it (or you add it), use:
-    auto onPhase1Done = [this, productTypeLower, buildPrompt, normalizeYesNo, undecided]() {
-        if (undecided->isEmpty())
-        {
-            _saveInSettings();
-            return;
-        }
+    co_await OpenAi2::instance()->askGptMultipleTimeCoro(phase1, "gpt-5-mini");
 
-        // ------------------------
-        // Phase 2 (gpt-5.2): 5x, majority vote
-        // ------------------------
-        QList<QSharedPointer<OpenAi2::StepMultipleAsk>> phase2;
-        phase2.reserve(undecided->size());
 
-        for (const QString& attrId : *undecided)
-        {
-            auto step = QSharedPointer<OpenAi2::StepMultipleAsk>::create();
-            step->id   = attrId;
-            step->name = "Mandatory attribute classification (5x majority)";
-            step->cachingKey = QString("mandatory_attr_v2__%1__%2").arg(productTypeLower, attrId);
+    if (undecided->isEmpty())
+    {
+        _saveInSettings();
+        co_return;
+    }
 
-            step->neededReplies = 5;
-            step->maxRetries    = 3;
+    // ------------------------
+    // Phase 2 (gpt-5.2): 5x, majority vote
+    // ------------------------
+    QList<QSharedPointer<OpenAi2::StepMultipleAsk>> phase2;
+    phase2.reserve(undecided->size());
 
-            step->getPrompt = [buildPrompt, attrId](int /*nAttempts*/) -> QString {
-                return buildPrompt(attrId);
-            };
+    for (const QString& attrId : *undecided)
+    {
+        auto step = QSharedPointer<OpenAi2::StepMultipleAsk>::create();
+        step->id   = attrId;
+        step->name = "Mandatory attribute classification (5x majority)";
 
-            step->validate = [normalizeYesNo](const QString& gptReply, const QString& /*lastWhy*/) -> bool {
-                const QString r = normalizeYesNo(gptReply);
-                return (r == "yes" || r == "no");
-            };
+        step->neededReplies = 5;
+        step->maxRetries    = 3;
 
-            step->chooseBest = OpenAi2::CHOOSE_MOST_FREQUENT;
-            step->apply = [this, attrId, normalizeYesNo](const QString& bestReply) {
-                const QString r = normalizeYesNo(bestReply);
-                if (r == "yes")
-                {
-                    m_idsNonMandatoryAddedByAi.insert(attrId);
-                    m_mandatoryIdsCurTemplates.insert(attrId);
-                }
-                else if (r == "no")
-                {
-                    m_mandatoryIdsFileRemovedAi.insert(attrId);
-                }
-            };
-
-            phase2.push_back(step);
-        }
-
-        // If you have completion callback for phase2, save after it finishes.
-        auto onPhase2Done = [this]() {
-            _saveInSettings();
+        step->getPrompt = [buildPrompt, attrId](int /*nAttempts*/) -> QString {
+            return buildPrompt(attrId);
         };
 
-        // Replace this with your actual overload (see note above).
-        // OpenAi2::instance()->askGptMultipleTime(phase2, "gpt-5.2", onPhase2Done, onPhase2Done);
+        step->validate = [normalizeYesNo](const QString& gptReply, const QString& /*lastWhy*/) -> bool {
+            const QString r = normalizeYesNo(gptReply);
+            return (r == "yes" || r == "no");
+        };
 
-        OpenAi2::instance()->askGptMultipleTime(phase2, "gpt-5.2");
-        // If you don't have a completion hook yet, saving here will likely happen too early.
-        // So: strongly prefer adding the callback and saving in onPhase2Done().
-        _saveInSettings();
-    };
+        step->chooseBest = OpenAi2::CHOOSE_MOST_FREQUENT;
+        step->apply = [this, attrId, normalizeYesNo](const QString& bestReply) {
+            const QString r = normalizeYesNo(bestReply);
+            if (r == "yes")
+            {
+                m_idsNonMandatoryAddedByAi.insert(attrId);
+                m_mandatoryIdsCurTemplates.insert(attrId);
+            }
+            else if (r == "no")
+            {
+                m_mandatoryIdsFileRemovedAi.insert(attrId);
+            }
+        };
 
-    // Replace this with your actual overload (see note above).
-    // OpenAi2::instance()->askGptMultipleTime(phase1, "gpt-5-mini", onPhase1Done, onPhase1Done);
+        phase2.push_back(step);
+    }
 
-    OpenAi2::instance()->askGptMultipleTime(phase1, "gpt-5-mini");
-    // If you don't have completion hook yet, you cannot safely chain phase 2 here.
-    // You MUST add a completion callback in OpenAi2 for this to be correct.
+    co_await OpenAi2::instance()->askGptMultipleTimeCoro(phase2, "gpt-5.2");
+
     _saveInSettings();
-
-    Q_UNUSED(onPhase1Done);
 }
-
 
 QSet<QString> MandatoryAttributesManager::getMandatoryIds() const
 {
-    auto ids = m_mandatoryIdsPreviousTemplates.isEmpty() ? m_mandatoryIdsCurTemplates : m_mandatoryIdsPreviousTemplates;
+    auto ids = m_mandatoryIdsPreviousTemplates.isEmpty()
+            ? m_mandatoryIdsCurTemplates : m_mandatoryIdsPreviousTemplates;
     if (m_mandatoryIdsPreviousTemplates.isEmpty())
     {
         ids.subtract(m_mandatoryIdsFileRemovedAi);

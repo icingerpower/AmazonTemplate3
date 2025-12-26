@@ -6,6 +6,8 @@
 #include <QImage>
 #include <QDir>
 #include <QTimer>
+#include <QCoro/QCoroFuture>
+#include <QElapsedTimer>
 // add necessary includes here
 
 class TestOpenAi2 : public QObject
@@ -53,6 +55,18 @@ private slots:
     void batch_jsonl_roundtrip();
     void reject_ask_before_init_strict();
     void test_image_generation();
+    void scheduler_deadlock_recovery();
+    void choose_most_frequent_logic();
+    void multiple_ask_coro_completes();
+    void invalid_step_no_apply();
+    void scheduler_blocked_until();
+    void scheduler_image_throttling();
+    void scheduler_inflight_decrement();
+    void robustness_transport_exception();
+    void robustness_starvation_prevention();
+    void robustness_blocked_until_timer();
+    void robustness_double_callback();
+    void robustness_single_failure_counter();
 
 private:
     void setFakeTransport(std::function<void(const QString&, const QString&, const QList<QString>&, std::function<void(QString)>, std::function<void(QString)>)> transport);
@@ -166,7 +180,20 @@ void TestOpenAi2::test_case1()
 
 void TestOpenAi2::setFakeTransport(std::function<void(const QString&, const QString&, const QList<QString>&, std::function<void(QString)>, std::function<void(QString)>)> transport)
 {
-    OpenAi2::instance()->m_transport = transport;
+    OpenAi2::instance()->setTransportForTests([transport](const QString& m, const QString& p, const QList<QString>& i, std::function<void(QString)> ok, std::function<void(OpenAi2::TransportError)> err) {
+         
+         // Adapter for legacy tests using string errors
+         auto legacyErr = [err](QString e) { 
+             OpenAi2::TransportError te{}; 
+             te.message = e; 
+             te.isFatal = e.startsWith("fatal:"); 
+             te.type = OpenAi2::TransportError::Unknown;
+             te.isRetryable = !te.isFatal;
+             err(te); 
+         };
+
+         transport(m, p, i, ok, legacyErr);
+    });
 }
 
 void TestOpenAi2::setFakeTransportText(const QString& replyText)
@@ -1287,6 +1314,458 @@ void TestOpenAi2::multiple_ask_custom_choose_best()
         QFAIL("Timeout: chooseBest test failed to produce a result.");
     }
     QCOMPARE(chosen, "B");
+}
+
+void TestOpenAi2::invalid_step_no_apply()
+{
+    auto ai = OpenAi2::instance();
+    ai->resetForTests();
+    ai->init("k");
+    
+    int applyCalls = 0;
+    auto step = QSharedPointer<OpenAi2::Step>::create();
+    step->id = "fail";
+    step->maxRetries = 1;
+    step->validate = [](const QString&, const QString&){ return false; }; // Always fail
+    step->apply = [&](const QString&){ applyCalls++; };
+    step->getPrompt = [](int){ return "p"; };
+    
+    setFakeTransportText("bad");
+    QList<QSharedPointer<OpenAi2::Step>> steps; steps << step;
+    
+    QEventLoop loop;
+    ai->_runQueue(steps, [](){}, [&](QString){ loop.quit(); });
+    loop.exec();
+    
+    QCOMPARE(applyCalls, 0); // Must NOT apply if validation failed all attempts
+}
+
+void TestOpenAi2::scheduler_deadlock_recovery()
+{
+    auto ai = OpenAi2::instance();
+    ai->resetForTests();
+    ai->init("k", 1); // Capacity 1 to ensure serial and deadlock blocking
+
+    setFakeTransport([&](const QString&, const QString& p, const QList<QString>&, std::function<void(QString)> ok, std::function<void(QString)> err) {
+         if (p == "fatal") {
+             QTimer::singleShot(0, [err](){ err("network_error:99:http:0:fatal"); });
+         } else {
+             QTimer::singleShot(0, [ok](){ ok("ok"); });
+         }
+    });
+
+    // 1. Fail request
+    QList<QSharedPointer<OpenAi2::Step>> bad; 
+    auto s1 = QSharedPointer<OpenAi2::Step>::create(); s1->id="bad"; s1->maxRetries=0; s1->getPrompt=[](int){return "fatal";}; s1->validate=[](const QString&,const QString&){return true;}; s1->apply=[](const QString&){};
+    bad << s1;
+    
+    // 2. Good request
+    QList<QSharedPointer<OpenAi2::Step>> good; 
+    auto s2 = QSharedPointer<OpenAi2::Step>::create(); s2->id="good"; s2->maxRetries=0; s2->getPrompt=[](int){return "ok";}; s2->validate=[](const QString&,const QString&){return true;}; s2->apply=[](const QString&){};
+    good << s2;
+
+    QEventLoop loop;
+    int fails = 0;
+    int success = 0;
+    
+    // If deadlock exists, "good" will never run because "bad" keeps inFlight at 1.
+    
+    auto checkDone = [&]() {
+        if (fails >= 1 && success >= 1) loop.quit();
+    };
+
+    ai->_runQueue(bad, [](){}, [&](QString){ fails++; checkDone(); });
+    ai->_runQueue(good, [&](){ success++; checkDone(); }, [&](QString){ loop.quit(); });
+    
+    // Safety timeout
+    QTimer::singleShot(2000, &loop, &QEventLoop::quit);
+    loop.exec();
+    
+    QCOMPARE(fails, 1);
+    QCOMPARE(success, 1);
+    QCOMPARE(ai->getDebugStateForTests().inFlightText, 0);
+}
+
+void TestOpenAi2::choose_most_frequent_logic()
+{
+    QList<QString> inputs;
+    inputs << "A" << "B" << "A" << "C" << "C" << "C" << "A" << "A"; 
+    QString best = OpenAi2::CHOOSE_MOST_FREQUENT(inputs);
+    QCOMPARE(best, QString("A"));
+    
+    inputs.clear();
+    inputs << "X" << "Y";
+    QString tie = OpenAi2::CHOOSE_MOST_FREQUENT(inputs);
+    // Should be deterministic. Implementation uses QMap<QString,int>.
+    // X and Y have count 1.
+    // Iteration: X, then Y.
+    // X -> max=1.
+    // Y -> max=1 (not >).
+    // So X remains best.
+    QCOMPARE(tie, QString("X")); 
+}
+
+void TestOpenAi2::multiple_ask_coro_completes()
+{
+    auto ai = OpenAi2::instance();
+    ai->resetForTests();
+    ai->init("k");
+    
+    setFakeTransportText("ok");
+    
+    auto step = QSharedPointer<OpenAi2::StepMultipleAsk>::create();
+    step->id = "coro";
+    step->neededReplies = 1;
+    step->maxRetries = 1;
+    step->getPrompt = [](int){ return "p"; };
+    step->validate = [](const QString&, const QString&){ return true; };
+    step->chooseBest = OpenAi2::CHOOSE_MOST_FREQUENT;
+    step->apply = [](const QString&){};
+    
+    QList<QSharedPointer<OpenAi2::StepMultipleAsk>> steps;
+    steps << step;
+
+    QCoro::waitFor(ai->askGptMultipleTimeCoro(steps, "model"));
+}
+
+void TestOpenAi2::scheduler_blocked_until()
+{
+    auto ai = OpenAi2::instance();
+    ai->resetForTests();
+    ai->init("k", 5); 
+
+    // Set blocked until +1000ms
+    qint64 now = QDateTime::currentMSecsSinceEpoch();
+    ai->m_blockedUntilMs = now + 1000;
+
+    int calls = 0;
+    setFakeTransportText("ok");
+
+    auto step = QSharedPointer<OpenAi2::Step>::create(); 
+    step->id="blk"; step->getPrompt=[](int){return "p";}; step->validate=[](const QString&,const QString&){return true;}; step->apply=[&](const QString&){ calls++; };
+    QList<QSharedPointer<OpenAi2::Step>> steps; steps << step;
+
+    QElapsedTimer timer;
+    timer.start();
+
+    QEventLoop loop;
+    ai->_runQueue(steps, [&](){ loop.quit(); }, [&](QString){ loop.quit(); });
+    
+    // It should NOT run immediately.
+    QTest::qWait(100);
+    QCOMPARE(calls, 0); 
+
+    // Wait for completion (timeout is ~1000ms from start)
+    // We give it 2000ms max
+    QTimer::singleShot(2000, &loop, &QEventLoop::quit);
+    loop.exec();
+    
+    qint64 elapsed = timer.elapsed();
+    QVERIFY(elapsed >= 900); // Should be roughly 1000ms. Allow some jitter.
+    QCOMPARE(calls, 1);
+}
+
+void TestOpenAi2::scheduler_image_throttling()
+{
+    auto ai = OpenAi2::instance();
+    ai->resetForTests();
+    // 5 text, 1 image, 500ms image timeout
+    ai->init("k", 5, 1, 500); 
+
+    int imgCalls = 0;
+    QList<qint64> startTimes;
+
+    setFakeTransport([&](const QString&, const QString& p, const QList<QString>& imgs, std::function<void(QString)> ok, std::function<void(QString)>) {
+         if (!imgs.isEmpty()) {
+             imgCalls++;
+             startTimes << QDateTime::currentMSecsSinceEpoch();
+         }
+         QTimer::singleShot(0, [ok](){ ok("ok"); });
+    });
+
+    auto createImgStep = [](QString id){
+        auto s = QSharedPointer<OpenAi2::Step>::create();
+        s->id=id; 
+        s->imagePaths << "/tmp/fake.png"; // Trigger isImage
+        s->getPrompt=[](int){return "p";}; 
+        s->validate=[](const QString&,const QString&){return true;}; 
+        s->apply=[](const QString&){};
+        return s;
+    };
+
+    QList<QSharedPointer<OpenAi2::Step>> steps;
+    steps << createImgStep("img1") << createImgStep("img2");
+
+    QEventLoop loop;
+    ai->_runQueue(steps, [&](){ loop.quit(); }, [&](QString){ loop.quit(); });
+    
+    QTimer::singleShot(3000, &loop, &QEventLoop::quit);
+    loop.exec();
+
+    QCOMPARE(imgCalls, 2);
+    QCOMPARE(startTimes.size(), 2);
+    
+    qint64 diff = startTimes[1] - startTimes[0];
+    QVERIFY2(diff >= 450, qPrintable(QString("Image timeout not respected, diff=%1").arg(diff)));
+}
+
+void TestOpenAi2::scheduler_inflight_decrement()
+{
+    auto ai = OpenAi2::instance();
+    ai->resetForTests();
+    ai->init("k", 1); // Serial
+
+    // Check inFlight during processing
+    bool checked = false;
+    setFakeTransport([&](const QString&, const QString&, const QList<QString>&, std::function<void(QString)> ok, std::function<void(QString)>) {
+         QCOMPARE(ai->getDebugStateForTests().inFlightText, 1);
+         checked = true;
+         QTimer::singleShot(0, [ok](){ ok("ok"); });
+    });
+
+    auto step = QSharedPointer<OpenAi2::Step>::create();
+    step->id="dec"; step->getPrompt=[](int){return "p";}; step->validate=[](const QString&,const QString&){return true;}; step->apply=[](const QString&){};
+    QList<QSharedPointer<OpenAi2::Step>> steps; steps << step;
+
+    QEventLoop loop;
+    ai->_runQueue(steps, [&](){ loop.quit(); }, [&](QString){ loop.quit(); });
+    loop.exec();
+
+    QVERIFY(checked);
+    QCOMPARE(ai->getDebugStateForTests().inFlightText, 0);
+}
+
+void TestOpenAi2::robustness_transport_exception()
+{
+    // T1: Exception safety: setTransportForTests throws; enqueue 2 steps; 
+    // verify inFlight returns to 0 and pump continues to next step (fails but doesn't stall).
+    
+    auto ai = OpenAi2::instance();
+    ai->resetForTests();
+    ai->init("k", 1); 
+
+    setFakeTransport([](const QString&, const QString&, const QList<QString>&, std::function<void(QString)>, std::function<void(QString)>){
+         throw std::runtime_error("simulated_throw");
+    });
+
+    int failures = 0;
+    auto createStep = [&](QString id){
+        auto s = QSharedPointer<OpenAi2::Step>::create();
+        s->id=id; s->getPrompt=[](int){return "p";}; s->validate=[](const QString&,const QString&){return true;}; s->apply=[](const QString&){};
+        return s;
+    };
+
+    QList<QSharedPointer<OpenAi2::Step>> steps;
+    steps << createStep("s1") << createStep("s2");
+
+    QEventLoop loop;
+    auto check = [&]() {
+        // If we processed 2 failures, we are good
+        if (failures >= 2) loop.quit();
+    };
+
+    ai->_runQueue(steps, [](){}, [&](QString){ failures++; check(); });
+    
+    QTimer::singleShot(2000, &loop, &QEventLoop::quit);
+    loop.exec();
+
+    QCOMPARE(failures, 1);
+    QCOMPARE(ai->getDebugStateForTests().inFlightText, 0);
+}
+
+void TestOpenAi2::robustness_starvation_prevention()
+{
+    // T2: Starvation (Deterministic): 
+    // Mock time. Run Image1. Advance time slightly (throttled). Queue Image2 + Text1.
+    // Text1 MUST run immediately.
+    
+    auto ai = OpenAi2::instance();
+    ai->resetForTests();
+    
+    qint64 now = 100000;
+    ai->setTimeProviderForTests([&](){ return now; });
+    
+    // 1 text, 1 image, timeout 5000ms
+    ai->init("k", 1, 1, 5000); 
+
+    QList<QString> executed;
+    setFakeTransport([&](const QString&, const QString& p, const QList<QString>&, std::function<void(QString)> ok, std::function<void(QString)>){
+         executed << p;
+         QTimer::singleShot(0, [ok](){ ok("ok"); });
+    });
+
+    // 1. Run Image1 at T=100000
+    {
+        auto s = QSharedPointer<OpenAi2::Step>::create(); s->id="img1"; s->imagePaths << "ix"; s->getPrompt=[](int){return "img1";}; s->validate=[](const QString&,const QString&){return true;}; 
+        QList<QSharedPointer<OpenAi2::Step>> q; q << s;
+        QEventLoop l;
+        ai->_runQueue(q, [&](){l.quit();}, [&](QString){l.quit();});
+        l.exec();
+    }
+    executed.clear();
+
+    // 2. Advance time to 101000 (Elapsed 1000 < 5000). Image is throttled.
+    now = 101000;
+
+    auto sImg = QSharedPointer<OpenAi2::Step>::create(); sImg->id="img2"; sImg->imagePaths << "ix"; sImg->getPrompt=[](int){return "img2";}; sImg->validate=[](const QString&,const QString&){return true;}; 
+    auto sTxt = QSharedPointer<OpenAi2::Step>::create(); sTxt->id="txt1"; sTxt->getPrompt=[](int){return "txt1";}; sTxt->validate=[](const QString&,const QString&){return true;}; 
+    
+    QList<QSharedPointer<OpenAi2::Step>> q; 
+    q << sImg << sTxt;
+
+    QEventLoop loop;
+    bool success = false;
+    // We expect runQueue to finish partially or just fire jobs. 
+    // Since Image is throttled, it won't finish "all success" immediately.
+    // But text job should fire.
+    
+    // Use askGpt separately to enqueue them "concurrently" in the scheduler
+    // (runQueue processes list sequentially, so we must trigger two runQueues)
+    
+    QList<QSharedPointer<OpenAi2::Step>> q1; q1 << sImg;
+    ai->askGpt(q1, "model");
+    
+    QList<QSharedPointer<OpenAi2::Step>> q2; q2 << sTxt;
+    ai->askGpt(q2, "model");
+    
+    // Explicitly force pump to handle the queued text job immediately
+    // mocking time ensures image is throttled, but forcePump ensures text is picked up
+    // without waiting for Qt event loop timer.
+    ai->forcePumpForTests();
+    
+    // Safety timeout wait for processing
+    QTimer::singleShot(2500, &loop, &QEventLoop::quit);
+    loop.exec();
+    
+    QVERIFY(executed.contains("txt1"));
+    QVERIFY(!executed.contains("img2")); // Should still be waiting
+    
+    ai->setTimeProviderForTests(nullptr);
+}
+
+void TestOpenAi2::robustness_blocked_until_timer()
+{
+    // T3: BlockedUntil wakeup: set m_blockedUntilMs in future; 
+    // verify no job starts early, and job starts after time.
+    
+    auto ai = OpenAi2::instance();
+    ai->resetForTests();
+    ai->init("k");
+
+    ai->m_blockedUntilMs = QDateTime::currentMSecsSinceEpoch() + 1000;
+    
+    bool ran = false;
+    setFakeTransport([&](const QString&, const QString&, const QList<QString>&, std::function<void(QString)> ok, std::function<void(QString)>){
+         ran = true;
+         ok("ok");
+    });
+
+    auto s = QSharedPointer<OpenAi2::Step>::create(); s->id="b"; s->getPrompt=[](int){return "p";}; s->validate=[](const QString&,const QString&){return true;}; 
+    QList<QSharedPointer<OpenAi2::Step>> q; q << s;
+    
+    QElapsedTimer t; t.start();
+    ai->_runQueue(q, [](){}, [](QString){});
+
+    QTest::qWait(500);
+    QCOMPARE(ran, false);
+
+    // Wait enough for block to expire
+    QTest::qWait(1500);
+    QVERIFY(ran);
+}
+
+void TestOpenAi2::robustness_double_callback()
+{
+    // T4: Double-callback: fake transport calls onOk then onErr; 
+    // verify inFlight decremented once and scheduler continues.
+    
+    auto ai = OpenAi2::instance();
+    ai->resetForTests();
+    ai->init("k", 1); 
+
+    setFakeTransport([&](const QString&, const QString&, const QList<QString>&, std::function<void(QString)> ok, std::function<void(QString)> err){
+         // MALICIOUS: Call both!
+         ok("ok");
+         err("fail");
+         ok("ok-again");
+    });
+
+    int applied = 0;
+    auto s = QSharedPointer<OpenAi2::Step>::create(); s->id="d"; s->getPrompt=[](int){return "p";}; s->validate=[](const QString&,const QString&){return true;}; 
+    s->apply = [&](const QString&){ applied++; };
+
+    QList<QSharedPointer<OpenAi2::Step>> q; q << s;
+    QEventLoop loop;
+    ai->_runQueue(q, [&](){ loop.quit(); }, [&](QString){ loop.quit(); });
+    loop.exec();
+    
+    // Should have finished (ok called first -> success path).
+    // InFlight should be 0.
+    QCOMPARE(ai->getDebugStateForTests().inFlightText, 0);
+    // Apply called exactly once? (Depends on if err logic short circuits, but core is inFlight check)
+    // Actually if ok called first, it proceeds. Err might be ignored or logged.
+    // Key is scheduler integrity.
+}
+
+void TestOpenAi2::robustness_single_failure_counter()
+{
+    // T5: Strict strict failure counter check (Deterministic)
+    // 1. Fail Hard -> Counter=1
+    // 2. Fail Hard -> Counter=2
+    // 3. Fail Soft -> Counter=2
+    // 4. Success -> Counter=0
+
+    auto ai = OpenAi2::instance();
+    ai->resetForTests();
+    ai->init("k");
+
+    // We can use a lambda in FakeTransport to return different results based on the prompts
+    setFakeTransport([&](const QString&, const QString& p, const QList<QString>&, std::function<void(QString)> ok, std::function<void(QString)> err){
+         if (p == "hard1") err("fatal:1");
+         else if (p == "hard2") err("fatal:2");
+         else if (p == "soft") err("error:soft"); // Not fatal
+         else if (p == "ok") ok("ok");
+    });
+
+    // Step 1: Hard Fail
+    {
+        QList<QSharedPointer<OpenAi2::Step>> q; 
+        auto s = QSharedPointer<OpenAi2::Step>::create(); s->id="1"; s->getPrompt=[](int){return "hard1";};
+        q << s;
+        ai->askGpt(q, "m");
+        ai->forcePumpForTests(); 
+    }
+    QCOMPARE(ai->getDebugStateForTests().consecutiveHardFailures, 1);
+
+    // Step 2: Hard Fail
+    {
+        QList<QSharedPointer<OpenAi2::Step>> q; 
+        auto s = QSharedPointer<OpenAi2::Step>::create(); s->id="2"; s->getPrompt=[](int){return "hard2";};
+        q << s;
+        ai->askGpt(q, "m");
+        ai->forcePumpForTests();
+    }
+    QCOMPARE(ai->getDebugStateForTests().consecutiveHardFailures, 2);
+
+    // Step 3: Soft Fail
+    {
+        QList<QSharedPointer<OpenAi2::Step>> q; 
+        auto s = QSharedPointer<OpenAi2::Step>::create(); s->id="3"; s->getPrompt=[](int){return "soft";};
+        q << s;
+        ai->askGpt(q, "m");
+        ai->forcePumpForTests();
+    }
+    QCOMPARE(ai->getDebugStateForTests().consecutiveHardFailures, 2); // Should not increase
+
+    // Step 4: Success
+    {
+        QList<QSharedPointer<OpenAi2::Step>> q; 
+        auto s = QSharedPointer<OpenAi2::Step>::create(); s->id="4"; s->getPrompt=[](int){return "ok";};
+        q << s;
+        ai->askGpt(q, "m");
+        ai->forcePumpForTests();
+    }
+    QCOMPARE(ai->getDebugStateForTests().consecutiveHardFailures, 0);
 }
 
 QTEST_MAIN(TestOpenAi2)

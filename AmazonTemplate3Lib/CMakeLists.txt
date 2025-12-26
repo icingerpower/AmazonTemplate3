@@ -4,7 +4,8 @@ project(AmazonTemplate3Lib LANGUAGES CXX)
 
 include(../common.cmake)
 
-include(../../common/openai/openai.cmake)
+#include(../../common/workingdirectory/workingdirectory.cmake)
+include(../../common/openai/openai2.cmake)
 
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core Gui Network)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Gui Network)
@@ -50,12 +51,19 @@ add_library(AmazonTemplate3Lib STATIC
   AmazonTemplate3Lib.cpp
   AmazonTemplate3Lib.h
   ${OPENAI_FILES}
+  #${WORKING_DIR_FILES}
   Attribute.h
   Attribute.cpp
   TemplateFiller.h
   TemplateFiller.cpp
   MandatoryAttributesManager.h
   MandatoryAttributesManager.cpp
+  TemplateExceptions.h
+  TemplateExceptions.cpp
+  FileModelSources.h
+  FileModelSources.cpp
+  FileModelToFill.h
+  FileModelToFill.cpp
 )
 
 target_link_libraries(AmazonTemplate3Lib PRIVATE
@@ -67,3 +75,31 @@ target_link_libraries(AmazonTemplate3Lib PRIVATE
 )
 
 target_compile_definitions(AmazonTemplate3Lib PRIVATE AMAZONTEMPLATE3LIB_LIBRARY)
+
+# Library variant for unit tests (exposes protected hooks)
+add_library(AmazonTemplate3Lib_Tests STATIC
+  AmazonTemplate3Lib.cpp
+  AmazonTemplate3Lib.h
+  ${OPENAI_FILES}
+  Attribute.h
+  Attribute.cpp
+  TemplateFiller.h
+  TemplateFiller.cpp
+  MandatoryAttributesManager.h
+  MandatoryAttributesManager.cpp
+  TemplateExceptions.h
+  TemplateExceptions.cpp
+)
+
+target_link_libraries(AmazonTemplate3Lib_Tests PRIVATE
+    Qt${QT_VERSION_MAJOR}::Gui
+    Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::Core
+    QXlsx::QXlsx
+    QCoro::Network
+)
+
+target_compile_definitions(AmazonTemplate3Lib_Tests PUBLIC 
+    AMAZONTEMPLATE3LIB_LIBRARY
+    OPENAI2_UNIT_TESTS
+)

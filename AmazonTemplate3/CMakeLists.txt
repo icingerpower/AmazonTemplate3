@@ -8,6 +8,7 @@ find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Network)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Network)
 
 #include(../../common/openai/openai.cmake)
+include(../../common/workingdirectory/workingdirectory.cmake)
 
 include(gui/gui.cmake)
 
@@ -16,6 +17,7 @@ set(PROJECT_SOURCES
         "../../common/types/types.h"
         "../../common/types/types.cpp"
         ${GUI_FILES}
+        ${WORKING_DIR_FILES}
     )
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)

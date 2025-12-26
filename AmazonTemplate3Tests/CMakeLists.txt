@@ -5,6 +5,7 @@ project(TestOpenAi2 LANGUAGES CXX)
 # Option to run real contract tests (requires API key)
 # Option to run real contract tests (requires API key)
 option(DO_REAL_TESTS "Run real OpenAI contract tests" OFF)
+option(OPENAI2_UNIT_TESTS "Extra methods for open AI tests" ON)
 
 if(DO_REAL_TESTS)
     add_definitions(-DDO_REAL_TESTS=1)
@@ -18,10 +19,15 @@ else()
     message(STATUS "DO_REAL_TESTS is OFF. Contract tests will be skipped.")
 endif()
 
+if(DO_REAL_TESTS)
+    add_definitions(-DOPENAI2_UNIT_TESTS=1)
+endif()
+
 enable_testing()
 
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Network Test Gui)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Network Test Gui)
+find_package(QCoro6 REQUIRED COMPONENTS Core)
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
@@ -29,7 +35,7 @@ set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(../common.cmake)
@@ -45,7 +51,7 @@ endif()
 
 add_executable(AmazonTemplate3Tests tst_testopenai2.cpp)
 
-target_link_libraries(AmazonTemplate3Tests PRIVATE AmazonTemplate3Lib)
+target_link_libraries(AmazonTemplate3Tests PRIVATE AmazonTemplate3Lib_Tests)
 target_include_directories(AmazonTemplate3Tests PRIVATE ../AmazonTemplate3Lib)
 target_include_directories(AmazonTemplate3Tests PRIVATE ../../common/openai/)
 
@@ -54,5 +60,19 @@ add_test(NAME AmazonTemplate3Tests COMMAND AmazonTemplate3Tests)
 target_link_libraries(AmazonTemplate3Tests PRIVATE
     Qt${QT_VERSION_MAJOR}::Test
     Qt${QT_VERSION_MAJOR}::Network
-    Qt${QT_VERSION_MAJOR}::Gui)
+    Qt${QT_VERSION_MAJOR}::Gui
+    QCoro6::Core)
 
+add_executable(MandatoryAttributesManagerTests tst_mandatoryattributesmanager.cpp)
+
+target_link_libraries(MandatoryAttributesManagerTests PRIVATE AmazonTemplate3Lib_Tests)
+target_include_directories(MandatoryAttributesManagerTests PRIVATE ../AmazonTemplate3Lib)
+target_include_directories(MandatoryAttributesManagerTests PRIVATE ../../common/openai/)
+
+add_test(NAME MandatoryAttributesManagerTests COMMAND MandatoryAttributesManagerTests)
+
+target_link_libraries(MandatoryAttributesManagerTests PRIVATE
+    Qt${QT_VERSION_MAJOR}::Test
+    Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::Gui
+    QCoro6::Core)
