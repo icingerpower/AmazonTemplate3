@@ -1,5 +1,34 @@
 #include "Attribute.h"
 
+const QString Attribute::AMAZON_V01{"Amazon V01"};
+const QString Attribute::AMAZON_V02{"Amazon V02"};
+const QString Attribute::TEMU_EN{"Temu"};
+const QStringList Attribute::MARKETPLACES{
+    Attribute::AMAZON_V01
+            , Attribute::AMAZON_V02
+            , Attribute::TEMU_EN};
+
+const QHash<Attribute::Flag, QString> Attribute::FLAG_STRING{
+    {ChildOnly, "ChildOnly"}
+    , {NoAI, "NoAI"}
+    , {SameValue, "SameValue"}
+    , {ChildSameValue, "ChildSameValue"}
+    , {ForCustomInstructions, "ForCustomInstructions"}
+    , {MandatoryAmazon, "MandatoryAmazon"}
+    , {MandatoryTemu, "MandatoryTemu"}
+};
+
+const QMap<QString, Attribute::Flag> Attribute::STRING_FLAG
+= [](){
+    QMap<QString, Flag> _STRING_FLAG;
+    for (auto it = FLAG_STRING.begin();
+         it != FLAG_STRING.end(); ++it)
+    {
+        _STRING_FLAG[it.value()] = it.key();
+    }
+    return _STRING_FLAG;
+}();
+
 bool Attribute::hasParentLine(const QString &marketplaceId)
 {
     if (marketplaceId.contains("amazon"))

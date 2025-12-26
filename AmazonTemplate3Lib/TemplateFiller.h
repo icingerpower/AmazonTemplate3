@@ -57,6 +57,7 @@ private:
     TemplateFiller::VersionAmz _getDocumentVersion(QXlsx::Document &document) const;
     int _getRowFieldId(VersionAmz version) const;
     QHash<QString, int> _get_fieldId_index(QXlsx::Document &doc) const;
+    QHash<QString, QSet<QString>> _get_parentSku_skus(QXlsx::Document &doc) const;
     void _formatFieldId(QString &fieldId) const;
     int _getIndCol(const QHash<QString, int> &fieldId_index
                    , const QStringList &possibleValues) const;

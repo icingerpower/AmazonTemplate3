@@ -9,14 +9,21 @@
 class Attribute
 {
 public:
+    static const QString AMAZON_V01;
+    static const QString AMAZON_V02;
+    static const QString TEMU_EN;
     enum Flag{
         ChildOnly = 1
-        , Mandatory = 2
-        , NoAI = 4
-        , SameValue = 8
-        , ChildSameValue = 16
-        , ForCustomInstructions = 32
+        , NoAI = 2
+        , SameValue = 4
+        , ChildSameValue = 8
+        , ForCustomInstructions = 16
+        , MandatoryAmazon = 32
+        , MandatoryTemu = 32
     };
+    static const QHash<Flag, QString> FLAG_STRING;
+    static const QMap<QString, Flag> STRING_FLAG;
+    static const QStringList MARKETPLACES;
     bool hasParentLine(const QString &marketplaceId);
     bool hasFlag(const QString &marketplaceId, Flag flag) const;
     bool isChoice(const QString &marketplaceId) const;
@@ -31,11 +38,12 @@ public:
                                       , const QString &fromValue) const;
 
 private:
-    QHash<QString, QSet<QString>> m_marketplaceId_ids;
+    QSet<QString> m_variousIds;
     Flag flag;
     QHash<QString, Flag> m_marketplaceId_flag;
     QHash<QString, QHash<QString, QHash<QString, QSet<QString>>>> m_marketplaceId_countryCode_langCode_possibleValues;
     QHash<QString, QHash<QString, QHash<QString, QHash<QString, QSet<QString>>>>> m_marketplaceId_countryCode_langCode_category_possibleValues;
+    QHash<QString, QHash<QString, QHash<QString, QHash<QString, QHash<QString, QString>>>>> m_marketplaceId_countryCode_langCode_category_replacedValues; // When there is an error in an amazon template, a possible value is replace by another with the right value
     QList<QSet<QString>> m_equivalences; // {{"Femme", "Women"}, {"Homme", "Men"}}
     static QHash<QString, QHash<QString, QSharedPointer<Attribute>>> marketplaceId_attributeId_attributeInfos;
 };

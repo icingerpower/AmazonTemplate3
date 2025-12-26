@@ -68,7 +68,7 @@ void TemplateFiller::checkParentSkus()
             QString skuParent{cellSkuParent->value().toString()};
             if (!lastParent.isEmpty()
                     && skuParent != lastParent
-                    && skuParent.contains(skuParent))
+                    && parentsDone.contains(skuParent))
             {
                 TemplateExceptions exception;
                 exception.setInfos(
@@ -182,7 +182,7 @@ QHash<QString, QSet<QString>> TemplateFiller::_readKeywords(const QStringList &f
 void TemplateFiller::checkPreviewImages()
 {
     const auto &imageFileInfos = m_workingDirImage.entryInfoList(
-                QStringList{"jpg"}, QDir::Files);
+                QStringList{"*.jpg"}, QDir::Files);
     QSet<QString> existingImageBaseNames;
     for (const auto &imageFileInfo : imageFileInfos)
     {
@@ -192,6 +192,7 @@ void TemplateFiller::checkPreviewImages()
     QXlsx::Document document(m_templateFromPath);
     _selectTemplateSheet(document);
     const auto &fieldId_index = _get_fieldId_index(document);
+    const auto &parentSku_skus = _get_parentSku_skus(document);
     int indColSku = _getIndColSku(fieldId_index);
     int indColSkuParent = _getIndColSkuParent(fieldId_index);
     int indColColor = _getIndColColorName(fieldId_index);
@@ -213,6 +214,11 @@ void TemplateFiller::checkPreviewImages()
         {
             continue;
         }
+        bool isParent = parentSku_skus.contains(sku);
+        if (isParent)
+        {
+            continue;
+        }
         auto cellSkuParent = document.cellAt(i+1, indColSkuParent + 1);
         QString color;
         QString skuParent;
@@ -228,14 +234,14 @@ void TemplateFiller::checkPreviewImages()
         QString skuImageBaseName;
         if (skuParent.isEmpty())
         {
-            skuImageBaseName = sku + ".jpg";
+            skuImageBaseName = sku;
         }
         else
         {
             if (!parent_color.contains(skuParent)
                     || !parent_color[skuParent].contains(color))
             {
-                skuImageBaseName = sku + ".jpg";
+                skuImageBaseName = sku;
                 parent_color[skuParent].insert(color);
             }
         }
@@ -430,6 +436,50 @@ QHash<QString, int> TemplateFiller::_get_fieldId_index(
         }
     }
     return colId_index;
+}
+
+QHash<QString, QSet<QString>> TemplateFiller::_get_parentSku_skus(
+        QXlsx::Document &doc) const
+{
+    QHash<QString, QSet<QString>> parentSku_skus;
+    const auto &fieldId_index = _get_fieldId_index(doc);
+    int indColSku = _getIndColSku(fieldId_index);
+    int indColSkuParent = _getIndColSkuParent(fieldId_index);
+
+    const auto &dim = doc.dimension();
+    int lastRow = dim.lastRow();
+    auto version = _getDocumentVersion(doc);
+    int row = _getRowFieldId(version) + 1;
+
+    for (int i=row; i<lastRow; ++i)
+    {
+        auto cellSku = doc.cellAt(i+1, indColSku + 1);
+        if (!cellSku)
+        {
+            break;
+        }
+
+        QString sku{cellSku->value().toString()};
+        if (sku.startsWith("ABC") || sku.isEmpty())
+        {
+            continue;
+        }
+
+        auto cellSkuParent = doc.cellAt(i+1, indColSkuParent + 1);
+        if (!cellSkuParent)
+        {
+            continue;
+        }
+
+        QString skuParent{cellSkuParent->value().toString()};
+        if (skuParent.isEmpty())
+        {
+            continue;
+        }
+
+        parentSku_skus[skuParent].insert(sku);
+    }
+    return parentSku_skus;
 }
 
 void TemplateFiller::_formatFieldId(QString &fieldId) const

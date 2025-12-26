@@ -6,9 +6,10 @@ include(../common.cmake)
 
 #include(../../common/workingdirectory/workingdirectory.cmake)
 include(../../common/openai/openai2.cmake)
+include(../../common/utils/utils.cmake)
 
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core Gui Network)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Gui Network)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core Widgets Network)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Widgets Network)
 
 # Compile and install QXlsx
 #sudo apt-get install libxkbcommon-dev
@@ -64,16 +65,24 @@ add_library(AmazonTemplate3Lib STATIC
   FileModelSources.cpp
   FileModelToFill.h
   FileModelToFill.cpp
+  TableInfoExtractor.h
+  TableInfoExtractor.cpp
+  AttributeFlagsTable.h
+  AttributeFlagsTable.cpp
 )
 
 target_link_libraries(AmazonTemplate3Lib PRIVATE
-    Qt${QT_VERSION_MAJOR}::Gui
+    Qt${QT_VERSION_MAJOR}::Widgets
     Qt${QT_VERSION_MAJOR}::Network
     Qt${QT_VERSION_MAJOR}::Core
     PUBLIC
     QXlsx::QXlsx
     QCoro::Network
 )
+
+add_definitions(-DCOL_SEP=",")
+add_definitions(-DSTR_TRUE="true")
+add_definitions(-DSTR_FALSE="false")
 
 target_compile_definitions(AmazonTemplate3Lib PRIVATE AMAZONTEMPLATE3LIB_LIBRARY)
 
