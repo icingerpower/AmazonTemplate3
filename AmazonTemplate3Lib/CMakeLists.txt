@@ -69,6 +69,8 @@ add_library(AmazonTemplate3Lib STATIC
   TableInfoExtractor.cpp
   AttributeFlagsTable.h
   AttributeFlagsTable.cpp
+  AttributeValueReplacedTable.h
+  AttributeValueReplacedTable.cpp
 )
 
 target_link_libraries(AmazonTemplate3Lib PRIVATE
