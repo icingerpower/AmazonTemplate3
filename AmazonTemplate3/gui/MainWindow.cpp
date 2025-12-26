@@ -1,10 +1,12 @@
 #include <QFileDialog>
+#include <QMessageBox>
 
 #include <TemplateFiller.h>
+#include <TemplateExceptions.h>
 #include <FileModelToFill.h>
 #include <FileModelSources.h>
-#include <TemplateFiller.h>
 
+#include "DialogExtractInfos.h"
 #include "MainWindow.h"
 #include "./ui_MainWindow.h"
 
@@ -14,8 +16,9 @@ MainWindow::MainWindow(QWidget *parent)
 {
     m_templateFiller = nullptr;
     ui->setupUi(this);
-    QString m_settingsKeyExtraInfos;
-    QString m_settingsKeyApi;
+    m_settingsKeyExtraInfos = "MainWindowExtraInfos";
+    m_settingsKeyApi = "MainWindowKey";
+    ui->buttonBasicControls->setEnabled(false);
     _connectSlots();
 }
 
@@ -31,6 +34,14 @@ void MainWindow::_connectSlots()
             &QPushButton::clicked,
             this,
             &MainWindow::browseSourceMain);
+    connect(ui->buttonBasicControls,
+            &QPushButton::clicked,
+            this,
+            &MainWindow::baseControls);
+    connect(ui->buttonExtractProductInfos,
+            &QPushButton::clicked,
+            this,
+            &MainWindow::extractProductInfos);
 }
 
 void MainWindow::_clearTemplateFiller()
@@ -38,6 +49,7 @@ void MainWindow::_clearTemplateFiller()
     if (m_templateFiller != nullptr)
     {
         delete m_templateFiller;
+        m_templateFiller = nullptr;
     }
 }
 
@@ -92,8 +104,8 @@ void MainWindow::browseSourceMain()
             curModelToFill->deleteLater();
             curModelSource->deleteLater();
         }
+        ui->buttonBasicControls->setEnabled(true);
     }
-    m_templateFiller = nullptr;
 }
 
 QSharedPointer<QSettings> MainWindow::settingsFolder() const
@@ -117,7 +129,6 @@ void MainWindow::_enableGenerateButtonIfValid()
 void MainWindow::_setGenerateButtonsEnabled(bool enable)
 {
     ui->buttonGenerate->setEnabled(enable);
-    ui->buttonBasicControls->setEnabled(enable);
     ui->buttonGenAiDesc->setEnabled(enable);
     ui->buttonReviewAiDesc->setEnabled(enable);
     ui->buttonDisplayPossibleValues->setEnabled(enable);
@@ -126,11 +137,27 @@ void MainWindow::_setGenerateButtonsEnabled(bool enable)
 
 void MainWindow::baseControls()
 {
-
+    try {
+        m_templateFiller->checkParentSkus();
+        m_templateFiller->checkPreviewImages();
+        m_templateFiller->checkKeywords();
+        QMessageBox::warning(
+                    this,
+                    tr("Controls done"),
+                    tr("Controls successfully done"));
+    }
+    catch (const TemplateExceptions &exception)
+    {
+        QMessageBox::warning(
+                    this,
+                    exception.title(),
+                    exception.error());
+    }
 }
 
 void MainWindow::extractProductInfos()
 {
-
+    DialogExtractInfos dialog{m_workingDir.path()};
+    dialog.exec();
 }
 
