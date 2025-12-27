@@ -1,13 +1,55 @@
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QDirIterator>
 
+#include "MandatoryAttributesManager.h"
+
+#include "AttributeEquivalentTable.h"
+#include "AttributeFlagsTable.h"
+#include "AttributePossibleMissingTable.h"
+#include "AttributeValueReplacedTable.h"
 #include "TemplateExceptions.h"
 #include "TemplateFiller.h"
+
+const QHash<QString, QString> TemplateFiller::SHEETS_MANDATORY{
+    {"Définitions des données", "Obligatoire"}
+    , {"Data Definitions", "Required"}
+    , {"Datendefinitionen", "Erforderlich"}
+    , {"Definizioni dati", "Obbligatorio"}
+    , {"Gegevensdefinities", "Verplicht"}
+    , {"Definitioner av data", "Krävs"}
+    , {"Veri Tanımları", "Zorunlu"}
+    , {"Definicje danych", "Wymagane"}
+    , {"Definiciones de datos", "Obligatorio"}
+    , {"データ定義", "必須"}
+};
+
+const QSet<QString> TemplateFiller::VALUES_MANDATORY
+    = []() -> QSet<QString>
+{
+    QSet<QString> values;
+    for (auto it = SHEETS_MANDATORY.begin();
+         it != SHEETS_MANDATORY.end(); ++it)
+    {
+        values.insert(it.value());
+    }
+    return values;
+}();
 
 TemplateFiller::TemplateFiller(
         const QString &templateFromPath, const QStringList &templateToPaths)
 {
+    m_mandatoryAttributesManager = nullptr;
+    m_attributeEquivalentTable = nullptr;
+    m_attributeFlagsTable = nullptr;
+    m_attributePossibleMissingTable = nullptr;
+    m_attributeValueReplacedTable = nullptr;
     setTemplates(templateFromPath, templateToPaths);
+}
+
+TemplateFiller::~TemplateFiller()
+{
+    delete m_mandatoryAttributesManager;
 }
 
 void TemplateFiller::setTemplates(
@@ -19,6 +61,41 @@ void TemplateFiller::setTemplates(
     m_langCodeFrom = _getLangCode(templateFromPath);
     m_workingDir = QFileInfo{m_templateFromPath}.dir();
     m_workingDirImage = m_workingDir.absoluteFilePath("images");
+    _clearAttributeManagers();
+    m_mandatoryAttributesManager = new MandatoryAttributesManager;
+    m_attributeEquivalentTable = new AttributeEquivalentTable{m_workingDir.path()};
+    m_attributeFlagsTable = new AttributeFlagsTable{m_workingDir.path()};
+    m_attributePossibleMissingTable = new AttributePossibleMissingTable{m_workingDir.path()};
+    m_attributeValueReplacedTable = new AttributeValueReplacedTable{m_workingDir.path()};
+}
+
+void TemplateFiller::_clearAttributeManagers()
+{
+    if (m_mandatoryAttributesManager != nullptr)
+    {
+        delete m_mandatoryAttributesManager;
+    }
+    m_mandatoryAttributesManager = nullptr;
+    if (m_attributeEquivalentTable != nullptr)
+    {
+        m_attributeEquivalentTable->deleteLater();
+    }
+    m_attributeEquivalentTable = nullptr;
+    if (m_attributeFlagsTable != nullptr)
+    {
+        m_attributeFlagsTable->deleteLater();
+    }
+    m_attributeFlagsTable = nullptr;
+    if (m_attributePossibleMissingTable != nullptr)
+    {
+        m_attributePossibleMissingTable->deleteLater();
+    }
+    m_attributePossibleMissingTable = nullptr;
+    if (m_attributeValueReplacedTable != nullptr)
+    {
+        m_attributeValueReplacedTable->deleteLater();
+    }
+    m_attributeValueReplacedTable = nullptr;
 }
 
 void TemplateFiller::checkParentSkus()
@@ -268,9 +345,88 @@ void TemplateFiller::checkPreviewImages()
 
 QStringList TemplateFiller::findPreviousTemplatePath() const
 {
+    const QString &type = _readProductType(m_templateFromPath);
     QStringList templatePaths;
-    // TODO from the parent folder for m_workingDir, will browse all folder
+    QDirIterator it(m_workingDir.absolutePath() + "/..", QStringList() << "*FILLED*.xlsm", QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext())
+    {
+        const QString &filePath = it.next();
+        QXlsx::Document doc(filePath);
+        _selectTemplateSheet(doc);
+
+        const auto &fieldId_index = _get_fieldId_index(doc);
+        int indColProductType = _getIndColProductType(fieldId_index);
+        
+        // Read header? No, read first row after header.
+        auto version = _getDocumentVersion(doc);
+        int rowData = _getRowFieldId(version) + 1;
+        
+        auto cellProductType = doc.cellAt(rowData + 2, indColProductType + 1); // +2 in case exemple row
+        if (cellProductType)
+        {
+            QString productType = cellProductType->value().toString();
+            if (productType.compare(type, Qt::CaseInsensitive) == 0)
+            {
+                templatePaths << filePath;
+            }
+        }
+    }
     return templatePaths;
+}
+
+QString TemplateFiller::_readProductType(const QString &filePath) const
+{
+    QXlsx::Document doc(filePath);
+    _selectTemplateSheet(doc);
+
+    const auto &fieldId_index = _get_fieldId_index(doc);
+    int indColProductType = _getIndColProductType(fieldId_index);
+
+    // Read header? No, read first row after header.
+    auto version = _getDocumentVersion(doc);
+    int rowData = _getRowFieldId(version) + 1;
+
+    auto cellProductType = doc.cellAt(rowData + 2, indColProductType + 1); // +2 in case exemple row
+    if (cellProductType)
+    {
+        return cellProductType->value().toString();
+    }
+    return QString{};
+}
+
+TemplateFiller::AttributesToValidate TemplateFiller::findAttributesMandatoryToValidateManually(
+        const QStringList &previousTemplatePaths) const
+{
+    TemplateFiller::AttributesToValidate attributesToValidateManually;
+    const auto &productType = _readProductType(m_templateFromPath);
+    QXlsx::Document doc{m_templateFromPath};
+    _selectTemplateSheet(doc);
+    const auto &fieldId_index = _get_fieldId_index(doc);
+    const auto &fieldIdMandatory = _get_fieldIdMandatory(doc);
+    Q_ASSERT(!productType.isEmpty());
+    const auto &filePathMandatory
+            = m_workingDir.absoluteFilePath("mandatoryFieldIds.ini");
+    /*
+    co_await m_mandatoryAttributesManager->load(
+                QFileInfo{m_templateFromPath}.fileName(),
+                filePathMandatory,
+                productType,
+                fieldId_index,
+                fieldIdMandatory);
+    //*/
+    attributesToValidateManually.addedAi
+            = m_mandatoryAttributesManager->idsNonMandatoryAddedByAi();
+    attributesToValidateManually.removedAi
+            = m_mandatoryAttributesManager->mandatoryIdsFileRemovedAi();
+
+    return attributesToValidateManually;
+}
+
+void TemplateFiller::validateMandatory(
+        const QSet<QString> &attributesMandatory, const QSet<QString> &attributesNotMandatory)
+{
+    m_mandatoryAttributesManager->setIdsChangedManually(
+                attributesMandatory, attributesNotMandatory);
 }
 
 int TemplateFiller::_getIndCol(
@@ -287,6 +443,14 @@ int TemplateFiller::_getIndCol(
     }
     Q_ASSERT(false);
     return -1;
+}
+
+int TemplateFiller::_getIndColProductType(
+        const QHash<QString, int> &fieldId_index) const
+{
+    const QStringList possibleValues{
+        "feed_product_type", "product_type#1.value"};
+    return _getIndCol(fieldId_index, possibleValues);
 }
 
 int TemplateFiller::_getIndColSku(
@@ -380,6 +544,75 @@ void TemplateFiller::_selectTemplateSheet(QXlsx::Document &doc) const
     }
 }
 
+void TemplateFiller::_selectMandatorySheet(QXlsx::Document &doc) const
+{
+    bool sheetSelected = false;
+    for (auto it = SHEETS_MANDATORY.begin();
+         it != SHEETS_MANDATORY.end(); ++it)
+    {
+        if (doc.selectSheet(it.key()))
+        {
+            sheetSelected = true;
+            break;
+        }
+    }
+    Q_ASSERT(sheetSelected);
+
+    if (!sheetSelected)
+    {
+        QStringList sheets = doc.sheetNames();
+        if (sheets.size() >= 7)
+        {
+            doc.selectSheet(sheets.at(6)); // 7th sheet
+        }
+        else
+        {
+            Q_ASSERT(false);
+            // Fallback: select the first sheet available.
+        }
+    }
+}
+
+void TemplateFiller::_selectValidValuesSheet(QXlsx::Document &doc) const
+{
+    const QStringList SHEETS_VALID_VALUES{
+        "Valeurs valides"
+        , "Valid Values"
+        , "Valori validi"
+        , "Geldige waarden"
+        , "Gültige Werte"
+        , "Giltiga värden"
+        , "Valores válidos"
+        , "Poprawne wartości"
+        , "Geçerli Değerler"
+        , "推奨値"
+    };
+
+    bool sheetSelected = false;
+    for (const QString &sheetName : SHEETS_VALID_VALUES)
+    {
+        if (doc.selectSheet(sheetName))
+        {
+            sheetSelected = true;
+            break;
+        }
+    }
+    Q_ASSERT(sheetSelected);
+
+    if (!sheetSelected)
+    {
+        QStringList sheets = doc.sheetNames();
+        if (sheets.size() >= 5)
+        {
+            doc.selectSheet(sheets.at(3)); // 4th sheet
+        }
+        else
+        {
+            Q_ASSERT(false);
+        }
+    }
+}
+
 TemplateFiller::VersionAmz TemplateFiller::_getDocumentVersion(
     QXlsx::Document &document) const
 {
@@ -443,6 +676,117 @@ QHash<QString, int> TemplateFiller::_get_fieldId_index(
         }
     }
     return colId_index;
+}
+
+QSet<QString> TemplateFiller::_get_fieldIdMandatory(QXlsx::Document &doc) const
+{
+    QSet<QString> fieldIds;
+    _selectMandatorySheet(doc);
+    auto dimMandatory = doc.dimension();
+    const int colIndFieldId = 1;
+    const int colIndFieldName = 2;
+    const int colIndHint = 3;
+    const int colIndHintSecond = 4;
+    int colIndMandatory = 0;
+    for (int j=0; j<10; ++j)
+    {
+        auto cell = doc.cellAt(2, j + 1);
+        if (cell)
+        {
+            colIndMandatory = j;
+        }
+        else
+        {
+            break;
+        }
+    }
+    for (int i = 3; i<dimMandatory.lastRow(); ++i)
+    {
+        auto cellFieldId = doc.cellAt(i+1, colIndFieldId + 1);
+        auto cellFieldName = doc.cellAt(i+1, colIndFieldName + 1);
+        auto cellMandatory = doc.cellAt(i+1, colIndMandatory + 1);
+        if (cellFieldId && cellFieldName && cellMandatory)
+        {
+            QString fieldId{cellFieldId->value().toString()};
+            _formatFieldId(fieldId);
+            QString mandatory{cellMandatory->value().toString()};
+            if (cellFieldName && cellMandatory && fieldId != mandatory)
+            {
+                if (VALUES_MANDATORY.contains(mandatory))
+                {
+                    fieldIds.insert(mandatory);
+                }
+            }
+        }
+    }
+    return fieldIds;
+}
+
+QHash<QString, QSet<QString>> TemplateFiller::_get_fieldId_possibleValues(
+        QXlsx::Document &doc) const
+{
+    QHash<QString, QSet<QString>> fieldId_possibleValues;
+    QHash<QString, QString> fieldName_fieldId;
+    _selectTemplateSheet(doc);
+    auto version = _getDocumentVersion(doc);
+    int rowFieldId = _getRowFieldId(version);
+    int rowFieldName = rowFieldId - 1;
+    auto dimTemplate = doc.dimension();
+    for (int i = 0; i < dimTemplate.lastColumn(); ++i)
+    {
+        auto cellFieldName = doc.cellAt(rowFieldName + 1, i + 1);
+        auto cellFieldId = doc.cellAt(rowFieldId + 1, i + 1);
+        if (cellFieldId && cellFieldName)
+        {
+            QString fieldId{cellFieldId->value().toString()};
+            _formatFieldId(fieldId);
+            QString fieldName{cellFieldName->value().toString()};
+            if (fieldName.isEmpty() && !fieldId.isEmpty())
+            {
+                fieldName_fieldId[fieldName] = fieldId;
+            }
+        }
+    }
+    _selectValidValuesSheet(doc);
+    const auto &dimValidValues = doc.dimension();
+    for (int i=1; i<dimValidValues.lastRow(); ++i)
+    {
+        auto cellFieldName = doc.cellAt(i+1, 2);
+        if (cellFieldName)
+        {
+            QString fieldName{cellFieldName->value().toString()};
+            if (fieldName.contains(" - ["))
+            {
+                fieldName = fieldName.split(" - [")[0];
+            }
+            if (!fieldName.isEmpty())
+            {
+                Q_ASSERT(fieldName_fieldId.contains(fieldName));
+                if (fieldName_fieldId.contains(fieldName))
+                {
+                    const auto &fieldId = fieldName_fieldId[fieldName];
+                    for (int j=2; i<dimValidValues.lastColumn(); ++j)
+                    {
+                        auto cellValue = doc.cellAt(i+1, j+1);
+                        QString value;
+                        if (cellValue)
+                        {
+                            value = cellValue->value().toString();
+                            if (!value.isEmpty())
+                            {
+                                fieldId_possibleValues[fieldId] << value;
+                            }
+                        }
+                        if (value.isEmpty())
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return fieldId_possibleValues;
 }
 
 QHash<QString, QSet<QString>> TemplateFiller::_get_parentSku_skus(

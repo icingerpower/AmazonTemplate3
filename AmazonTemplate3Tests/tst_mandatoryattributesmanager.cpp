@@ -33,7 +33,7 @@ private slots:
         QFile::remove("test_settings.ini");
 
         // Setup
-        MandatoryAttributesManager *mgr = MandatoryAttributesManager::instance();
+        MandatoryAttributesManager mgr;
         
         // Prepare mock transport
         m_attr2_calls = 0;
@@ -70,13 +70,14 @@ private slots:
         // Current template mandatory: none
         QSet<QString> curMandatory;
         // All current: attr1, attr2
-        QSet<QString> curAll = {"attr1", "attr2"};
+        QHash<QString, int> curAll = {{"attr1", 0}, {"attr2", 1}};
 
         // Use unique product type to avoid cache hits
         QString productType = "TestProduct_" + QString::number(QDateTime::currentMSecsSinceEpoch());
         
         // Execute load as coroutine
-        QCoro::waitFor(mgr->load(
+        QCoro::waitFor(mgr.load(
+            "dummy_template.csv",
             "test_settings.ini", 
             productType, 
             curAll, 
@@ -84,25 +85,13 @@ private slots:
         ));
 
         // Validation
-        auto mandatory = mgr->getMandatoryIds();
+        auto mandatory = mgr.getMandatoryIds();
         
         // attr1 should be mandatory (yes)
         QVERIFY(mandatory.contains("attr1"));
         // attr2 should NOT be mandatory (no)
         QVERIFY(!mandatory.contains("attr2"));
         
-        // Verify call count?
-        // Phase 1: 2 items * 3 calls each = 6 calls.
-        // Phase 2: 1 item (attr2) * 5 calls = 5 calls.
-        // Total 11 calls.
-        // However, retries logic might affect this if validation fails.
-        // Phase 1: "invalid_response" -> validation fails. Retries up to maxRetries(3).
-        // Total attempts for attr2 phase 1: 3.
-        // Total attempts for attr1 phase 1: 1 (if strict unanimous? wait. neededReplies=3. So 3 calls even if success?)
-        // OpenAi2::_runStepCollectN runs N times.
-        // So attr1: 3 calls. attr2: 3 calls.
-        // Phase 2: attr2: 5 calls.
-        // Total should be roughly 11.
         QVERIFY(callCount >= 11);
     }
 };

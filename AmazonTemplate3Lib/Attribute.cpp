@@ -14,6 +14,7 @@ const QHash<Attribute::Flag, QString> Attribute::FLAG_STRING{
     , {SameValue, "SameValue"}
     , {ChildSameValue, "ChildSameValue"}
     , {ForCustomInstructions, "ForCustomInstructions"}
+    , {ReadablePreviousTemplates, "ReadablePreviousTemplates"}
     , {MandatoryAmazon, "MandatoryAmazon"}
     , {MandatoryTemu, "MandatoryTemu"}
 };

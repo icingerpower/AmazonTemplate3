@@ -18,8 +18,9 @@ public:
         , SameValue = 4
         , ChildSameValue = 8
         , ForCustomInstructions = 16
-        , MandatoryAmazon = 32
-        , MandatoryTemu = 32
+        , ReadablePreviousTemplates = 32
+        , MandatoryAmazon = 64
+        , MandatoryTemu = 128
     };
     static const QHash<Flag, QString> FLAG_STRING;
     static const QMap<QString, Flag> STRING_FLAG;

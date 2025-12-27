@@ -6,4 +6,7 @@ SET(GUI_FILES
     ${CMAKE_CURRENT_LIST_DIR}/DialogExtractInfos.cpp
     ${CMAKE_CURRENT_LIST_DIR}/DialogExtractInfos.h
     ${CMAKE_CURRENT_LIST_DIR}/DialogExtractInfos.ui
+    ${CMAKE_CURRENT_LIST_DIR}/DialogValidateMandatory.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/DialogValidateMandatory.h
+    ${CMAKE_CURRENT_LIST_DIR}/DialogValidateMandatory.ui
 )

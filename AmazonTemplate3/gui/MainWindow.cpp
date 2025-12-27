@@ -7,6 +7,7 @@
 #include <FileModelSources.h>
 
 #include "DialogExtractInfos.h"
+#include "DialogValidateMandatory.h"
 #include "MainWindow.h"
 #include "./ui_MainWindow.h"
 
@@ -38,6 +39,10 @@ void MainWindow::_connectSlots()
             &QPushButton::clicked,
             this,
             &MainWindow::baseControls);
+    connect(ui->buttonFindMandatoryFieldIds,
+            &QPushButton::clicked,
+            this,
+            &MainWindow::findValidateMandatoryFieldIds);
     connect(ui->buttonExtractProductInfos,
             &QPushButton::clicked,
             this,
@@ -152,6 +157,19 @@ void MainWindow::baseControls()
                     this,
                     exception.title(),
                     exception.error());
+    }
+}
+
+void MainWindow::findValidateMandatoryFieldIds()
+{
+    const auto &previousFilePath = m_templateFiller->findPreviousTemplatePath();
+    auto attrToValidate = m_templateFiller->findAttributesMandatoryToValidateManually(previousFilePath);
+    DialogValidateMandatory dialog{attrToValidate};
+    auto ret = dialog.exec();
+    if (ret == QDialog::Accepted)
+    {
+        m_templateFiller->validateMandatory(dialog.getAttributeValidatedMandatory(),
+                                            dialog.getAttributeValidatedNotMandatory());
     }
 }
 

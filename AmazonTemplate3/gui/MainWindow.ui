@@ -46,6 +46,16 @@
        </widget>
       </item>
       <item>
+       <widget class="QPushButton" name="buttonFindMandatoryFieldIds">
+        <property name="toolTip">
+         <string>Find and validate mandatory field ids</string>
+        </property>
+        <property name="text">
+         <string>Find mandatory</string>
+        </property>
+       </widget>
+      </item>
+      <item>
        <widget class="QPushButton" name="buttonExtractProductInfos">
         <property name="text">
          <string>Extract product infos</string>
@@ -94,7 +104,7 @@
         <number>200</number>
        </attribute>
       </widget>
-      <widget class="QWidget" name="">
+      <widget class="QWidget" name="layoutWidget">
        <layout class="QVBoxLayout" name="verticalLayout">
         <item>
          <layout class="QHBoxLayout" name="horizontalLayout_3">

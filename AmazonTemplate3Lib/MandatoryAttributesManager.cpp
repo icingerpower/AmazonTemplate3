@@ -4,17 +4,15 @@
 
 #include "MandatoryAttributesManager.h"
 
-MandatoryAttributesManager *MandatoryAttributesManager::instance()
-{
-    static MandatoryAttributesManager instance;
-    return &instance;
-}
+const QString MandatoryAttributesManager::SETTINGS_KEYS_TEMPLATES_DONE{"templatesDone"};
 
 QCoro::Task<void> MandatoryAttributesManager::load(
+        const QString &templateFileNameFrom,
         const QString &settingPath,
         const QString &productType,
-        const QSet<QString> &curTemplateFieldIds,
-        const QSet<QString> &curTemplateFieldIdsMandatory)
+        const QHash<QString, int> &curTemplateFieldIds,
+        const QSet<QString> &curTemplateFieldIdsMandatory,
+        bool restart)
 {
     _clear();
 
@@ -22,6 +20,7 @@ QCoro::Task<void> MandatoryAttributesManager::load(
     m_productType  = productType;
 
     QSettings settings{m_settingsPath, QSettings::IniFormat};
+
     const QString productTypeLower = m_productType.toLower();
 
     // Robust serialization: store sets as QStringList (QSettings round-trips this reliably).
@@ -45,7 +44,14 @@ QCoro::Task<void> MandatoryAttributesManager::load(
 
     // Current template state
     m_mandatoryIdsCurTemplates = curTemplateFieldIdsMandatory;
-    m_curTemplateAllIds        = curTemplateFieldIds;
+    m_curTemplateAllIds = curTemplateFieldIds;
+
+    m_doneTemplatePaths = settings.value(SETTINGS_KEYS_TEMPLATES_DONE).value<QSet<QString>>();
+    if (m_doneTemplatePaths.contains(templateFileNameFrom) && !restart)
+    {
+        co_return;
+    }
+    m_doneTemplatePaths.insert(templateFileNameFrom);
 
     // If we already have history, no AI classification needed here.
     if (!m_mandatoryIdsPreviousTemplates.isEmpty())
@@ -57,10 +63,13 @@ QCoro::Task<void> MandatoryAttributesManager::load(
     // Classify only attributes that are NOT already mandatory in current template.
     QList<QString> toClassify;
     toClassify.reserve(m_curTemplateAllIds.size());
-    for (const QString& id : m_curTemplateAllIds)
+    const auto &curTemplateAllIds = m_curTemplateAllIds.keys();
+    for (const QString& id : curTemplateAllIds)
     {
         if (!m_mandatoryIdsCurTemplates.contains(id))
+        {
             toClassify.push_back(id);
+        }
     }
 
     if (toClassify.isEmpty())
@@ -229,6 +238,7 @@ void MandatoryAttributesManager::_saveInSettings()
 {
     QSettings settings{m_settingsPath, QSettings::IniFormat};
     const QString productTypeLower = m_productType.toLower();
+    settings.setValue(SETTINGS_KEYS_TEMPLATES_DONE, QVariant::fromValue(m_doneTemplatePaths));
     settings.beginGroup(productTypeLower);
 
     auto writeSet = [&](const QString& key, const QSet<QString>& ids) {
@@ -256,38 +266,29 @@ void MandatoryAttributesManager::_saveInSettings()
     settings.sync();
 }
 
-void MandatoryAttributesManager::setIdsRemovedManually(
-        const QSet<QString> &newIdsRemovedManually)
+void MandatoryAttributesManager::setIdsChangedManually(
+        const QSet<QString> &newIdsAddedManually
+        , const QSet<QString> &newIdsRemovedManually)
 {
     m_idsRemovedManually = newIdsRemovedManually;
-    _saveInSettings();
-}
-
-void MandatoryAttributesManager::setIdsAddedManually(
-        const QSet<QString> &newIdsAddedManually)
-{
     m_idsAddedManually = newIdsAddedManually;
     _saveInSettings();
 }
 
-void MandatoryAttributesManager::setIdsNonMandatoryAddedByAi(
-        const QSet<QString> &newIdsNonMandatoryAddedByAi)
+const QSet<QString> &MandatoryAttributesManager::idsNonMandatoryAddedByAi() const
 {
-    m_idsNonMandatoryAddedByAi = newIdsNonMandatoryAddedByAi;
-    _saveInSettings();
+    return m_idsNonMandatoryAddedByAi;
+}
+
+const QSet<QString> &MandatoryAttributesManager::mandatoryIdsFileRemovedAi() const
+{
+    return m_mandatoryIdsFileRemovedAi;
 }
 
 void MandatoryAttributesManager::setMandatoryIdsPreviousTemplates(
         const QSet<QString> &newMandatoryIdsPreviousTemplates)
 {
     m_mandatoryIdsPreviousTemplates = newMandatoryIdsPreviousTemplates;
-    _saveInSettings();
-}
-
-void MandatoryAttributesManager::setMandatoryIdsFileRemovedAi(
-        const QSet<QString> &newMandatoryIdsFileRemovedAi)
-{
-    m_mandatoryIdsFileRemovedAi = newMandatoryIdsFileRemovedAi;
     _saveInSettings();
 }
 

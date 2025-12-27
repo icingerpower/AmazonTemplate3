@@ -12,6 +12,7 @@ public:
     explicit AttributeEquivalentTable(
             const QString &workingDirectory, QObject *parent = nullptr);
 
+    bool hasEquivalent(const QString &attrId, const QString &value) const;
     int getPosAttr(const QString &attrId) const;
     void recordAttribute(const QString &attrId,
                          const QStringList &equivalentValues);

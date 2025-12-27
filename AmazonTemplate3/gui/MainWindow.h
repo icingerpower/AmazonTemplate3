@@ -25,6 +25,7 @@ public:
 public slots:
     void browseSourceMain();
     void baseControls();
+    void findValidateMandatoryFieldIds();
     void extractProductInfos();
 
 private:

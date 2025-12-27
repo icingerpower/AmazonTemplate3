@@ -16,6 +16,8 @@ class AttributeFlagsTable : public QAbstractTableModel
 public:
     explicit AttributeFlagsTable(
             const QString &workingDirectory, QObject *parent = nullptr);
+    QSet<QString> getUnrecordedFieldIds(
+            const QString &marketplace, const QSet<QString> &fieldIds) const;
 
     void recordAttribute(const QHash<QString, QString> ids, Attribute::Flag flag);
     int getPosAttr(const QHash<QString, QString> &ids) const;

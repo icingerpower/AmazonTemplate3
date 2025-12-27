@@ -19,6 +19,31 @@ AttributeFlagsTable::AttributeFlagsTable(
     }
 }
 
+QSet<QString> AttributeFlagsTable::getUnrecordedFieldIds(
+        const QString &marketplace, const QSet<QString> &fieldIds) const
+{
+    int colIdx = m_colNames.indexOf(marketplace);
+    if (colIdx == -1)
+    {
+        return fieldIds;
+    }
+
+    QSet<QString> unrecordedIds = fieldIds;
+    for (const auto &variantList : std::as_const(m_listOfVariantList))
+    {
+        const QString &val = variantList[colIdx].toString();
+        if (!val.isEmpty())
+        {
+            unrecordedIds.remove(val);
+            if (unrecordedIds.isEmpty())
+            {
+                break;
+            }
+        }
+    }
+    return unrecordedIds;
+}
+
 int AttributeFlagsTable::getPosAttr(const QHash<QString, QString> &ids) const
 {
     int rowIdx = 0;

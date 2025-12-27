@@ -26,6 +26,18 @@ AttributeEquivalentTable::AttributeEquivalentTable(
     _loadFromFile();
 }
 
+bool AttributeEquivalentTable::hasEquivalent(
+        const QString &attrId, const QString &value) const
+{
+    int pos = getPosAttr(attrId);
+    if (pos >= 0)
+    {
+        const auto &attributes = m_listOfStringList[pos][1].split(";");
+        return attributes.contains(value);
+    }
+    return false;
+}
+
 int AttributeEquivalentTable::getPosAttr(const QString &attrId) const
 {
     int pos = 0;

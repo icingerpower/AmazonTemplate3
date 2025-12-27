@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>DialogValidateMandatory</class>
+ <widget class="QDialog" name="DialogValidateMandatory">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1776</width>
+    <height>1251</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Validate mandatory fields</string>
+  </property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <item>
+    <widget class="QTableWidget" name="tableWidgetFieldIds">
+     <attribute name="horizontalHeaderDefaultSectionSize">
+      <number>200</number>
+     </attribute>
+     <attribute name="horizontalHeaderStretchLastSection">
+      <bool>true</bool>
+     </attribute>
+     <column>
+      <property name="text">
+       <string>Field id</string>
+      </property>
+     </column>
+     <column>
+      <property name="text">
+       <string>AI suggest mandatory ?</string>
+      </property>
+     </column>
+     <column>
+      <property name="text">
+       <string>Is mandatory ?</string>
+      </property>
+     </column>
+    </widget>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="horizontalLayout">
+     <item>
+      <spacer name="horizontalSpacer">
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+       <property name="sizeHint" stdset="0">
+        <size>
+         <width>40</width>
+         <height>20</height>
+        </size>
+       </property>
+      </spacer>
+     </item>
+     <item>
+      <widget class="QPushButton" name="buttonValidate">
+       <property name="text">
+        <string>Validate</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="uttonCancel">
+       <property name="text">
+        <string>Cancel</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections>
+  <connection>
+   <sender>buttonValidate</sender>
+   <signal>clicked()</signal>
+   <receiver>DialogValidateMandatory</receiver>
+   <slot>accept()</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>1649</x>
+     <y>1225</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>1650</x>
+     <y>1281</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>uttonCancel</sender>
+   <signal>clicked()</signal>
+   <receiver>DialogValidateMandatory</receiver>
+   <slot>reject()</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>1741</x>
+     <y>1231</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>1747</x>
+     <y>1285</y>
+    </hint>
+   </hints>
+  </connection>
+ </connections>
+</ui>

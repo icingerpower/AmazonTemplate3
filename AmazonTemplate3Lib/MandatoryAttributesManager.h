@@ -10,12 +10,13 @@
 class MandatoryAttributesManager
 {
 public:
-    static MandatoryAttributesManager *instance();
-    QCoro::Task<void> load(
+    MandatoryAttributesManager();
+    QCoro::Task<void> load(const QString &templateFileNameFrom,
             const QString &settingPath
             , const QString &productType
-            , const QSet<QString> &curTemplateFieldIds
-            , const QSet<QString> &curTemplateFieldIdsMandatory);
+            , const QHash<QString, int> &curTemplateFieldIds
+            , const QSet<QString> &curTemplateFieldIdsMandatory
+            , bool restart = false);
     QSet<QString> getMandatoryIds() const;
 
     bool hasIdsFromPreviousTemplates() const;
@@ -23,24 +24,21 @@ public:
     void setMandatoryIdsCurTemplates(
             const QSet<QString> &newMandatoryIdsCurTemplates);
 
-    void setMandatoryIdsFileRemovedAi(
-            const QSet<QString> &newMandatoryIdsFileRemovedAi);
-
     void setMandatoryIdsPreviousTemplates(
             const QSet<QString> &newMandatoryIdsPreviousTemplates);
 
-    void setIdsNonMandatoryAddedByAi(
-            const QSet<QString> &newIdsNonMandatoryAddedByAi);
+    void setIdsChangedManually(
+            const QSet<QString> &newIdsAddedManually
+            , const QSet<QString> &newIdsRemovedManually);
 
-    void setIdsAddedManually(
-            const QSet<QString> &newIdsAddedManually);
+    const QSet<QString> &idsNonMandatoryAddedByAi() const;
 
-    void setIdsRemovedManually(
-            const QSet<QString> &newIdsRemovedManually);
+    const QSet<QString> &mandatoryIdsFileRemovedAi() const;
 
 private:
-    MandatoryAttributesManager();
-    QSet<QString> m_curTemplateAllIds;
+    static const QString SETTINGS_KEYS_TEMPLATES_DONE;
+    QHash<QString, int> m_curTemplateAllIds;
+    QSet<QString> m_doneTemplatePaths;
     QSet<QString> m_mandatoryIdsCurTemplates;
     QSet<QString> m_mandatoryIdsFileRemovedAi;
     QSet<QString> m_mandatoryIdsPreviousTemplates;
