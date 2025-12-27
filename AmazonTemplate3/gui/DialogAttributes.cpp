@@ -2,7 +2,7 @@
 #include <AttributePossibleMissingTable.h>
 #include <AttributeEquivalentTable.h>
 #include <AttributeFlagsTable.h>
-#include <MandatoryAttributesManager.h>
+#include <AttributesMandatoryTable.h>
 #include <TemplateFiller.h>
 
 #include "DialogAddPossibleValues.h"
@@ -20,7 +20,7 @@ DialogAttributes::DialogAttributes(TemplateFiller *templateFiller, QWidget *pare
     ui->tableViewEquivalences->setModel(m_templateFiller->attributeEquivalentTable());
     ui->tableViewFlags->setModel(m_templateFiller->attributeFlagsTable());
     ui->tableViewFlags->resizeColumnToContents(9);
-    ui->tableViewMandatory->setModel(m_templateFiller->mandatoryAttributesManager());
+    ui->tableViewMandatory->setModel(m_templateFiller->mandatoryAttributesTable());
     ui->tableViewMandatory->resizeColumnToContents(9);
     ui->tableViewMissingPossibleValues->setModel(m_templateFiller->attributePossibleMissingTable());
     ui->tableViewReplaced->setModel(m_templateFiller->attributeValueReplacedTable());

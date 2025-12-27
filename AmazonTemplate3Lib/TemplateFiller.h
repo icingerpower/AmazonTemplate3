@@ -8,7 +8,8 @@
 #include <xlsxdocument.h>
 #include <QCoro/QCoroTask>
 
-class MandatoryAttributesManager;
+class AttributesMandatoryAiTable;
+class AttributesMandatoryTable;
 class AttributeEquivalentTable;
 class AttributeFlagsTable;
 class AttributePossibleMissingTable;
@@ -41,7 +42,7 @@ public:
      // Return all field with values or ask AI after reading field ids
     QStringList findPreviousTemplatePath() const;
     QCoro::Task<AttributesToValidate> findAttributesMandatoryToValidateManually(
-            const QStringList &previousTemplatePaths) const;
+            QStringList previousTemplatePaths) const;
     void validateMandatory(const QSet<QString> &attributesMandatory,
                            const QSet<QString> &attributesNotMandatory);
 
@@ -52,7 +53,8 @@ public:
     QStringList suggestAttributesSameValueChild(
             const QStringList &previousTemplatePaths) const;
 
-    MandatoryAttributesManager *mandatoryAttributesManager() const;
+    AttributesMandatoryTable *mandatoryAttributesTable() const;
+    AttributesMandatoryAiTable *mandatoryAttributesAiTable() const;
 
     AttributeEquivalentTable *attributeEquivalentTable() const;
 
@@ -65,7 +67,8 @@ public:
 private:
     QHash<QString, QHash<QString, QString>> m_countryCode_langCode_keywords;
     QHash<QString, QHash<QString, QHash<QString, QString>>> m_skuPattern_countryCode_langCode_keywords;
-    MandatoryAttributesManager *m_mandatoryAttributesManager;
+    AttributesMandatoryTable *m_mandatoryAttributesTable;
+    AttributesMandatoryAiTable *m_mandatoryAttributesAiTable;
     AttributeEquivalentTable *m_attributeEquivalentTable;
     AttributeFlagsTable *m_attributeFlagsTable;
     AttributePossibleMissingTable *m_attributePossibleMissingTable;

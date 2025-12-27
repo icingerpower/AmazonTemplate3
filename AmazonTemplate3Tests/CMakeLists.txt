@@ -63,15 +63,15 @@ target_link_libraries(AmazonTemplate3Tests PRIVATE
     Qt${QT_VERSION_MAJOR}::Gui
     QCoro6::Core)
 
-add_executable(MandatoryAttributesManagerTests tst_mandatoryattributesmanager.cpp)
+add_executable(AttributesMandatoryTableTests tst_attributesmandatorytable.cpp)
 
-target_link_libraries(MandatoryAttributesManagerTests PRIVATE AmazonTemplate3Lib_Tests)
-target_include_directories(MandatoryAttributesManagerTests PRIVATE ../AmazonTemplate3Lib)
-target_include_directories(MandatoryAttributesManagerTests PRIVATE ../../common/openai/)
+target_link_libraries(AttributesMandatoryTableTests PRIVATE AmazonTemplate3Lib_Tests)
+target_include_directories(AttributesMandatoryTableTests PRIVATE ../AmazonTemplate3Lib)
+target_include_directories(AttributesMandatoryTableTests PRIVATE ../../common/openai/)
 
-add_test(NAME MandatoryAttributesManagerTests COMMAND MandatoryAttributesManagerTests)
+add_test(NAME AttributesMandatoryTableTests COMMAND AttributesMandatoryTableTests)
 
-target_link_libraries(MandatoryAttributesManagerTests PRIVATE
+target_link_libraries(AttributesMandatoryTableTests PRIVATE
     Qt${QT_VERSION_MAJOR}::Test
     Qt${QT_VERSION_MAJOR}::Network
     Qt${QT_VERSION_MAJOR}::Gui

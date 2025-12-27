@@ -1,4 +1,6 @@
 #include <QDir>
+#include <QColor>
+#include <QBrush>
 
 #include "AttributeFlagsTable.h"
 
@@ -44,7 +46,82 @@ QSet<QString> AttributeFlagsTable::getUnrecordedFieldIds(
     return unrecordedIds;
 }
 
-int AttributeFlagsTable::getPosAttr(const QHash<QString, QString> &ids) const
+void AttributeFlagsTable::recordAttributeNotRecordedYet(
+        const QString &marketplaceId, const QSet<QString> &fieldIds)
+{
+    for (const auto &fieldId : fieldIds)
+    {
+        QHash<QString, QString> marketplace_ids{{marketplaceId, fieldId}};
+        QVariantList variantList;
+        for (int i = 0; i < m_indFirstFlag; ++i)
+        {
+            const auto &colName = m_colNames[i];
+            if (marketplace_ids.contains(colName))
+            {
+                variantList << marketplace_ids[colName];
+            }
+            else
+            {
+                variantList << QString{};
+            }
+        }
+        // Append false for each flag column.
+        for (int i = m_indFirstFlag; i < m_colNames.size(); ++i)
+        {
+            variantList << false;
+        }
+        beginInsertRows(QModelIndex{}, 0, 0);
+        m_listOfVariantList.insert(0, variantList);
+        _saveInFile();
+        endInsertRows();
+    }
+}
+
+void AttributeFlagsTable::recordAttribute(const QHash<QString, QString> &marketplace_ids)
+{
+    // Record attribute values and set all flag columns to false (no flags provided).
+    int pos = getPosAttr(marketplace_ids);
+    if (pos >= 0)
+    {
+        // Update existing row: fill attribute values if empty.
+        for (int i = 0; i < m_indFirstFlag; ++i)
+        {
+            const auto &colName = m_colNames[i];
+            if (marketplace_ids.contains(colName))
+            {
+                QModelIndex idx = index(pos, i);
+                if (data(idx).toString().isEmpty())
+                {
+                    setData(idx, marketplace_ids[colName]);
+                }
+            }
+        }
+    }
+    else
+    {
+        // Create a new row with attribute values and all flags false.
+        QVariantList variantList;
+        for (int i = 0; i < m_indFirstFlag; ++i)
+        {
+            const auto &colName = m_colNames[i];
+            if (marketplace_ids.contains(colName))
+                variantList << marketplace_ids[colName];
+            else
+                variantList << QString{};
+        }
+        // Append false for each flag column.
+        for (int i = m_indFirstFlag; i < m_colNames.size(); ++i)
+        {
+            variantList << false;
+        }
+        beginInsertRows(QModelIndex{}, 0, 0);
+        m_listOfVariantList.insert(0, variantList);
+        _saveInFile();
+        endInsertRows();
+    }
+}
+
+int AttributeFlagsTable::getPosAttr(const QHash<QString, QString> &marketplace_ids) const
 {
     int rowIdx = 0;
     for (const auto &variantList : std::as_const(m_listOfVariantList))
@@ -56,12 +133,12 @@ int AttributeFlagsTable::getPosAttr(const QHash<QString, QString> &ids) const
         {
             const auto &colName = m_colNames[i];
             const QString &val = variantList[i].toString();
-            
-            if (ids.contains(colName))
+
+            if (marketplace_ids.contains(colName))
             {
                 if (!val.isEmpty())
                 {
-                    if (val != ids[colName])
+                    if (val != marketplace_ids[colName])
                     {
                         compatible = false;
                         break;
@@ -73,7 +150,7 @@ int AttributeFlagsTable::getPosAttr(const QHash<QString, QString> &ids) const
                 }
             }
         }
-        
+
         if (compatible && hasAtLeastOneMatch)
         {
             return rowIdx;
@@ -84,20 +161,20 @@ int AttributeFlagsTable::getPosAttr(const QHash<QString, QString> &ids) const
 }
 
 void AttributeFlagsTable::recordAttribute(
-        const QHash<QString, QString> ids, Attribute::Flag flag)
+        const QHash<QString, QString> &marketplace_ids, Attribute::Flag flag)
 {
-    int pos = getPosAttr(ids);
+    int pos = getPosAttr(marketplace_ids);
     if (pos >= 0)
     {
         for (int i=0; i<m_indFirstFlag; ++i)
         {
             const auto &colName = m_colNames[i];
-            if (ids.contains(colName))
+            if (marketplace_ids.contains(colName))
             {
                 QModelIndex idx = index(pos, i);
                 if (data(idx).toString().isEmpty())
                 {
-                    setData(idx, ids[colName]);
+                    setData(idx, marketplace_ids[colName]);
                 }
             }
         }
@@ -124,9 +201,9 @@ void AttributeFlagsTable::recordAttribute(
         for (int i=0; i<m_indFirstFlag; ++i)
         {
             const auto &colName = m_colNames[i];
-            if (ids.contains(colName))
+            if (marketplace_ids.contains(colName))
             {
-                variantList << ids[colName];
+                variantList << marketplace_ids[colName];
             }
             else
             {
@@ -172,6 +249,23 @@ QVariant AttributeFlagsTable::data(const QModelIndex &index, int role) const
     if (role == Qt::EditRole || role == Qt::DisplayRole)
     {
         return m_listOfVariantList[index.row()][index.column()];
+    }
+    if (role == Qt::BackgroundRole)
+    {
+        // Light pink background when all flag columns are false
+        bool allFalse = true;
+        for (int col = m_indFirstFlag; col < m_colNames.size(); ++col)
+        {
+            if (m_listOfVariantList[index.row()][col].toBool())
+            {
+                allFalse = false;
+                break;
+            }
+        }
+        if (allFalse)
+        {
+            return QBrush(QColor(255, 182, 193));
+        }
     }
     return QVariant{};
 }

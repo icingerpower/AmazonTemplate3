@@ -13,7 +13,8 @@ public:
     static const QString AMAZON_V02;
     static const QString TEMU_EN;
     enum Flag{
-        ChildOnly = 1
+        NoFlag = 1
+        , ChildOnly = 1
         , NoAI = 2
         , SameValue = 4
         , ChildSameValue = 8

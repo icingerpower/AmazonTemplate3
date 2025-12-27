@@ -57,8 +57,10 @@ add_library(AmazonTemplate3Lib STATIC
   Attribute.cpp
   TemplateFiller.h
   TemplateFiller.cpp
-  MandatoryAttributesManager.h
-  MandatoryAttributesManager.cpp
+  AttributesMandatoryAiTable.h
+  AttributesMandatoryAiTable.cpp
+  AttributesMandatoryTable.h
+  AttributesMandatoryTable.cpp
   TemplateExceptions.h
   TemplateExceptions.cpp
   FileModelSources.h
@@ -104,8 +106,10 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   Attribute.cpp
   TemplateFiller.h
   TemplateFiller.cpp
-  MandatoryAttributesManager.h
-  MandatoryAttributesManager.cpp
+  AttributesMandatoryAiTable.h
+  AttributesMandatoryAiTable.cpp
+  AttributesMandatoryTable.h
+  AttributesMandatoryTable.cpp
   TemplateExceptions.h
   TemplateExceptions.cpp
 )

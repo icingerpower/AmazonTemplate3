@@ -2,7 +2,8 @@
 #include <QRegularExpression>
 #include <QDirIterator>
 
-#include "MandatoryAttributesManager.h"
+#include "AttributesMandatoryAiTable.h"
+#include "AttributesMandatoryTable.h"
 
 #include "AttributeEquivalentTable.h"
 #include "AttributeFlagsTable.h"
@@ -39,7 +40,8 @@ const QSet<QString> TemplateFiller::VALUES_MANDATORY
 TemplateFiller::TemplateFiller(
         const QString &templateFromPath, const QStringList &templateToPaths)
 {
-    m_mandatoryAttributesManager = nullptr;
+    m_mandatoryAttributesTable = nullptr;
+    m_mandatoryAttributesAiTable = nullptr;
     m_attributeEquivalentTable = nullptr;
     m_attributeFlagsTable = nullptr;
     m_attributePossibleMissingTable = nullptr;
@@ -49,7 +51,8 @@ TemplateFiller::TemplateFiller(
 
 TemplateFiller::~TemplateFiller()
 {
-    delete m_mandatoryAttributesManager;
+    delete m_mandatoryAttributesTable;
+    delete m_mandatoryAttributesAiTable;
 }
 
 void TemplateFiller::setTemplates(
@@ -62,7 +65,8 @@ void TemplateFiller::setTemplates(
     m_workingDir = QFileInfo{m_templateFromPath}.dir();
     m_workingDirImage = m_workingDir.absoluteFilePath("images");
     _clearAttributeManagers();
-    m_mandatoryAttributesManager = new MandatoryAttributesManager;
+    m_mandatoryAttributesAiTable = new AttributesMandatoryAiTable;
+    m_mandatoryAttributesTable = new AttributesMandatoryTable;
     m_attributeEquivalentTable = new AttributeEquivalentTable{m_workingDir.path()};
     m_attributeFlagsTable = new AttributeFlagsTable{m_workingDir.path()};
     m_attributePossibleMissingTable = new AttributePossibleMissingTable{m_workingDir.path()};
@@ -71,11 +75,16 @@ void TemplateFiller::setTemplates(
 
 void TemplateFiller::_clearAttributeManagers()
 {
-    if (m_mandatoryAttributesManager != nullptr)
+    if (m_mandatoryAttributesAiTable != nullptr)
     {
-        delete m_mandatoryAttributesManager;
+        delete m_mandatoryAttributesAiTable;
     }
-    m_mandatoryAttributesManager = nullptr;
+    m_mandatoryAttributesAiTable = nullptr;
+    if (m_mandatoryAttributesTable != nullptr)
+    {
+        delete m_mandatoryAttributesTable;
+    }
+    m_mandatoryAttributesTable = nullptr;
     if (m_attributeEquivalentTable != nullptr)
     {
         m_attributeEquivalentTable->deleteLater();
@@ -398,7 +407,7 @@ QString TemplateFiller::_readProductType(const QString &filePath) const
 }
 
 QCoro::Task<TemplateFiller::AttributesToValidate> TemplateFiller::findAttributesMandatoryToValidateManually(
-        const QStringList &previousTemplatePaths) const
+        QStringList previousTemplatePaths) const
 {
     TemplateFiller::AttributesToValidate attributesToValidateManually;
     const auto &productType = _readProductType(m_templateFromPath);
@@ -410,17 +419,41 @@ QCoro::Task<TemplateFiller::AttributesToValidate> TemplateFiller::findAttributes
     const auto &filePathMandatory
             = m_workingDir.absoluteFilePath("mandatoryFieldIds.ini");
     
-    co_await m_mandatoryAttributesManager->load(
-                QFileInfo{m_templateFromPath}.fileName(),
+    const auto keys = fieldId_index.keys();
+    // 1. AI Load
+    co_await m_mandatoryAttributesAiTable->load(
+                productType,
+                fieldIdMandatory,
+                fieldId_index);
+
+    // 2. Resolve "Previous" mandatory fields
+    QSet<QString> previousFieldIdMandatory;
+    if (!previousTemplatePaths.isEmpty())
+    {
+        // Naïve approach: read the first one.
+        // Ideally we might want to merge or pick best, but "previous" usually implies "last used".
+        // The list might be sorted or not. existing logic 'findPreviousTemplatePath' returns list.
+        // We'll proceed with the first one for now.
+        QXlsx::Document docPrev{previousTemplatePaths.first()};
+        if (docPrev.load()) 
+        {
+             // We reuse _get_fieldIdMandatory logic
+             previousFieldIdMandatory = _get_fieldIdMandatory(docPrev);
+        }
+    }
+    
+    // 3. UI Table Load
+    m_mandatoryAttributesTable->load(
                 filePathMandatory,
                 productType,
-                fieldId_index,
-                fieldIdMandatory);
-    //
+                fieldIdMandatory,
+                previousFieldIdMandatory,
+                fieldId_index);
+
     attributesToValidateManually.addedAi
-            = m_mandatoryAttributesManager->idsNonMandatoryAddedByAi();
+            = m_mandatoryAttributesAiTable->fieldIdsAiAdded();
     attributesToValidateManually.removedAi
-            = m_mandatoryAttributesManager->mandatoryIdsFileRemovedAi();
+            = m_mandatoryAttributesAiTable->fieldIdsAiRemoved();
 
     co_return attributesToValidateManually;
 }
@@ -428,13 +461,17 @@ QCoro::Task<TemplateFiller::AttributesToValidate> TemplateFiller::findAttributes
 void TemplateFiller::validateMandatory(
         const QSet<QString> &attributesMandatory, const QSet<QString> &attributesNotMandatory)
 {
-    m_mandatoryAttributesManager->setIdsChangedManually(
-                attributesMandatory, attributesNotMandatory);
+    m_mandatoryAttributesTable->update(attributesMandatory, attributesNotMandatory);
 }
 
-MandatoryAttributesManager *TemplateFiller::mandatoryAttributesManager() const
+AttributesMandatoryTable *TemplateFiller::mandatoryAttributesTable() const
 {
-    return m_mandatoryAttributesManager;
+    return m_mandatoryAttributesTable;
+}
+
+AttributesMandatoryAiTable *TemplateFiller::mandatoryAttributesAiTable() const
+{
+    return m_mandatoryAttributesAiTable;
 }
 
 AttributeEquivalentTable *TemplateFiller::attributeEquivalentTable() const

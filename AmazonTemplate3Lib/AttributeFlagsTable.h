@@ -19,8 +19,11 @@ public:
     QSet<QString> getUnrecordedFieldIds(
             const QString &marketplace, const QSet<QString> &fieldIds) const;
 
-    void recordAttribute(const QHash<QString, QString> ids, Attribute::Flag flag);
-    int getPosAttr(const QHash<QString, QString> &ids) const;
+    void recordAttributeNotRecordedYet(
+            const QString &marketplace, const QSet<QString> &fieldIds);
+    void recordAttribute(const QHash<QString, QString> &marketplace_ids);
+    void recordAttribute(const QHash<QString, QString> &marketplace_ids, Attribute::Flag flag);
+    int getPosAttr(const QHash<QString, QString> &marketplace_ids) const;
 
     // Header:
     QVariant headerData(

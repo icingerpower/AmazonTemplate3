@@ -1212,7 +1212,7 @@ void TestOpenAi2::test_image_generation()
     // step->gptModel = "gpt-4o-mini"; // image support? gpt-4o or gpt-4-turbo needed usually.
     // Let's assume default set in OpenAi2 or passed via askGpt context generally supports vision?
     // User didn't specify model. Default usually gpt-4-turbo or gpt-4o for vision.
-    step->gptModel = "gpt-4o";
+    step->gptModel = "gpt-5-mini";
 
     step->getPrompt = [](int) {
         return "Answer with exactly one word from this set: red|green|blue|black|white. No punctuation. No extra text.";
@@ -1239,7 +1239,7 @@ void TestOpenAi2::test_image_generation()
     timer.start(30000);
 
     // Use askGpt for standard path (which calls _runQueue)
-    ai->askGpt(steps, "gpt-4o");
+    ai->askGpt(steps, "gpt-5-mini");
 
     // Wait until applied
     while (!applied && timer.remainingTime() > 0) {
