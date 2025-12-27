@@ -345,12 +345,14 @@ void TemplateFiller::checkPreviewImages()
 
 QStringList TemplateFiller::findPreviousTemplatePath() const
 {
+    qDebug() << "TemplateFiller::findPreviousTemplatePath...";
     const QString &type = _readProductType(m_templateFromPath);
     QStringList templatePaths;
     QDirIterator it(m_workingDir.absolutePath() + "/..", QStringList() << "*FILLED*.xlsm", QDir::Files, QDirIterator::Subdirectories);
     while (it.hasNext())
     {
         const QString &filePath = it.next();
+        qDebug() << "TemplateFiller::findPreviousTemplatePath...reading: " << filePath;
         QXlsx::Document doc(filePath);
         _selectTemplateSheet(doc);
 
@@ -371,6 +373,7 @@ QStringList TemplateFiller::findPreviousTemplatePath() const
             }
         }
     }
+    qDebug() << "TemplateFiller::findPreviousTemplatePath...DONE";
     return templatePaths;
 }
 
@@ -394,7 +397,7 @@ QString TemplateFiller::_readProductType(const QString &filePath) const
     return QString{};
 }
 
-TemplateFiller::AttributesToValidate TemplateFiller::findAttributesMandatoryToValidateManually(
+QCoro::Task<TemplateFiller::AttributesToValidate> TemplateFiller::findAttributesMandatoryToValidateManually(
         const QStringList &previousTemplatePaths) const
 {
     TemplateFiller::AttributesToValidate attributesToValidateManually;
@@ -406,20 +409,20 @@ TemplateFiller::AttributesToValidate TemplateFiller::findAttributesMandatoryToVa
     Q_ASSERT(!productType.isEmpty());
     const auto &filePathMandatory
             = m_workingDir.absoluteFilePath("mandatoryFieldIds.ini");
-    /*
+    
     co_await m_mandatoryAttributesManager->load(
                 QFileInfo{m_templateFromPath}.fileName(),
                 filePathMandatory,
                 productType,
                 fieldId_index,
                 fieldIdMandatory);
-    //*/
+    //
     attributesToValidateManually.addedAi
             = m_mandatoryAttributesManager->idsNonMandatoryAddedByAi();
     attributesToValidateManually.removedAi
             = m_mandatoryAttributesManager->mandatoryIdsFileRemovedAi();
 
-    return attributesToValidateManually;
+    co_return attributesToValidateManually;
 }
 
 void TemplateFiller::validateMandatory(

@@ -6,6 +6,7 @@
 #include <QDir>
 
 #include <xlsxdocument.h>
+#include <QCoro/QCoroTask>
 class MandatoryAttributesManager;
 class AttributeEquivalentTable;
 class AttributeFlagsTable;
@@ -38,7 +39,7 @@ public:
 
      // Return all field with values or ask AI after reading field ids
     QStringList findPreviousTemplatePath() const;
-    AttributesToValidate findAttributesMandatoryToValidateManually(
+    QCoro::Task<AttributesToValidate> findAttributesMandatoryToValidateManually(
             const QStringList &previousTemplatePaths) const;
     void validateMandatory(const QSet<QString> &attributesMandatory,
                            const QSet<QString> &attributesNotMandatory);

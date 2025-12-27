@@ -1,5 +1,6 @@
 #include <QFileDialog>
 #include <QMessageBox>
+#include <QProgressDialog>
 
 #include <TemplateFiller.h>
 #include <TemplateExceptions.h>
@@ -9,6 +10,7 @@
 #include "DialogExtractInfos.h"
 #include "DialogValidateMandatory.h"
 #include "MainWindow.h"
+#include <QCoro/QCoroCore>
 #include "./ui_MainWindow.h"
 
 MainWindow::MainWindow(QWidget *parent)
@@ -17,9 +19,10 @@ MainWindow::MainWindow(QWidget *parent)
 {
     m_templateFiller = nullptr;
     ui->setupUi(this);
+    _setGenerateButtonsEnabled(false);
     m_settingsKeyExtraInfos = "MainWindowExtraInfos";
     m_settingsKeyApi = "MainWindowKey";
-    ui->buttonBasicControls->setEnabled(false);
+    _setControlButtonsEnabled(false);
     _connectSlots();
 }
 
@@ -56,6 +59,13 @@ void MainWindow::_clearTemplateFiller()
         delete m_templateFiller;
         m_templateFiller = nullptr;
     }
+}
+
+void MainWindow::_setControlButtonsEnabled(bool enable)
+{
+    ui->buttonBasicControls->setEnabled(enable);
+    ui->buttonFindMandatoryFieldIds->setEnabled(enable);
+    ui->buttonExtractProductInfos->setEnabled(enable);
 }
 
 void MainWindow::browseSourceMain()
@@ -109,7 +119,7 @@ void MainWindow::browseSourceMain()
             curModelToFill->deleteLater();
             curModelSource->deleteLater();
         }
-        ui->buttonBasicControls->setEnabled(true);
+        _setControlButtonsEnabled(true);
     }
 }
 
@@ -163,14 +173,37 @@ void MainWindow::baseControls()
 void MainWindow::findValidateMandatoryFieldIds()
 {
     const auto &previousFilePath = m_templateFiller->findPreviousTemplatePath();
-    auto attrToValidate = m_templateFiller->findAttributesMandatoryToValidateManually(previousFilePath);
-    DialogValidateMandatory dialog{attrToValidate};
-    auto ret = dialog.exec();
-    if (ret == QDialog::Accepted)
+
+    auto progress = new QProgressDialog(
+                tr("Loading mandatory attributes…"),
+                QString{}, 0, 0, this);
+    progress->setWindowModality(Qt::ApplicationModal);
+    progress->setCancelButton(nullptr);
+    progress->setMinimumDuration(0);
+    progress->setAutoClose(false);
+    progress->setAutoReset(false);
+    progress->setValue(0);
+    progress->show();
+
+    QPointer<QProgressDialog> progressGuard{progress};
+
+    QCoro::connect(m_templateFiller->findAttributesMandatoryToValidateManually(previousFilePath),
+                   this, [this, progressGuard](TemplateFiller::AttributesToValidate attrToValidate)
     {
-        m_templateFiller->validateMandatory(dialog.getAttributeValidatedMandatory(),
-                                            dialog.getAttributeValidatedNotMandatory());
-    }
+        if (progressGuard)
+        {
+            progressGuard->close();
+            progressGuard->deleteLater();
+        }
+
+        DialogValidateMandatory dialog{attrToValidate};
+        auto ret = dialog.exec();
+        if (ret == QDialog::Accepted)
+        {
+            m_templateFiller->validateMandatory(dialog.getAttributeValidatedMandatory(),
+                                                dialog.getAttributeValidatedNotMandatory());
+        }
+    });
 }
 
 void MainWindow::extractProductInfos()

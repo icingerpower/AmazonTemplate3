@@ -37,6 +37,7 @@ private:
     QString m_settingsKeyExtraInfos;
     QString m_settingsKeyApi;
     void _clearTemplateFiller();
+    void _setControlButtonsEnabled(bool enable);
     void _setGenerateButtonsEnabled(bool enable);
     void _enableGenerateButtonIfValid();
 };
