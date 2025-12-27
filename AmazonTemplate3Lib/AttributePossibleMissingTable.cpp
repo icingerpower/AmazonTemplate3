@@ -59,7 +59,7 @@ void AttributePossibleMissingTable::recordAttribute(
     if (!contains(marketplaceId, countryCode, langCode, attrId))
     {
         QStringList newRow;
-        newRow << marketplaceId << countryCode << langCode << attrId << possibleValues.join(";");
+        newRow << marketplaceId << countryCode << langCode << attrId << possibleValues.join(CELL_SEP);
 
         beginInsertRows(QModelIndex{}, 0, 0);
         m_listOfStringList.insert(0, newRow);

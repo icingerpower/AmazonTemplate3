@@ -87,6 +87,7 @@ target_link_libraries(AmazonTemplate3Lib PRIVATE
 )
 
 add_definitions(-DCOL_SEP=",")
+add_definitions(-DCELL_SEP="\\073")
 add_definitions(-DSTR_TRUE="true")
 add_definitions(-DSTR_FALSE="false")
 

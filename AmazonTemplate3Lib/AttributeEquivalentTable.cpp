@@ -32,7 +32,7 @@ bool AttributeEquivalentTable::hasEquivalent(
     int pos = getPosAttr(attrId);
     if (pos >= 0)
     {
-        const auto &attributes = m_listOfStringList[pos][1].split(";");
+        const auto &attributes = m_listOfStringList[pos][1].split(CELL_SEP);
         return attributes.contains(value);
     }
     return false;
@@ -43,7 +43,7 @@ int AttributeEquivalentTable::getPosAttr(const QString &attrId) const
     int pos = 0;
     for (const auto &stringList : m_listOfStringList)
     {
-        const auto &attributes = stringList[0].split(";");
+        const auto &attributes = stringList[0].split(CELL_SEP);
         for (const auto &attribute : attributes)
         {
             if (attrId == attribute)
@@ -64,7 +64,7 @@ void AttributeEquivalentTable::recordAttribute(
     if (posAttr < 0)
     {
         QStringList newRow;
-        newRow << attrId << equivalentValues.join(";");
+        newRow << attrId << equivalentValues.join(CELL_SEP);
 
         beginInsertRows(QModelIndex{}, 0, 0);
         m_listOfStringList.insert(0, newRow);
@@ -73,7 +73,7 @@ void AttributeEquivalentTable::recordAttribute(
     }
     else
     {
-        const auto &currentEquivalent = m_listOfStringList[posAttr].last().split(";");
+        const auto &currentEquivalent = m_listOfStringList[posAttr].last().split(CELL_SEP);
         QSet<QString> equivalentValues{currentEquivalent.begin(), currentEquivalent.end()};
         for (const auto &newVal : equivalentValues)
         {
@@ -82,7 +82,7 @@ void AttributeEquivalentTable::recordAttribute(
         QStringList listEquivalentValues{equivalentValues.begin(), equivalentValues.end()};
         std::sort(listEquivalentValues.begin(), listEquivalentValues.end());
         int indColLast = m_listOfStringList[posAttr].size() - 1;
-        m_listOfStringList[posAttr][indColLast] = listEquivalentValues.join(";");
+        m_listOfStringList[posAttr][indColLast] = listEquivalentValues.join(CELL_SEP);
         emit dataChanged(index(posAttr, indColLast)
                          , index(posAttr, indColLast));
     }

@@ -26,6 +26,8 @@ private slots:
     void cleanupTestCase() {
         OpenAi2::instance()->resetForTests();
         QFile::remove("test_settings.ini");
+        QFile::remove("test_settings_table.ini");
+        QFile::remove("test_settings_reviewed.ini");
     }
 
     void testLoadPhases() {
