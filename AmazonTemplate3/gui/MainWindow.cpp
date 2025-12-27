@@ -7,10 +7,14 @@
 #include <FileModelToFill.h>
 #include <FileModelSources.h>
 
+#include "../../common/workingdirectory/WorkingDirectoryManager.h"
+#include "OpenAi2.h"
+
 #include "DialogExtractInfos.h"
 #include "DialogValidateMandatory.h"
 #include "MainWindow.h"
 #include <QCoro/QCoroCore>
+#include <ExceptionOpenAiNotInitialized.h>
 #include "./ui_MainWindow.h"
 
 MainWindow::MainWindow(QWidget *parent)
@@ -23,6 +27,16 @@ MainWindow::MainWindow(QWidget *parent)
     m_settingsKeyExtraInfos = "MainWindowExtraInfos";
     m_settingsKeyApi = "MainWindowKey";
     _setControlButtonsEnabled(false);
+    auto settings = WorkingDirectoryManager::instance()->settings();
+    if (settings->contains(m_settingsKeyApi))
+    {
+        auto key = settings->value(m_settingsKeyApi).toString();
+        if (!key.isEmpty())
+        {
+            ui->lineEditOpenAiKey->setText(key);
+            OpenAi2::instance()->init(key);
+        }
+    }
     _connectSlots();
 }
 
@@ -50,6 +64,25 @@ void MainWindow::_connectSlots()
             &QPushButton::clicked,
             this,
             &MainWindow::extractProductInfos);
+    connect(ui->lineEditOpenAiKey,
+            &QLineEdit::textChanged,
+            this,
+            &MainWindow::onApiKeyChanged);
+}
+
+void MainWindow::onApiKeyChanged(const QString &key)
+{
+    auto settings = WorkingDirectoryManager::instance()->settings();
+    if (!key.isEmpty())
+    {
+        settings->setValue(m_settingsKeyApi, key);
+        OpenAi2::instance()->init(key);
+    }
+    else if (settings->contains(m_settingsKeyApi))
+    {
+        settings->remove(m_settingsKeyApi);
+    }
+    _enableGenerateButtonIfValid();
 }
 
 void MainWindow::_clearTemplateFiller()
@@ -172,38 +205,48 @@ void MainWindow::baseControls()
 
 void MainWindow::findValidateMandatoryFieldIds()
 {
-    const auto &previousFilePath = m_templateFiller->findPreviousTemplatePath();
-
-    auto progress = new QProgressDialog(
-                tr("Loading mandatory attributes…"),
-                QString{}, 0, 0, this);
-    progress->setWindowModality(Qt::ApplicationModal);
-    progress->setCancelButton(nullptr);
-    progress->setMinimumDuration(0);
-    progress->setAutoClose(false);
-    progress->setAutoReset(false);
-    progress->setValue(0);
-    progress->show();
-
-    QPointer<QProgressDialog> progressGuard{progress};
-
-    QCoro::connect(m_templateFiller->findAttributesMandatoryToValidateManually(previousFilePath),
-                   this, [this, progressGuard](TemplateFiller::AttributesToValidate attrToValidate)
+    try
     {
-        if (progressGuard)
-        {
-            progressGuard->close();
-            progressGuard->deleteLater();
-        }
+        const auto &previousFilePath = m_templateFiller->findPreviousTemplatePath();
 
-        DialogValidateMandatory dialog{attrToValidate};
-        auto ret = dialog.exec();
-        if (ret == QDialog::Accepted)
+        auto progress = new QProgressDialog(
+                    tr("Loading mandatory attributes…"),
+                    QString{}, 0, 0, this);
+        progress->setWindowModality(Qt::ApplicationModal);
+        progress->setCancelButton(nullptr);
+        progress->setMinimumDuration(0);
+        progress->setAutoClose(false);
+        progress->setAutoReset(false);
+        progress->setValue(0);
+        progress->show();
+
+        QPointer<QProgressDialog> progressGuard{progress};
+
+        QCoro::connect(m_templateFiller->findAttributesMandatoryToValidateManually(previousFilePath),
+                       this, [this, progressGuard](TemplateFiller::AttributesToValidate attrToValidate)
         {
-            m_templateFiller->validateMandatory(dialog.getAttributeValidatedMandatory(),
-                                                dialog.getAttributeValidatedNotMandatory());
-        }
-    });
+            if (progressGuard)
+            {
+                progressGuard->close();
+                progressGuard->deleteLater();
+            }
+
+            DialogValidateMandatory dialog{attrToValidate};
+            auto ret = dialog.exec();
+            if (ret == QDialog::Accepted)
+            {
+                m_templateFiller->validateMandatory(dialog.getAttributeValidatedMandatory(),
+                                                    dialog.getAttributeValidatedNotMandatory());
+            }
+        });
+    }
+    catch (const ExceptionOpenAiNotInitialized &exception)
+    {
+        QMessageBox::warning(
+                    this,
+                    exception.title(),
+                    exception.error());
+    }
 }
 
 void MainWindow::extractProductInfos()

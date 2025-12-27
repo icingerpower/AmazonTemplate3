@@ -11,7 +11,8 @@ class MandatoryAttributesManager
 {
 public:
     MandatoryAttributesManager();
-    QCoro::Task<void> load(const QString &templateFileNameFrom,
+    QCoro::Task<void> load(
+            const QString &templateFileNameFrom,
             const QString &settingPath
             , const QString &productType
             , const QHash<QString, int> &curTemplateFieldIds
@@ -39,6 +40,7 @@ private:
     static const QString SETTINGS_KEYS_TEMPLATES_DONE;
     QHash<QString, int> m_curTemplateAllIds;
     QSet<QString> m_doneTemplatePaths;
+    QHash<QString, QSet<QString>> m_productType_reviewedAttributes;
     QSet<QString> m_mandatoryIdsCurTemplates;
     QSet<QString> m_mandatoryIdsFileRemovedAi;
     QSet<QString> m_mandatoryIdsPreviousTemplates;

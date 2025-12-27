@@ -10,6 +10,7 @@
 int main(int argc, char *argv[])
 {
     qRegisterMetaType<QSet<QString>>();
+    qRegisterMetaType<QHash<QString, QSet<QString>>>();
 
     QCoreApplication::setOrganizationName("Icinger Power");
     QCoreApplication::setOrganizationDomain("ecomelitepro.com");

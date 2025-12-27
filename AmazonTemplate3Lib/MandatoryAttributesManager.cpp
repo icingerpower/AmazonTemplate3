@@ -88,7 +88,7 @@ QCoro::Task<void> MandatoryAttributesManager::load(
             "Product type: \"%1\".\n"
             "Attribute id: \"%2\".\n\n"
             "Question: Is this attribute mandatory to create a compliant product page, "
-            "OR required to avoid a common quality-issue warning (i.e., it should be treated as mandatory)?\n\n"
+            "OR required to avoid convertiation rate penalty or a common page quality-issue warning (i.e., it should be treated as mandatory)?\n\n"
             "Rules:\n"
             "- Reply with exactly one word: yes or no\n"
             "- No punctuation, no explanation.\n"
@@ -149,8 +149,8 @@ QCoro::Task<void> MandatoryAttributesManager::load(
 
         phase1.push_back(step);
     }
-
-    co_await OpenAi2::instance()->askGptMultipleTimeCoro(phase1, "gpt-5-mini");
+// TODO record those asked already to not ask again
+    co_await OpenAi2::instance()->askGptMultipleTimeCoro(phase1, "gpt-5-mini"); // QDebug() << "Number of attributes that will be classified by AI as mandatory or not:" << phase1.size();
 
 
     if (undecided->isEmpty())

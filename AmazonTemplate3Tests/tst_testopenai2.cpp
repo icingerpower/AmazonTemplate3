@@ -67,6 +67,7 @@ private slots:
     void robustness_blocked_until_timer();
     void robustness_double_callback();
     void robustness_single_failure_counter();
+    void test_askGptMultipleTimeCoro_Real();
 
 private:
     void setFakeTransport(std::function<void(const QString&, const QString&, const QList<QString>&, std::function<void(QString)>, std::function<void(QString)>)> transport);
@@ -1769,5 +1770,59 @@ void TestOpenAi2::robustness_single_failure_counter()
 }
 
 QTEST_MAIN(TestOpenAi2)
+
+void TestOpenAi2::test_askGptMultipleTimeCoro_Real()
+{
+#if defined(DO_REAL_TESTS) && DO_REAL_TESTS
+    // Use the key provided by the user for this specific test
+    const QString key = OPEN_AI_API_KEY;
+    
+    auto ai = OpenAi2::instance();
+    ai->resetForTests();
+    ai->init(key);
+
+    auto step = QSharedPointer<OpenAi2::StepMultipleAsk>::create();
+    step->id = "coro_real";
+    step->neededReplies = 3;
+    step->maxRetries = 2; // Real network, allow retries
+    
+    // Simple prompt to get a quick response
+    step->getPrompt = [](int){ return "Reply with exactly one word: 'working'."; };
+    
+    // Validate we get something reasonable
+    bool validated = false;
+    int nAsked = 0;
+    step->validate = [&](const QString& r, const QString&){ 
+        validated = !r.trimmed().isEmpty(); 
+        ++nAsked;
+        return validated; 
+    };
+    
+    step->chooseBest = OpenAi2::CHOOSE_MOST_FREQUENT;
+    
+    bool applied = false;
+    QString result;
+    step->apply = [&](const QString& r){ 
+        applied = true; 
+        result = r;
+    };
+    
+    QList<QSharedPointer<OpenAi2::StepMultipleAsk>> steps;
+    steps << step;
+
+    try {
+        QCoro::waitFor(ai->askGptMultipleTimeCoro(steps, "gpt-5-mini"));
+    } catch (...) {
+        QFAIL("askGptMultipleTimeCoro threw an exception");
+    }
+    QVERIFY(nAsked == 3);
+
+    QVERIFY(validated);
+    QVERIFY(applied);
+    QVERIFY(result.contains("working", Qt::CaseInsensitive));
+#else
+    QSKIP("DO_REAL_TESTS=OFF. Skipping real API test.");
+#endif
+}
 
 #include "tst_testopenai2.moc"

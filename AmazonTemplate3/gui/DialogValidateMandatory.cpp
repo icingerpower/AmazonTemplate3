@@ -14,7 +14,9 @@ DialogValidateMandatory::DialogValidateMandatory(
                 attributesToValidate.addedAi.size() +
                 attributesToValidate.removedAi.size());
     
-    for (const auto &fieldId : attributesToValidate.addedAi)
+    QStringList addedAiSorted = attributesToValidate.addedAi.values();
+    addedAiSorted.sort();
+    for (const auto &fieldId : addedAiSorted)
     {
         auto *itemFieldId = new QTableWidgetItem{fieldId};
         itemFieldId->setFlags(Qt::ItemIsEnabled);
@@ -32,7 +34,9 @@ DialogValidateMandatory::DialogValidateMandatory(
         ++row;
     }
 
-    for (const auto &fieldId : attributesToValidate.removedAi)
+    QStringList removedAiSorted = attributesToValidate.removedAi.values();
+    removedAiSorted.sort();
+    for (const auto &fieldId : removedAiSorted)
     {
         auto *itemFieldId = new QTableWidgetItem{fieldId};
         itemFieldId->setFlags(Qt::ItemIsEnabled);

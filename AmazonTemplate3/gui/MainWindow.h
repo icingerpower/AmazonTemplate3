@@ -27,6 +27,7 @@ public slots:
     void baseControls();
     void findValidateMandatoryFieldIds();
     void extractProductInfos();
+    void onApiKeyChanged(const QString &key);
 
 private:
     Ui::MainWindow *ui;

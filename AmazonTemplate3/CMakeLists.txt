@@ -45,6 +45,8 @@ endif()
 
 target_link_libraries(AmazonTemplate3 PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network AmazonTemplate3Lib)
 
+target_include_directories(AmazonTemplate3 PRIVATE ../../common/openai)
+
 set_target_properties(AmazonTemplate3 PROPERTIES
     MACOSX_BUNDLE_GUI_IDENTIFIER my.example.com
     MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
