@@ -21,6 +21,14 @@ AttributePossibleMissingTable::AttributePossibleMissingTable(
     _loadFromFile();
 }
 
+void AttributePossibleMissingTable::remove(const QModelIndex &index)
+{
+    beginRemoveRows(QModelIndex{}, index.row(), index.row());
+    m_listOfStringList.removeAt(index.row());
+    _saveInFile();
+    endRemoveRows();
+}
+
 bool AttributePossibleMissingTable::contains(
         const QString &marketplaceId
         , const QString &countryCode

@@ -11,6 +11,7 @@ class AttributePossibleMissingTable : public QAbstractTableModel
 public:
     explicit AttributePossibleMissingTable(
             const QString &workingDirectory, QObject *parent = nullptr);
+    void remove(const QModelIndex &index);
     bool contains(const QString &marketplaceId,
                            const QString &countryCode,
                            const QString &langCode,

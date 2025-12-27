@@ -26,6 +26,7 @@ public slots:
     void browseSourceMain();
     void baseControls();
     void findValidateMandatoryFieldIds();
+    void viewAttributes();
     void extractProductInfos();
     void onApiKeyChanged(const QString &key);
 

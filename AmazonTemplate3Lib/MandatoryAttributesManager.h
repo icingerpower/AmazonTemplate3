@@ -7,10 +7,13 @@
 #include <QCoro/QCoroSignal>
 #include <QCoro/QCoroCore>
 
-class MandatoryAttributesManager
+#include <QAbstractTableModel>
+
+class MandatoryAttributesManager : public QAbstractTableModel
 {
+    Q_OBJECT
 public:
-    MandatoryAttributesManager();
+    explicit MandatoryAttributesManager(QObject *parent = nullptr);
     QCoro::Task<void> load(
             const QString &templateFileNameFrom,
             const QString &settingPath
@@ -36,6 +39,14 @@ public:
 
     const QSet<QString> &mandatoryIdsFileRemovedAi() const;
 
+    // QAbstractTableModel interface
+    int rowCount(const QModelIndex &parent = QModelIndex()) const override;
+    int columnCount(const QModelIndex &parent = QModelIndex()) const override;
+    QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override;
+    QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override;
+    bool setData(const QModelIndex &index, const QVariant &value, int role = Qt::EditRole) override;
+    Qt::ItemFlags flags(const QModelIndex &index) const override;
+
 private:
     static const QString SETTINGS_KEYS_TEMPLATES_DONE;
     QHash<QString, int> m_curTemplateAllIds;
@@ -47,6 +58,7 @@ private:
     QSet<QString> m_idsNonMandatoryAddedByAi;
     QSet<QString> m_idsAddedManually;
     QSet<QString> m_idsRemovedManually;
+    QList<QString> m_orderedFieldIds;
     QHash<QString, QSet<QString> *> m_key_ids;
     QString m_settingsPath;
     QString m_productType;

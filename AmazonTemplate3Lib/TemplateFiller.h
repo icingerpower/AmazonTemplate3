@@ -7,6 +7,7 @@
 
 #include <xlsxdocument.h>
 #include <QCoro/QCoroTask>
+
 class MandatoryAttributesManager;
 class AttributeEquivalentTable;
 class AttributeFlagsTable;
@@ -50,6 +51,16 @@ public:
             const QStringList &previousTemplatePaths) const;
     QStringList suggestAttributesSameValueChild(
             const QStringList &previousTemplatePaths) const;
+
+    MandatoryAttributesManager *mandatoryAttributesManager() const;
+
+    AttributeEquivalentTable *attributeEquivalentTable() const;
+
+    AttributeFlagsTable *attributeFlagsTable() const;
+
+    AttributePossibleMissingTable *attributePossibleMissingTable() const;
+
+    AttributeValueReplacedTable *attributeValueReplacedTable() const;
 
 private:
     QHash<QString, QHash<QString, QString>> m_countryCode_langCode_keywords;

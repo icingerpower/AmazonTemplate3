@@ -9,4 +9,13 @@ SET(GUI_FILES
     ${CMAKE_CURRENT_LIST_DIR}/DialogValidateMandatory.cpp
     ${CMAKE_CURRENT_LIST_DIR}/DialogValidateMandatory.h
     ${CMAKE_CURRENT_LIST_DIR}/DialogValidateMandatory.ui
+    ${CMAKE_CURRENT_LIST_DIR}/DialogAttributes.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/DialogAttributes.h
+    ${CMAKE_CURRENT_LIST_DIR}/DialogAttributes.ui
+    ${CMAKE_CURRENT_LIST_DIR}/DialogAddPossibleValues.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/DialogAddPossibleValues.h
+    ${CMAKE_CURRENT_LIST_DIR}/DialogAddPossibleValues.ui
+    ${CMAKE_CURRENT_LIST_DIR}/DialogAddValueToReplace.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/DialogAddValueToReplace.h
+    ${CMAKE_CURRENT_LIST_DIR}/DialogAddValueToReplace.ui
 )

@@ -432,6 +432,31 @@ void TemplateFiller::validateMandatory(
                 attributesMandatory, attributesNotMandatory);
 }
 
+MandatoryAttributesManager *TemplateFiller::mandatoryAttributesManager() const
+{
+    return m_mandatoryAttributesManager;
+}
+
+AttributeEquivalentTable *TemplateFiller::attributeEquivalentTable() const
+{
+    return m_attributeEquivalentTable;
+}
+
+AttributeFlagsTable *TemplateFiller::attributeFlagsTable() const
+{
+    return m_attributeFlagsTable;
+}
+
+AttributePossibleMissingTable *TemplateFiller::attributePossibleMissingTable() const
+{
+    return m_attributePossibleMissingTable;
+}
+
+AttributeValueReplacedTable *TemplateFiller::attributeValueReplacedTable() const
+{
+    return m_attributeValueReplacedTable;
+}
+
 int TemplateFiller::_getIndCol(
         const QHash<QString, int> &fieldId_index
         , const QStringList &possibleValues) const

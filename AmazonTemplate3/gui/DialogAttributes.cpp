@@ -1,0 +1,106 @@
+#include <AttributeValueReplacedTable.h>
+#include <AttributePossibleMissingTable.h>
+#include <AttributeEquivalentTable.h>
+#include <AttributeFlagsTable.h>
+#include <MandatoryAttributesManager.h>
+#include <TemplateFiller.h>
+
+#include "DialogAddPossibleValues.h"
+#include "DialogAddValueToReplace.h"
+
+#include "DialogAttributes.h"
+#include "ui_DialogAttributes.h"
+
+DialogAttributes::DialogAttributes(TemplateFiller *templateFiller, QWidget *parent) :
+    QDialog(parent),
+    ui(new Ui::DialogAttributes)
+{
+    ui->setupUi(this);
+    m_templateFiller = templateFiller;
+    ui->tableViewEquivalences->setModel(m_templateFiller->attributeEquivalentTable());
+    ui->tableViewFlags->setModel(m_templateFiller->attributeFlagsTable());
+    ui->tableViewFlags->resizeColumnToContents(9);
+    ui->tableViewMandatory->setModel(m_templateFiller->mandatoryAttributesManager());
+    ui->tableViewMandatory->resizeColumnToContents(9);
+    ui->tableViewMissingPossibleValues->setModel(m_templateFiller->attributePossibleMissingTable());
+    ui->tableViewReplaced->setModel(m_templateFiller->attributeValueReplacedTable());
+    _connectSlots();
+}
+
+DialogAttributes::~DialogAttributes()
+{
+    delete ui;
+}
+
+void DialogAttributes::_connectSlots()
+{
+    connect(ui->buttonMissingPossibleAdd,
+            &QPushButton::clicked,
+            this,
+            &DialogAttributes::missingPossibleAdd);
+    connect(ui->buttonMissingPossibleRemove,
+            &QPushButton::clicked,
+            this,
+            &DialogAttributes::missingPossibleRemove);
+    connect(ui->buttonReplacedRemove,
+            &QPushButton::clicked,
+            this,
+            &DialogAttributes::replaceAdd);
+    connect(ui->buttonReplacedAdd,
+            &QPushButton::clicked,
+            this,
+            &DialogAttributes::replaceRemove);
+}
+
+void DialogAttributes::missingPossibleAdd()
+{
+    DialogAddPossibleValues dialogMissing;
+    auto ret = dialogMissing.exec();
+    if (ret == QDialog::Accepted)
+    {
+        m_templateFiller->attributePossibleMissingTable()->recordAttribute(
+                    dialogMissing.getMarketplaceId(),
+                    dialogMissing.getCountryCode(),
+                    dialogMissing.getLangCode(),
+                    dialogMissing.getAttributeId(),
+                    dialogMissing.getPossibleValues());
+    }
+}
+
+void DialogAttributes::missingPossibleRemove()
+{
+    const auto &selIndexes
+            = ui->tableViewMissingPossibleValues
+            ->selectionModel()->selectedIndexes();
+    if (selIndexes.size() > 0)
+    {
+        m_templateFiller->attributePossibleMissingTable()->remove(selIndexes[0]);
+    }
+}
+
+void DialogAttributes::replaceAdd()
+{
+    DialogAddValueToReplace dialogReplace;
+    auto ret = dialogReplace.exec();
+    if (ret == QDialog::Accepted)
+    {
+        m_templateFiller->attributeValueReplacedTable()->recordAttribute(
+                    dialogReplace.getMarketplaceId(),
+                    dialogReplace.getCountryCode(),
+                    dialogReplace.getLangCode(),
+                    dialogReplace.getAttributeId(),
+                    dialogReplace.getValueFrom(),
+                    dialogReplace.getValueTo());
+    }
+}
+
+void DialogAttributes::replaceRemove()
+{
+    const auto &selIndexes
+            = ui->tableViewMissingPossibleValues
+            ->selectionModel()->selectedIndexes();
+    if (selIndexes.size() > 0)
+    {
+        m_templateFiller->attributeValueReplacedTable()->remove(selIndexes[0]);
+    }
+}

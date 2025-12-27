@@ -22,6 +22,14 @@ AttributeValueReplacedTable::AttributeValueReplacedTable(
     _loadFromFile();
 }
 
+void AttributeValueReplacedTable::remove(const QModelIndex &index)
+{
+    beginRemoveRows(QModelIndex{}, index.row(), index.row());
+    m_listOfStringList.removeAt(index.row());
+    _saveInFile();
+    endRemoveRows();
+}
+
 bool AttributeValueReplacedTable::contains(
         const QString &marketplaceId
         , const QString &countryCode

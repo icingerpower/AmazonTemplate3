@@ -11,6 +11,7 @@
 #include "OpenAi2.h"
 
 #include "DialogExtractInfos.h"
+#include "DialogAttributes.h"
 #include "DialogValidateMandatory.h"
 #include "MainWindow.h"
 #include <QCoro/QCoroCore>
@@ -64,6 +65,10 @@ void MainWindow::_connectSlots()
             &QPushButton::clicked,
             this,
             &MainWindow::extractProductInfos);
+    connect(ui->buttonViewAttributes,
+            &QPushButton::clicked,
+            this,
+            &MainWindow::viewAttributes);
     connect(ui->lineEditOpenAiKey,
             &QLineEdit::textChanged,
             this,
@@ -98,6 +103,7 @@ void MainWindow::_setControlButtonsEnabled(bool enable)
 {
     ui->buttonBasicControls->setEnabled(enable);
     ui->buttonFindMandatoryFieldIds->setEnabled(enable);
+    ui->buttonViewAttributes->setEnabled(enable);
     ui->buttonExtractProductInfos->setEnabled(enable);
 }
 
@@ -247,6 +253,12 @@ void MainWindow::findValidateMandatoryFieldIds()
                     exception.title(),
                     exception.error());
     }
+}
+
+void MainWindow::viewAttributes()
+{
+    DialogAttributes dialog{m_templateFiller};
+    dialog.exec();
 }
 
 void MainWindow::extractProductInfos()

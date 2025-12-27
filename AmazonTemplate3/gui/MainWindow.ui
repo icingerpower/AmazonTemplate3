@@ -56,6 +56,13 @@
        </widget>
       </item>
       <item>
+       <widget class="QPushButton" name="buttonViewAttributes">
+        <property name="text">
+         <string>Attributes</string>
+        </property>
+       </widget>
+      </item>
+      <item>
        <widget class="QPushButton" name="buttonExtractProductInfos">
         <property name="text">
          <string>Extract product infos</string>
