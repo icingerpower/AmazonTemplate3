@@ -18,6 +18,11 @@ bool AttributesMandatoryAiTable::isAttributeReviewed(const QString &attrId) cons
     return false;
 }
 
+void AttributesMandatoryAiTable::save()
+{
+    _saveInSettings();
+}
+
 void AttributesMandatoryAiTable::_clear()
 {
     m_fieldIdsAiAdded.clear();
@@ -114,9 +119,9 @@ QCoro::Task<void> AttributesMandatoryAiTable::load(
         step->apply = [this, attrId, undecided, normalizeYesNo, productTypeLower](const QString& bestReply) {
             const QString r = normalizeYesNo(bestReply);
             if (r == "yes") {
-                m_fieldIdsAiRemoved.insert(attrId);
-            } else if (r == "no") {
                 m_fieldIdsAiAdded.insert(attrId);
+            } else if (r == "no") {
+                m_fieldIdsAiRemoved.insert(attrId);
             } else {
                 undecided->insert(attrId);
             }
@@ -129,7 +134,6 @@ QCoro::Task<void> AttributesMandatoryAiTable::load(
 
     if (undecided->isEmpty())
     {
-        _saveInSettings();
         co_return;
     }
 
@@ -166,7 +170,6 @@ QCoro::Task<void> AttributesMandatoryAiTable::load(
 
     co_await OpenAi2::instance()->askGptMultipleTimeCoro(phase2, "gpt-5.2");
 
-    _saveInSettings();
 }
 
 QSet<QString> AttributesMandatoryAiTable::fieldIdsAiAdded() const

@@ -9,6 +9,7 @@ The project uses CMake. Recommended build type is RelWithDebInfo or Release for 
 ```bash
 cmake -B build-release -S . -DCMAKE_BUILD_TYPE=Release
 cmake --build build-release --target AmazonTemplate3Tests
+# Note: When invoking from a parent directory, use "../AmazonTemplate3/build-release" to keep the source tree clean.
 ```
 
 ### 2. Running Unit Tests
@@ -42,6 +43,10 @@ cmake --build build-release --target AmazonTemplate3Tests
     - **Recursion**: `_runStepCollectN` and `askGptMultipleTime` use recursive lambdas. Ensure callbacks are fired to prevent hangs.
 - **Hard Failures**: `OpenAi2` stops retrying immediately if an error message starts with `fatal:` (e.g., 401 Unauthorized).
 - **Concurrency**: `QCoro` is being introduced (see `MandatoryAttributesManager.h`).
+### Security Best Practices
+- **Never commit API keys**: Do not store API keys in source files that are tracked by version control.
+- **Do not compile in source directory**: Build artifacts should be placed in a separate build directory (e.g., `build-release`) to avoid polluting the source tree.
+
 
 ### Common Pitfalls
 1.  **Test Timeouts**: Always use `QTimer` to enforce timeouts in `QEventLoop` tests.

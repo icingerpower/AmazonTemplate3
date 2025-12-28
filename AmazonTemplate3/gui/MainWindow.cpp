@@ -4,6 +4,7 @@
 
 #include <TemplateFiller.h>
 #include <TemplateExceptions.h>
+#include <AttributesMandatoryAiTable.h>
 #include <FileModelToFill.h>
 #include <FileModelSources.h>
 
@@ -149,7 +150,10 @@ void MainWindow::browseSourceMain()
         auto *curModelToFill = ui->treeViewToFill->model();
         auto *fileModelToFill
             = new FileModelToFill{workingDirPath, ui->treeViewToFill};
-        m_templateFiller = new TemplateFiller{filePath, fileModelToFill->getFilePaths()};
+        m_templateFiller = new TemplateFiller{
+                m_workingDir.path()
+                , filePath
+                , fileModelToFill->getFilePaths()};
         ui->treeViewToFill->setModel(fileModelToFill);
         ui->treeViewToFill->setRootIndex(fileModelToFill->index(workingDirPath));
         ui->treeViewToFill->header()->resizeSection(0, 300);
@@ -213,8 +217,6 @@ void MainWindow::findValidateMandatoryFieldIds()
 {
     try
     {
-        const auto &previousFilePath = m_templateFiller->findPreviousTemplatePath();
-
         auto progress = new QProgressDialog(
                     tr("Loading mandatory attributes…"),
                     QString{}, 0, 0, this);
@@ -228,7 +230,7 @@ void MainWindow::findValidateMandatoryFieldIds()
 
         QPointer<QProgressDialog> progressGuard{progress};
 
-        QCoro::connect(m_templateFiller->findAttributesMandatoryToValidateManually(previousFilePath),
+        QCoro::connect(m_templateFiller->findAttributesMandatoryToValidateManually(),
                        this, [this, progressGuard](TemplateFiller::AttributesToValidate attrToValidate)
         {
             if (progressGuard)
@@ -243,6 +245,7 @@ void MainWindow::findValidateMandatoryFieldIds()
             {
                 m_templateFiller->validateMandatory(dialog.getAttributeValidatedMandatory(),
                                                     dialog.getAttributeValidatedNotMandatory());
+                m_templateFiller->mandatoryAttributesAiTable()->save();
             }
         });
     }

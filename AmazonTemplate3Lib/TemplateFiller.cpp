@@ -38,7 +38,9 @@ const QSet<QString> TemplateFiller::VALUES_MANDATORY
 }();
 
 TemplateFiller::TemplateFiller(
-        const QString &templateFromPath, const QStringList &templateToPaths)
+        const QString &workingDirCommon
+        , const QString &templateFromPath
+        , const QStringList &templateToPaths)
 {
     m_mandatoryAttributesTable = nullptr;
     m_mandatoryAttributesAiTable = nullptr;
@@ -46,7 +48,7 @@ TemplateFiller::TemplateFiller(
     m_attributeFlagsTable = nullptr;
     m_attributePossibleMissingTable = nullptr;
     m_attributeValueReplacedTable = nullptr;
-    setTemplates(templateFromPath, templateToPaths);
+    setTemplates(workingDirCommon, templateFromPath, templateToPaths);
 }
 
 TemplateFiller::~TemplateFiller()
@@ -56,17 +58,32 @@ TemplateFiller::~TemplateFiller()
 }
 
 void TemplateFiller::setTemplates(
-        const QString &templateFromPath, const QStringList &templateToPaths)
+        const QString &commonSettingsDir
+        , const QString &templateFromPath
+        , const QStringList &templateToPaths)
 {
     m_templateFromPath = templateFromPath;
     m_templateToPaths = templateToPaths;
     m_countryCodeFrom = _getCountryCode(templateFromPath);
     m_langCodeFrom = _getLangCode(templateFromPath);
+    m_workingDirCommon = commonSettingsDir;
     m_workingDir = QFileInfo{m_templateFromPath}.dir();
     m_workingDirImage = m_workingDir.absoluteFilePath("images");
     _clearAttributeManagers();
     m_mandatoryAttributesAiTable = new AttributesMandatoryAiTable;
-    m_mandatoryAttributesTable = new AttributesMandatoryTable;
+    const auto &productType = _readProductType(m_templateFromPath);
+    Q_ASSERT(!productType.isEmpty());
+    const auto &filePathMandatory
+            = m_workingDir.absoluteFilePath("mandatoryFieldIds.ini");
+
+    QXlsx::Document doc(m_templateFromPath);
+    const auto &fieldId_index = _get_fieldId_index(doc);
+    const auto &fieldIdMandatory = _get_fieldIdMandatoryAll();
+        // 2. Resolve "Previous" mandatory fields
+    const auto &previousFieldIdMandatory = _get_fieldIdMandatoryPrevious();
+
+    m_mandatoryAttributesTable = new AttributesMandatoryTable{
+            filePathMandatory, productType, fieldIdMandatory, previousFieldIdMandatory, fieldId_index};
     m_attributeEquivalentTable = new AttributeEquivalentTable{m_workingDir.path()};
     m_attributeFlagsTable = new AttributeFlagsTable{m_workingDir.path()};
     m_attributePossibleMissingTable = new AttributePossibleMissingTable{m_workingDir.path()};
@@ -406,49 +423,27 @@ QString TemplateFiller::_readProductType(const QString &filePath) const
     return QString{};
 }
 
-QCoro::Task<TemplateFiller::AttributesToValidate> TemplateFiller::findAttributesMandatoryToValidateManually(
-        QStringList previousTemplatePaths) const
+QSharedPointer<QSettings> TemplateFiller::settingsWorkingDir() const
+{
+    const auto &settingsPath = m_workingDir.absoluteFilePath("settings.ini");
+    return QSharedPointer<QSettings>::create(settingsPath, QSettings::IniFormat);
+}
+
+QCoro::Task<TemplateFiller::AttributesToValidate> TemplateFiller::findAttributesMandatoryToValidateManually() const
 {
     TemplateFiller::AttributesToValidate attributesToValidateManually;
     const auto &productType = _readProductType(m_templateFromPath);
+    Q_ASSERT(!productType.isEmpty());
     QXlsx::Document doc{m_templateFromPath};
     _selectTemplateSheet(doc);
     const auto &fieldId_index = _get_fieldId_index(doc);
-    const auto &fieldIdMandatory = _get_fieldIdMandatory(doc);
-    Q_ASSERT(!productType.isEmpty());
-    const auto &filePathMandatory
-            = m_workingDir.absoluteFilePath("mandatoryFieldIds.ini");
-    
-    const auto keys = fieldId_index.keys();
+    const auto &fieldIdMandatory = _get_fieldIdMandatoryAll();
     // 1. AI Load
     co_await m_mandatoryAttributesAiTable->load(
                 productType,
                 fieldIdMandatory,
                 fieldId_index);
 
-    // 2. Resolve "Previous" mandatory fields
-    QSet<QString> previousFieldIdMandatory;
-    if (!previousTemplatePaths.isEmpty())
-    {
-        // Naïve approach: read the first one.
-        // Ideally we might want to merge or pick best, but "previous" usually implies "last used".
-        // The list might be sorted or not. existing logic 'findPreviousTemplatePath' returns list.
-        // We'll proceed with the first one for now.
-        QXlsx::Document docPrev{previousTemplatePaths.first()};
-        if (docPrev.load()) 
-        {
-             // We reuse _get_fieldIdMandatory logic
-             previousFieldIdMandatory = _get_fieldIdMandatory(docPrev);
-        }
-    }
-    
-    // 3. UI Table Load
-    m_mandatoryAttributesTable->load(
-                filePathMandatory,
-                productType,
-                fieldIdMandatory,
-                previousFieldIdMandatory,
-                fieldId_index);
 
     attributesToValidateManually.addedAi
             = m_mandatoryAttributesAiTable->fieldIdsAiAdded();
@@ -785,6 +780,51 @@ QSet<QString> TemplateFiller::_get_fieldIdMandatory(QXlsx::Document &doc) const
         }
     }
     return fieldIds;
+}
+
+QSet<QString> TemplateFiller::_get_fieldIdMandatoryAll() const
+{
+    QXlsx::Document doc{m_templateFromPath};
+    _selectTemplateSheet(doc);
+    auto fieldIdMandatory = _get_fieldIdMandatory(doc);
+    for (const auto &targetPath : m_templateToPaths)
+    {
+        QXlsx::Document docTo{targetPath};
+        _selectTemplateSheet(docTo);
+        const auto &fieldIdMandatoryTo = _get_fieldIdMandatory(doc);
+        fieldIdMandatory.unite(fieldIdMandatoryTo);
+    }
+    return fieldIdMandatory;
+}
+
+QSet<QString> TemplateFiller::_get_fieldIdMandatoryPrevious() const
+{
+    QSet<QString> previousFieldIdMandatory;
+    auto settings = settingsWorkingDir();
+    const QString key{"fieldIdMandatoryPrevious"};
+    if (settings->contains(key))
+    {
+        qDebug() << "Loading _get_fieldIdMandatoryPrevious from settings";
+        return settings->value(key).value<QSet<QString>>();
+    }
+    qDebug() << "Loading _get_fieldIdMandatoryPrevious couldn't be done from settings";
+    const auto &previousTemplatePaths = findPreviousTemplatePath();
+
+    if (!previousTemplatePaths.isEmpty())
+    {
+        // Naïve approach: read the first one.
+        // Ideally we might want to merge or pick best, but "previous" usually implies "last used".
+        // The list might be sorted or not. existing logic 'findPreviousTemplatePath' returns list.
+        // We'll proceed with the first one for now.
+        QXlsx::Document docPrev{previousTemplatePaths.first()};
+        if (docPrev.load())
+        {
+             // We reuse _get_fieldIdMandatory logic
+             previousFieldIdMandatory = _get_fieldIdMandatory(docPrev);
+        }
+    }
+    settings->setValue(key, QVariant::fromValue(previousFieldIdMandatory));
+    return previousFieldIdMandatory;
 }
 
 QHash<QString, QSet<QString>> TemplateFiller::_get_fieldId_possibleValues(

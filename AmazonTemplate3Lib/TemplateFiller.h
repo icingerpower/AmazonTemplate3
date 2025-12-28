@@ -4,6 +4,8 @@
 #include <QString>
 #include <QStringList>
 #include <QDir>
+#include <QSettings>
+#include <QSharedPointer>
 
 #include <xlsxdocument.h>
 #include <QCoro/QCoroTask>
@@ -20,7 +22,7 @@ class TemplateFiller
 public:
     static const QSet<QString> VALUES_MANDATORY;
     static const QHash<QString, QString> SHEETS_MANDATORY;
-    TemplateFiller(const QString &templateFromPath
+    TemplateFiller(const QString &workingDirCommon, const QString &templateFromPath
                       , const QStringList &templateToPaths);
     ~TemplateFiller();
     struct AttributesToValidate{
@@ -31,7 +33,7 @@ public:
         V01
         , V02
     };
-    void setTemplates(const QString &templateFromPath
+    void setTemplates(const QString &commonSettingsDir, const QString &templateFromPath
                       , const QStringList &templateToPaths);
     void checkParentSkus(); // TODO raise exeption
     void checkKeywords(); // TODO raise exeption
@@ -41,8 +43,7 @@ public:
 
      // Return all field with values or ask AI after reading field ids
     QStringList findPreviousTemplatePath() const;
-    QCoro::Task<AttributesToValidate> findAttributesMandatoryToValidateManually(
-            QStringList previousTemplatePaths) const;
+    QCoro::Task<AttributesToValidate> findAttributesMandatoryToValidateManually() const;
     void validateMandatory(const QSet<QString> &attributesMandatory,
                            const QSet<QString> &attributesNotMandatory);
 
@@ -75,6 +76,7 @@ private:
     AttributeValueReplacedTable *m_attributeValueReplacedTable;
     void _clearAttributeManagers();
     QString m_productType;
+    QDir m_workingDirCommon;
     QDir m_workingDir;
     QDir m_workingDirImage;
     QString m_templateFromPath;
@@ -92,6 +94,8 @@ private:
     int _getRowFieldId(VersionAmz version) const;
     QHash<QString, int> _get_fieldId_index(QXlsx::Document &doc) const;
     QSet<QString> _get_fieldIdMandatory(QXlsx::Document &doc) const;
+    QSet<QString> _get_fieldIdMandatoryAll() const;
+    QSet<QString> _get_fieldIdMandatoryPrevious() const;
     QHash<QString, QSet<QString>> _get_fieldId_possibleValues(QXlsx::Document &doc) const;
     QHash<QString, QSet<QString>> _get_parentSku_skus(QXlsx::Document &doc) const;
     void _formatFieldId(QString &fieldId) const;
@@ -102,6 +106,7 @@ private:
     int _getIndColColorName(const QHash<QString, int> &fieldId_index) const;
     int _getIndColProductType(const QHash<QString, int> &fieldId_index) const;
     QString _readProductType(const QString &filePath) const;
+    QSharedPointer<QSettings> settingsWorkingDir() const; // Settings of current working directory
 };
 
 #endif // TEMPLATEFILLER_H

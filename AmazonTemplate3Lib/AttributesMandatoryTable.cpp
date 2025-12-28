@@ -5,41 +5,31 @@
 
 const QString AttributesMandatoryTable::KEY_MANDATORY{"attrMandatory"};
 
-AttributesMandatoryTable::AttributesMandatoryTable(QObject *parent)
-    : QAbstractTableModel(parent)
-{
-    //m_key_ids["m_idsAddedManually"] = &m_idsAddedManually;
-    //m_key_ids["m_idsRemovedManually"] = &m_idsRemovedManually;
-    //m_key_ids["m_mandatoryIdsPreviousTemplates"] = &m_mandatoryIdsPreviousTemplates;
-    m_needAiReview = false;
-}
-
-void AttributesMandatoryTable::load(
+AttributesMandatoryTable::AttributesMandatoryTable(
         const QString &settingPath,
         const QString &productType,
         const QSet<QString> &curTemplateFieldIdsMandatory,
         const QSet<QString> &previousTemplateFieldIdsMandatory,
-        const QHash<QString, int> &curTemplateFieldIds)
+        const QHash<QString, int> &curTemplateFieldIds,
+        QObject *parent)
+    : QAbstractTableModel(parent)
 {
-    beginResetModel();
-    
+    m_needAiReview = false;
     m_settingsPath = settingPath;
-    m_productType = productType;
-    const QString &productTypeLower = m_productType.toLower();
-    m_idsMandatory.clear();
-    m_idsNotMandatory.clear();
-
+    m_productType = productType.toLower();
     QSettings settings{m_settingsPath, QSettings::IniFormat};
 
     // First we check if it exits in the settings
-    settings.beginGroup(productTypeLower);
+    settings.beginGroup(m_productType);
     if (settings.contains(KEY_MANDATORY))
     {
         m_idsMandatory = settings.value(KEY_MANDATORY).value<QMap<QString, bool>>();
     }
     settings.endGroup();
 
-    // Second we check if it exits in previous template filled
+    m_idsNotMandatory.clear();
+
+        // Second we check if it exits in previous template filled
     if (m_idsMandatory.isEmpty())
     {
         for (const auto &previousFieldId : previousTemplateFieldIdsMandatory)
@@ -49,7 +39,6 @@ void AttributesMandatoryTable::load(
                 m_idsMandatory.insert(previousFieldId, true);
             }
         }
-        _saveInSettings();
     }
 
     // Last we load the Excel file values
@@ -69,7 +58,18 @@ void AttributesMandatoryTable::load(
             m_idsNotMandatory[fieldId] = false;
         }
     }
-    endResetModel();
+    auto allTemplateFieldIdsMandatory = curTemplateFieldIdsMandatory;
+    allTemplateFieldIdsMandatory.unite(previousTemplateFieldIdsMandatory);
+    for (const auto &fieldId : allTemplateFieldIdsMandatory)
+    {
+        if (!m_idsMandatory.contains(fieldId)
+                && !m_idsNotMandatory.contains(fieldId))
+        {
+            m_idsMandatory[fieldId] = true;
+        }
+    }
+
+    _saveInSettings();
 }
 
 void AttributesMandatoryTable::update(
@@ -183,14 +183,15 @@ QVariant AttributesMandatoryTable::data(const QModelIndex &index, int role) cons
 
 bool AttributesMandatoryTable::setData(const QModelIndex &index, const QVariant &value, int role)
 {
-    if (index.isValid() && index.column() == 1 && role == Qt::CheckStateRole && value != data(index))
+    if (index.isValid() && index.column() == 1 && role == Qt::EditRole && value != data(index))
     {
         if (index.row() < m_idsMandatory.size())
         {
             const auto &fieldId = std::next(m_idsMandatory.begin(), index.row()).key();
+            int row = index.row();
             m_idsNotMandatory[fieldId] = false;
             m_idsMandatory.remove(fieldId);
-            emit dataChanged(this->index(index.row(), 0)
+            emit dataChanged(this->index(row, 0)
                              , this->index(rowCount()-1, 1));
         }
         else

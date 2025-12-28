@@ -14,14 +14,13 @@ class AttributesMandatoryTable : public QAbstractTableModel
     Q_OBJECT
 
 public:
-    explicit AttributesMandatoryTable(QObject *parent = nullptr);
-
-    // Initial load logic
-    void load(const QString &settingPath,
-              const QString &productType,
-              const QSet<QString> &curTemplateFieldIdsMandatory,
-              const QSet<QString> &previousTemplateFieldIdsMandatory,
-              const QHash<QString, int> &curTemplateFieldIds);
+    explicit AttributesMandatoryTable(
+            const QString &settingPath
+            , const QString &productType
+            , const QSet<QString> &curTemplateFieldIdsMandatory
+            , const QSet<QString> &previousTemplateFieldIdsMandatory
+            , const QHash<QString, int> &curTemplateFieldIds
+            , QObject *parent = nullptr);
 
     QSet<QString> getMandatoryIds() const;
     bool hasIdsFromPreviousTemplates() const;

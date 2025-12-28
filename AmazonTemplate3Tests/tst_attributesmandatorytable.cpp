@@ -1,6 +1,9 @@
 #include <QtTest>
 #include <QCoreApplication>
 #include <QTemporaryDir>
+#include <QDir>
+#include <QSet>
+#include <QHash>
 #include <QSettings>
 #include <QFile>
 
@@ -58,9 +61,7 @@ void AttributesMandatoryTableTests::test_load_and_persistence()
     fieldId_index["item_name"] = 1;
     fieldId_index["color_name"] = 2; // Optional initially
 
-    AttributesMandatoryTable table;
-    // New signature: load(settingPath, productType, curIds, prevIds, allIds)
-    table.load(settingsPath, productType, fieldIdMandatory, prevFieldIdMandatory, fieldId_index);
+    AttributesMandatoryTable table(settingsPath, productType, fieldIdMandatory, prevFieldIdMandatory, fieldId_index);
     
     QCOMPARE(table.rowCount(), 3); // brand_name, item_name, color_name
     QSet<QString> mandatory = table.getMandatoryIds();
@@ -83,8 +84,7 @@ void AttributesMandatoryTableTests::test_manual_overrides()
 
     // 1. Initial Load
     {
-        AttributesMandatoryTable table;
-        table.load(settingsPath, productType, fieldIdMandatory, prevFieldIdMandatory, fieldId_index);
+        AttributesMandatoryTable table(settingsPath, productType, fieldIdMandatory, prevFieldIdMandatory, fieldId_index);
         QVERIFY(table.getMandatoryIds().contains("brand_name"));
         QVERIFY(!table.getMandatoryIds().contains("color_name"));
         
@@ -115,8 +115,7 @@ void AttributesMandatoryTableTests::test_manual_overrides()
     
     // 4. Persistence Reload
     {
-        AttributesMandatoryTable table;
-        table.load(settingsPath, productType, fieldIdMandatory, prevFieldIdMandatory, fieldId_index);
+        AttributesMandatoryTable table(settingsPath, productType, fieldIdMandatory, prevFieldIdMandatory, fieldId_index);
         
         QVERIFY(table.getMandatoryIds().contains("color_name")); // Should persist
         QVERIFY(!table.getMandatoryIds().contains("brand_name")); // Should persist removal
@@ -142,8 +141,7 @@ void AttributesMandatoryTableTests::test_ai_interaction_flow()
     fieldId_index["brand_name"] = 0;
     fieldId_index["size_name"] = 1;
     
-    AttributesMandatoryTable table;
-    table.load(settingsPath, productType, curMandatory, prevMandatory, fieldId_index);
+    AttributesMandatoryTable table(settingsPath, productType, curMandatory, prevMandatory, fieldId_index);
     
     QSet<QString> effective = table.getMandatoryIds();
     QVERIFY(effective.contains("brand_name"));
@@ -172,8 +170,7 @@ void AttributesMandatoryTableTests::test_load_second_if()
 
     // First load – file does not exist, should trigger second if block (load from previous template)
     {
-        AttributesMandatoryTable table;
-        table.load(settingsPath, productType, curMandatory, prevMandatory, fieldId_index);
+        AttributesMandatoryTable table(settingsPath, productType, curMandatory, prevMandatory, fieldId_index);
         QSet<QString> mandatory = table.getMandatoryIds();
         QVERIFY(mandatory == curMandatory);
         QVERIFY(!mandatory.isEmpty());
@@ -183,8 +180,7 @@ void AttributesMandatoryTableTests::test_load_second_if()
 
     // Second load – settings now contain saved mandatory ids, should trigger first if block
     {
-        AttributesMandatoryTable table2;
-        table2.load(settingsPath, productType, curMandatory, prevMandatory, fieldId_index);
+        AttributesMandatoryTable table2(settingsPath, productType, curMandatory, prevMandatory, fieldId_index);
         QSet<QString> mandatory2 = table2.getMandatoryIds();
         QVERIFY(mandatory2 == curMandatory);
         QVERIFY(!table2.needAiReview());
@@ -206,8 +202,7 @@ void AttributesMandatoryTableTests::test_needAiReview()
     fieldId_index["brand_name"] = 0;
     fieldId_index["item_name"] = 1;
 
-    AttributesMandatoryTable table;
-    table.load(settingsPath, productType, curMandatory, prevMandatory, fieldId_index);
+    AttributesMandatoryTable table(settingsPath, productType, curMandatory, prevMandatory, fieldId_index);
     // Since there is no prior data, needAiReview should be true
     QVERIFY(table.needAiReview());
 

@@ -24,6 +24,7 @@ public:
 
     // Check if an attribute has been reviewed for the current product type
     bool isAttributeReviewed(const QString &attrId) const;
+    void save();
 
 private:
     static const QString SETTINGS_KEYS_GROUP;
