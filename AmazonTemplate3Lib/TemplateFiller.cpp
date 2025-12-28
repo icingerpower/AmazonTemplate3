@@ -12,17 +12,17 @@
 #include "TemplateExceptions.h"
 #include "TemplateFiller.h"
 
-const QHash<QString, QString> TemplateFiller::SHEETS_MANDATORY{
-    {"Définitions des données", "Obligatoire"}
-    , {"Data Definitions", "Required"}
-    , {"Datendefinitionen", "Erforderlich"}
-    , {"Definizioni dati", "Obbligatorio"}
-    , {"Gegevensdefinities", "Verplicht"}
-    , {"Definitioner av data", "Krävs"}
-    , {"Veri Tanımları", "Zorunlu"}
-    , {"Definicje danych", "Wymagane"}
-    , {"Definiciones de datos", "Obligatorio"}
-    , {"データ定義", "必須"}
+const QHash<QString, QSet<QString>> TemplateFiller::SHEETS_MANDATORY{
+    {"Définitions des données", {"Obligatoire"}}
+    , {"Data Definitions", {"Required"}}
+    , {"Datendefinitionen", {"Erforderlich", "Pflichtfeld"}}
+    , {"Definizioni dati", {"Obbligatorio"}}
+    , {"Gegevensdefinities", {"Verplicht"}}
+    , {"Definitioner av data", {"Krävs"}}
+    , {"Veri Tanımları", {"Zorunlu"}}
+    , {"Definicje danych", {"Wymagane"}}
+    , {"Definiciones de datos", {"Obligatorio"}}
+    , {"データ定義", {"必須"}}
 };
 
 const QSet<QString> TemplateFiller::VALUES_MANDATORY
@@ -32,7 +32,10 @@ const QSet<QString> TemplateFiller::VALUES_MANDATORY
     for (auto it = SHEETS_MANDATORY.begin();
          it != SHEETS_MANDATORY.end(); ++it)
     {
-        values.insert(it.value());
+        for (auto &valMandatory : it.value())
+        {
+            values.insert(valMandatory);
+        }
     }
     return values;
 }();
@@ -71,7 +74,7 @@ void TemplateFiller::setTemplates(
     m_workingDirImage = m_workingDir.absoluteFilePath("images");
     _clearAttributeManagers();
     m_mandatoryAttributesAiTable = new AttributesMandatoryAiTable;
-    const auto &productType = _readProductType(m_templateFromPath);
+    const auto &productType = _readProductType(m_templateFromPath); // TODO Exception empty file + ma
     Q_ASSERT(!productType.isEmpty());
     const auto &filePathMandatory
             = m_workingDir.absoluteFilePath("mandatoryFieldIds.ini");
@@ -86,6 +89,9 @@ void TemplateFiller::setTemplates(
             filePathMandatory, productType, fieldIdMandatory, previousFieldIdMandatory, fieldId_index};
     m_attributeEquivalentTable = new AttributeEquivalentTable{m_workingDir.path()};
     m_attributeFlagsTable = new AttributeFlagsTable{m_workingDir.path()};
+    m_marketplaceFrom = _get_marketplaceFrom();
+    m_attributeFlagsTable->recordAttributeNotRecordedYet(m_marketplaceFrom, fieldIdMandatory);
+    m_attributeFlagsTable->recordAttributeNotRecordedYet(m_marketplaceFrom, m_mandatoryAttributesTable->getMandatoryIds());
     m_attributePossibleMissingTable = new AttributePossibleMissingTable{m_workingDir.path()};
     m_attributeValueReplacedTable = new AttributeValueReplacedTable{m_workingDir.path()};
 }
@@ -457,6 +463,7 @@ void TemplateFiller::validateMandatory(
         const QSet<QString> &attributesMandatory, const QSet<QString> &attributesNotMandatory)
 {
     m_mandatoryAttributesTable->update(attributesMandatory, attributesNotMandatory);
+    m_attributeFlagsTable->recordAttributeNotRecordedYet(m_marketplaceFrom, attributesMandatory);
 }
 
 AttributesMandatoryTable *TemplateFiller::mandatoryAttributesTable() const
@@ -738,6 +745,26 @@ QHash<QString, int> TemplateFiller::_get_fieldId_index(
     return colId_index;
 }
 
+QString TemplateFiller::_get_marketplaceFrom() const
+{
+    QXlsx::Document doc{m_templateFromPath};
+    _selectTemplateSheet(doc);
+    auto version = _getDocumentVersion(doc);
+    if (version == V01)
+    {
+        return Attribute::AMAZON_V01;
+    }
+    else if (version == V02)
+    {
+        return Attribute::AMAZON_V02;
+    }
+    else
+    {
+        Q_ASSERT(false);
+    }
+    return QString{};
+}
+
 QSet<QString> TemplateFiller::_get_fieldIdMandatory(QXlsx::Document &doc) const
 {
     QSet<QString> fieldIds;
@@ -760,7 +787,8 @@ QSet<QString> TemplateFiller::_get_fieldIdMandatory(QXlsx::Document &doc) const
             break;
         }
     }
-    for (int i = 3; i<dimMandatory.lastRow(); ++i)
+    int lastRow = dimMandatory.lastRow();
+    for (int i = 3; i<lastRow; ++i)
     {
         auto cellFieldId = doc.cellAt(i+1, colIndFieldId + 1);
         auto cellFieldName = doc.cellAt(i+1, colIndFieldName + 1);
@@ -774,23 +802,22 @@ QSet<QString> TemplateFiller::_get_fieldIdMandatory(QXlsx::Document &doc) const
             {
                 if (VALUES_MANDATORY.contains(mandatory))
                 {
-                    fieldIds.insert(mandatory);
+                    fieldIds.insert(fieldId);
                 }
             }
         }
     }
+    Q_ASSERT(!fieldIds.isEmpty()); // Usually it means SHEETS_MANDATORY needs to be added a new value
     return fieldIds;
 }
 
 QSet<QString> TemplateFiller::_get_fieldIdMandatoryAll() const
 {
     QXlsx::Document doc{m_templateFromPath};
-    _selectTemplateSheet(doc);
     auto fieldIdMandatory = _get_fieldIdMandatory(doc);
     for (const auto &targetPath : m_templateToPaths)
     {
         QXlsx::Document docTo{targetPath};
-        _selectTemplateSheet(docTo);
         const auto &fieldIdMandatoryTo = _get_fieldIdMandatory(doc);
         fieldIdMandatory.unite(fieldIdMandatoryTo);
     }

@@ -21,7 +21,7 @@ class TemplateFiller
 {
 public:
     static const QSet<QString> VALUES_MANDATORY;
-    static const QHash<QString, QString> SHEETS_MANDATORY;
+    static const QHash<QString, QSet<QString>> SHEETS_MANDATORY;
     TemplateFiller(const QString &workingDirCommon, const QString &templateFromPath
                       , const QStringList &templateToPaths);
     ~TemplateFiller();
@@ -76,6 +76,7 @@ private:
     AttributeValueReplacedTable *m_attributeValueReplacedTable;
     void _clearAttributeManagers();
     QString m_productType;
+    QString m_marketplaceFrom;
     QDir m_workingDirCommon;
     QDir m_workingDir;
     QDir m_workingDirImage;
@@ -93,6 +94,7 @@ private:
     TemplateFiller::VersionAmz _getDocumentVersion(QXlsx::Document &document) const;
     int _getRowFieldId(VersionAmz version) const;
     QHash<QString, int> _get_fieldId_index(QXlsx::Document &doc) const;
+    QString _get_marketplaceFrom() const;
     QSet<QString> _get_fieldIdMandatory(QXlsx::Document &doc) const;
     QSet<QString> _get_fieldIdMandatoryAll() const;
     QSet<QString> _get_fieldIdMandatoryPrevious() const;
