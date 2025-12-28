@@ -48,6 +48,45 @@ QSet<QString> AttributeFlagsTable::getUnrecordedFieldIds(
     return unrecordedIds;
 }
 
+QHash<QString, QString> AttributeFlagsTable::get_marketplace_id(
+        const QString &marketplace, const QString &fieldId) const
+{
+    QHash<QString, QString> marketplace_id;
+    int rowIndex = m_marketplace_fieldId_indRow[marketplace][fieldId];
+    for (int i=0; i<m_indFirstFlag; ++i)
+    {
+        const auto &curMarketplace = m_colNames[i];
+        const auto &fieldId = m_listOfVariantList[rowIndex][i].toString();
+        if (!fieldId.isEmpty())
+        {
+            marketplace_id[curMarketplace] = fieldId;
+        }
+    }
+    return marketplace_id;
+}
+
+Attribute::Flag AttributeFlagsTable::getFlags(
+        const QString &marketplace, const QString &fieldId) const
+{
+    Attribute::Flag flags = Attribute::NoFlag;
+    if (m_marketplace_fieldId_indRow.contains(marketplace) &&
+        m_marketplace_fieldId_indRow[marketplace].contains(fieldId))
+    {
+        int rowIndex = m_marketplace_fieldId_indRow[marketplace][fieldId];
+        for (int i = m_indFirstFlag; i < m_colNames.size(); ++i)
+        {
+            if (m_listOfVariantList[rowIndex][i].toBool())
+            {
+                const QString &flagName = m_colNames[i];
+                Attribute::Flag curFlag = Attribute::STRING_FLAG.value(flagName);
+                flags = static_cast<Attribute::Flag>(
+                            static_cast<int>(flags) | static_cast<int>(curFlag));
+            }
+        }
+    }
+    return flags;
+}
+
 void AttributeFlagsTable::recordAttributeNotRecordedYet(
         const QString &marketplaceId, const QSet<QString> &fieldIds)
 {
@@ -392,6 +431,20 @@ void AttributeFlagsTable::_saveInFile()
     }
 }
 
+void AttributeFlagsTable::_updateMap()
+{
+    m_marketplace_fieldId_indRow.clear();
+    for (int i=0; i<m_listOfVariantList.size(); ++i)
+    {
+        for (int j=0; j<m_indFirstFlag; ++j)
+        {
+            const auto &marketplace = m_colNames[j];
+            const auto &fieldId = m_listOfVariantList[i][j].toString();
+            m_marketplace_fieldId_indRow[marketplace][fieldId] = i;
+        }
+    }
+}
+
 void AttributeFlagsTable::_sort()
 {
     // Determine column indices for sorting priority
@@ -417,6 +470,7 @@ void AttributeFlagsTable::_sort()
             return aTemu < bTemu;
         });
     // Notify views that the layout changed
+    _updateMap();
     emit layoutChanged();
 }
 

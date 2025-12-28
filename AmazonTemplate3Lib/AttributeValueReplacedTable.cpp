@@ -34,7 +34,7 @@ bool AttributeValueReplacedTable::contains(
         const QString &marketplaceId
         , const QString &countryCode
         , const QString &langCode
-        , const QString &attrId
+        , const QString &fieldId
         , const QString &valueFrom) const
 {
     for (const auto &row : std::as_const(m_listOfStringList))
@@ -43,7 +43,7 @@ bool AttributeValueReplacedTable::contains(
             row[0] == marketplaceId &&
             row[1] == countryCode &&
             row[2] == langCode &&
-            row[3] == attrId &&
+            row[3] == fieldId &&
             row[4] == valueFrom)
         {
             return true;
@@ -52,18 +52,60 @@ bool AttributeValueReplacedTable::contains(
     return false;
 }
 
+bool AttributeValueReplacedTable::replaceIfContains(
+        const QString &marketplaceId
+        , const QString &countryCode
+        , const QString &langCode
+        , const QString &fieldId
+        , QString &valueToUpdate) const
+{
+    for (const auto &row : std::as_const(m_listOfStringList))
+    {
+        if (row.size() >= 5 &&
+            row[0] == marketplaceId &&
+            row[1] == countryCode &&
+            row[2] == langCode &&
+            row[3] == fieldId &&
+            row[4] == valueToUpdate)
+        {
+            valueToUpdate = row[5];
+            return true;
+        }
+    }
+    return false;
+}
+
+void AttributeValueReplacedTable::replaceIfContains(
+        const QString &marketplace
+        , const QString &countryCode
+        , const QString &langCode
+        , const QString &fieldId
+        , QSet<QString> &possibleValues) const
+{
+    QSet<QString> possibleValuesReplaced;
+    for (const auto &possibleValue : possibleValues)
+    {
+        QString valueReplaced = possibleValue;
+        replaceIfContains(
+                    marketplace, countryCode, langCode, fieldId, valueReplaced);
+        possibleValuesReplaced.insert(valueReplaced);
+    }
+    possibleValues = possibleValuesReplaced;
+}
+
+
 void AttributeValueReplacedTable::recordAttribute(
         const QString &marketplaceId,
         const QString &countryCode,
         const QString &langCode,
-        const QString &attrId,
+        const QString &fieldId,
         const QString &valueFrom,
         const QString &valueTo)
 {
-    if (!contains(marketplaceId, countryCode, langCode, attrId, valueFrom))
+    if (!contains(marketplaceId, countryCode, langCode, fieldId, valueFrom))
     {
         QStringList newRow;
-        newRow << marketplaceId << countryCode << langCode << attrId << valueFrom << valueTo;
+        newRow << marketplaceId << countryCode << langCode << fieldId << valueFrom << valueTo;
 
         beginInsertRows(QModelIndex{}, 0, 0);
         m_listOfStringList.insert(0, newRow);

@@ -19,9 +19,9 @@ DialogAttributes::DialogAttributes(TemplateFiller *templateFiller, QWidget *pare
     m_templateFiller = templateFiller;
     ui->tableViewEquivalences->setModel(m_templateFiller->attributeEquivalentTable());
     ui->tableViewFlags->setModel(m_templateFiller->attributeFlagsTable());
-    ui->tableViewFlags->resizeColumnToContents(9);
+    ui->tableViewFlags->resizeColumnsToContents();
     ui->tableViewMandatory->setModel(m_templateFiller->mandatoryAttributesTable());
-    ui->tableViewMandatory->resizeColumnToContents(9);
+    ui->tableViewMandatory->resizeColumnsToContents();
     ui->tableViewMissingPossibleValues->setModel(m_templateFiller->attributePossibleMissingTable());
     ui->tableViewReplaced->setModel(m_templateFiller->attributeValueReplacedTable());
     _connectSlots();

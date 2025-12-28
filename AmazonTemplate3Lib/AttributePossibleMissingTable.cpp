@@ -72,6 +72,30 @@ void AttributePossibleMissingTable::recordAttribute(
     }
 }
 
+QSet<QString> AttributePossibleMissingTable::possibleValues(
+        const QString &marketplaceId
+        , const QString &countryCode
+        , const QString &langCode
+        , const QString &productType
+        , const QString &attrId) const
+{
+    QSet<QString> values;
+    for (const auto &row : std::as_const(m_listOfStringList))
+    {
+        if (row.size() >= 5 &&
+            row[0] == marketplaceId &&
+            row[1] == countryCode &&
+            row[2] == langCode &&
+            row[3] == productType &&
+            row[4] == attrId)
+        {
+            const auto &listValues = row[5].split(CELL_SEP);
+            return QSet<QString>{listValues.begin(), listValues.end()};
+        }
+    }
+    return QSet<QString>{};
+}
+
 QVariant AttributePossibleMissingTable::headerData(
         int section, Qt::Orientation orientation, int role) const
 {

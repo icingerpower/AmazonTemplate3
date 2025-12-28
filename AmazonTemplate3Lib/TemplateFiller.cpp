@@ -133,6 +133,11 @@ void TemplateFiller::_clearAttributeManagers()
     m_attributeValueReplacedTable = nullptr;
 }
 
+QStringList TemplateFiller::_get_allTemplatePaths() const
+{
+    return QStringList{m_templateFromPath} << m_templateToPaths;
+}
+
 void TemplateFiller::checkParentSkus()
 {
     QXlsx::Document document(m_templateFromPath);
@@ -379,7 +384,8 @@ void TemplateFiller::checkPreviewImages()
     }
 }
 
-void TemplateFiller::checkPossibleValues()
+QHash<QString, QHash<QString, QHash<QString, QHash<QString, QSet<QString>>>>>
+TemplateFiller::checkPossibleValues()
 {
     // Will check if some possible values need to be added for some lang code
     QStringList filePaths{m_templateFromPath};
@@ -395,6 +401,9 @@ void TemplateFiller::checkPossibleValues()
             allFieldIds.insert(fieldId);
         }
     }
+
+    QHash<QString, QHash<QString, QHash<QString, QHash<QString, QSet<QString>>>>>
+            marketplace_countryCode_langCode_fieldId_possibleValues;
     allFieldIds.intersect(m_mandatoryAttributesTable->getMandatoryIds());
     bool addedMissing = false;
     for (const auto &filePath : filePaths)
@@ -405,6 +414,16 @@ void TemplateFiller::checkPossibleValues()
         const auto &marketplace = _get_marketplace(doc);
         const auto &productType = _get_productType(filePath);
         const auto &fieldId_possibleValues = _get_fieldId_possibleValues(doc);
+        for (auto it = fieldId_possibleValues.begin();
+             it != fieldId_possibleValues.end(); ++it)
+        {
+            const auto &fieldId = it.key();
+            auto possibleValues = it.value();
+            m_attributeValueReplacedTable->replaceIfContains(
+                            marketplace, countryCode, langCode, fieldId, possibleValues);
+            marketplace_countryCode_langCode_fieldId_possibleValues
+                    [marketplace][countryCode][langCode][fieldId] = possibleValues;
+        }
         const auto &curFieldIdsPossibleList = fieldId_possibleValues.keys();
         QSet<QString> curFieldIdsPossible{curFieldIdsPossibleList.begin(), curFieldIdsPossibleList.end()};
         const auto &fieldId_index = _get_fieldId_index(doc);
@@ -428,6 +447,16 @@ void TemplateFiller::checkPossibleValues()
                             );
                 addedMissing = true;
             }
+            else
+            {
+                auto possibleValues = m_attributePossibleMissingTable->possibleValues(
+                            marketplace, countryCode, langCode, productType, missingFieldId);
+                m_attributeValueReplacedTable->replaceIfContains(
+                            marketplace, countryCode, langCode, missingFieldId, possibleValues);
+                marketplace_countryCode_langCode_fieldId_possibleValues
+                        [marketplace][countryCode][langCode][missingFieldId]
+                        = possibleValues;
+            }
         }
     }
     if (addedMissing)
@@ -436,6 +465,69 @@ void TemplateFiller::checkPossibleValues()
         exception.setInfos(QObject::tr("Possible attributes missing"),
                            QObject::tr("Some field has their possible attributes missing. Complete them in the attributes view."));
         exception.raise();
+    }
+    return marketplace_countryCode_langCode_fieldId_possibleValues;
+}
+
+void TemplateFiller::buildAttributes()
+{
+    const auto &marketplace = _get_marketplaceFrom();
+    const auto &mandatoryIds = m_mandatoryAttributesTable->getMandatoryIds();
+    const auto &marketplace_countryCode_langCode_fieldId_possibleValues = checkPossibleValues();
+    struct TemplateInfo{
+        QString marketplace;
+        QString countryCode;
+        QString langCode;
+        QString productType;
+    };
+    QHash<QString, TemplateInfo> templatePath_infos;
+    const QStringList &templatePaths = _get_allTemplatePaths();
+    for (const auto &templatePath : templatePaths)
+    {
+        TemplateInfo infos;
+        infos.productType = _get_productType(templatePath);
+        QXlsx::Document doc{templatePath};
+        infos.marketplace = _get_marketplace(doc);
+        infos.countryCode = _getCountryCode(templatePath);
+        infos.langCode = _getLangCode(templatePath);
+        templatePath_infos[templatePath] = infos;
+    }
+
+    for (const auto &mandatoryId : mandatoryIds)
+    {
+        const auto &marketplace_fieldId
+                = m_attributeFlagsTable->get_marketplace_id(marketplace, mandatoryId);
+        auto attribute = QSharedPointer<Attribute>::create();
+        for (auto it = marketplace_fieldId.begin();
+             it != marketplace_fieldId.end(); ++it)
+        {
+            marketplaceId_attributeId_attributeInfos[it.key()][it.value()] = attribute;
+        }
+        attribute->setFlag(m_attributeFlagsTable->getFlags(marketplace, mandatoryId));
+        for (const auto &templatePath : templatePaths)
+        {
+            const auto &infos = templatePath_infos[templatePath];
+            if (marketplace_countryCode_langCode_fieldId_possibleValues.contains(infos.marketplace)
+                    && marketplace_countryCode_langCode_fieldId_possibleValues[infos.marketplace].contains(
+                        infos.countryCode)
+                    && marketplace_countryCode_langCode_fieldId_possibleValues[infos.marketplace][infos.countryCode].contains(
+                        infos.langCode)
+                    && marketplace_countryCode_langCode_fieldId_possibleValues[infos.marketplace][infos.countryCode][infos.langCode].contains(
+                        infos.productType)
+                    && marketplace_countryCode_langCode_fieldId_possibleValues[infos.marketplace][infos.countryCode][infos.langCode][infos.productType].contains(
+                        mandatoryId)
+                    )
+            {
+                attribute->setPossibleValues(
+                            infos.marketplace,
+                            infos.countryCode,
+                            infos.langCode,
+                            infos.productType,
+                            marketplace_countryCode_langCode_fieldId_possibleValues
+                            [infos.marketplace][infos.countryCode][infos.langCode][mandatoryId]
+                        );
+            }
+        }
     }
 }
 
@@ -449,7 +541,7 @@ QStringList TemplateFiller::findPreviousTemplatePath() const
     {
         const QString &filePath = it.next();
         qDebug() << "TemplateFiller::findPreviousTemplatePath...reading: " << filePath;
-        QXlsx::Document doc(filePath);
+        QXlsx::Document doc{filePath};
         _selectTemplateSheet(doc);
 
         const auto &fieldId_index = _get_fieldId_index(doc);

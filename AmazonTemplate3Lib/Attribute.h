@@ -28,30 +28,26 @@ public:
     static const QHash<Flag, QString> FLAG_STRING;
     static const QMap<QString, Flag> STRING_FLAG;
     static const QStringList MARKETPLACES;
-    bool hasParentLine(const QString &marketplaceId);
+    static const QHash<QString, bool> MARKETPLACES_HAS_PARENT_LINE;
+
     bool hasFlag(const QString &marketplaceId, Flag flag) const;
     bool isChoice(const QString &marketplaceId) const;
     const QSet<QString> &possibleValues(const QString &marketplaceId
                                         , const QString &countryCode
                                         , const QString &langCode
                                         , const QString &category) const;
-    const QString &getEquivalentValue(const QString &marketPlaceId
-                                      , const QString &countryCode
-                                      , const QString &langCode
-                                      , const QString &category
-                                      , const QString &fromValue) const;
+    void addFlag(const QString &flagString);
+    void setPossibleValues(const QString &marketplaceId
+                           , const QString &countryCode
+                           , const QString &langCode
+                           , const QString &category
+                           , const QSet<QString> &possibleValues);
+
+    void setFlag(Flag newFlag);
 
 private:
-    QSet<QString> m_variousIds;
-    Flag flag;
-    QHash<QString, Flag> m_marketplaceId_flag;
-    QHash<QString, QHash<QString, QHash<QString, QSet<QString>>>> m_marketplaceId_countryCode_langCode_possibleValues;
+    Flag m_flag;
     QHash<QString, QHash<QString, QHash<QString, QHash<QString, QSet<QString>>>>> m_marketplaceId_countryCode_langCode_category_possibleValues;
-    QHash<QString, QHash<QString, QHash<QString, QHash<QString, QHash<QString, QString>>>>> m_marketplaceId_countryCode_langCode_category_replacedValues; // When there is an error in an amazon template, a possible value is replace by another with the right value
-    QList<QSet<QString>> m_equivalences; // {{"Femme", "Women"}, {"Homme", "Men"}}
 };
-// Will be saved in the following CSV tab format
-// amazon.fr / deparment / fr / fr / femme / homme
-// amazon.fr / deparment / cat=shoes / fr / fr / femmes / hommes
 
 #endif // ATTRIBUTE_H

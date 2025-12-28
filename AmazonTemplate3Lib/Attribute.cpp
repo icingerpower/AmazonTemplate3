@@ -8,6 +8,12 @@ const QStringList Attribute::MARKETPLACES{
             , Attribute::AMAZON_V02
             , Attribute::TEMU_EN};
 
+const QHash<QString, bool> Attribute::MARKETPLACES_HAS_PARENT_LINE{
+    {Attribute::AMAZON_V01, true}
+    , {Attribute::AMAZON_V02, true}
+    , {Attribute::TEMU_EN, false}
+};
+
 const QHash<Attribute::Flag, QString> Attribute::FLAG_STRING{
     {ChildOnly, "ChildOnly"}
     , {NoAI, "NoAI"}
@@ -32,31 +38,11 @@ const QMap<QString, Attribute::Flag> Attribute::STRING_FLAG
     return _STRING_FLAG;
 }();
 
-bool Attribute::hasParentLine(const QString &marketplaceId)
-{
-    if (marketplaceId.contains("amazon"))
-    {
-        return true;
-    }
-    else if (marketplaceId.contains("temu"))
-    {
-        return false;
-    }
-    Q_ASSERT(false);
-    return true;
-}
-
 bool Attribute::hasFlag(const QString &marketplaceId, Flag flag) const
 {
     const int mask = static_cast<int>(flag);
 
-    if (m_marketplaceId_flag.contains(marketplaceId))
-    {
-        const int value = static_cast<int>(m_marketplaceId_flag.value(marketplaceId));
-        return (value & mask) == mask;
-    }
-
-    const int value = static_cast<int>(this->flag);
+    const int value = static_cast<int>(m_flag);
     return (value & mask) == mask;
 }
 
@@ -85,43 +71,32 @@ const QSet<QString> &Attribute::possibleValues(
         auto itCat = itLang.value().constFind(category);
         return itCat.value();
     }
-    if (m_marketplaceId_countryCode_langCode_possibleValues.contains(marketplaceId)
-            && m_marketplaceId_countryCode_langCode_possibleValues[marketplaceId].contains(countryCode)
-            && m_marketplaceId_countryCode_langCode_possibleValues[marketplaceId][countryCode].contains(langCode)
-            )
-    {
-        auto itMkt = m_marketplaceId_countryCode_langCode_possibleValues.constFind(marketplaceId);
-        auto itCountry = itMkt.value().constFind(countryCode);
-        auto itLang = itCountry.value().constFind(langCode);
-        return itLang.value();
-    }
     static QSet<QString> emptySet;
     return emptySet;
 }
 
-const QString &Attribute::getEquivalentValue(
-        const QString &marketPlaceId
+void Attribute::addFlag(const QString &flagString)
+{
+    if (STRING_FLAG.contains(flagString))
+    {
+        Flag f = STRING_FLAG.value(flagString);
+        m_flag = static_cast<Flag>(static_cast<int>(m_flag) | static_cast<int>(f));
+    }
+}
+
+void Attribute::setPossibleValues(
+        const QString &marketplaceId
         , const QString &countryCode
         , const QString &langCode
-        , const QString &category, const QString &fromValue) const
+        , const QString &category
+        , const QSet<QString> &possibleValues)
 {
-    for (const auto &equivalentValues : m_equivalences)
-    {
-        if (equivalentValues.contains(fromValue))
-        {
-            const auto &_possibleValues = possibleValues(
-                        marketPlaceId, countryCode, langCode, category);
-            for (const auto &equivalent : equivalentValues)
-            {
-                if (_possibleValues.contains(equivalent))
-                {
-                    return equivalent;
-                }
-            }
-        }
-    }
-    // TODO raise exception
-    static QString empty;
-    return empty;
+    m_marketplaceId_countryCode_langCode_category_possibleValues
+            [marketplaceId][countryCode][langCode][category] = possibleValues;
+}
+
+void Attribute::setFlag(Flag newFlag)
+{
+    m_flag = newFlag;
 }
 

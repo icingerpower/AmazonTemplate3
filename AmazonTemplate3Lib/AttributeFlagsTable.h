@@ -18,6 +18,9 @@ public:
             const QString &workingDirectory, QObject *parent = nullptr);
     QSet<QString> getUnrecordedFieldIds(
             const QString &marketplace, const QSet<QString> &fieldIds) const;
+    QHash<QString, QString> get_marketplace_id(
+            const QString &marketplace, const QString &fieldId) const;
+    Attribute::Flag getFlags(const QString &marketplace, const QString &fieldId) const;
     //Attribute::Flag getFlag(const QString &attrId, const QString &marketplace) const;
 
     void recordAttributeNotRecordedYet(
@@ -50,6 +53,8 @@ private:
     QList<QVariantList> m_listOfVariantList;
     void _loadFromFile();
     void _saveInFile();
+    void _updateMap();
+    QHash<QString, QHash<QString, int>> m_marketplace_fieldId_indRow;
 };
 
 #endif // ATTRIBUTEFLAGSTABLE_H

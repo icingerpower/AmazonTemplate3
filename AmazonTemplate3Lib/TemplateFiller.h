@@ -35,12 +35,14 @@ public:
         V01
         , V02
     };
-    void setTemplates(const QString &commonSettingsDir, const QString &templateFromPath
+    void setTemplates(const QString &commonSettingsDir
+                      , const QString &templateFromPath
                       , const QStringList &templateToPaths);
     void checkParentSkus();
     void checkKeywords();
     void checkPreviewImages();
-    void checkPossibleValues();
+    QHash<QString, QHash<QString, QHash<QString, QHash<QString, QSet<QString> > > > > checkPossibleValues();
+    void buildAttributes();
     QStringList getImagePreviewFileNames() const;
     QString checkSkus() const; // check child / parent are correct without duplicates
 
@@ -85,6 +87,7 @@ private:
     QDir m_workingDirImage;
     QString m_templateFromPath;
     QStringList m_templateToPaths;
+    QStringList _get_allTemplatePaths() const;
     QString m_langCodeFrom;
     QString m_countryCodeFrom;
     QString _getCountryCode(const QString &templateFilePath) const;

@@ -24,6 +24,12 @@ public:
                          const QString &productType,
                          const QString &attrId,
                          const QStringList &possibleValues);
+    QSet<QString> possibleValues(
+            const QString &marketplaceId,
+            const QString &countryCode,
+            const QString &langCode,
+            const QString &productType,
+            const QString &attrId) const;
 
     // Header:
     QVariant headerData(
