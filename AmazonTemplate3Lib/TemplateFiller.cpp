@@ -76,8 +76,6 @@ void TemplateFiller::setTemplates(
     m_mandatoryAttributesAiTable = new AttributesMandatoryAiTable;
     const auto &productType = _readProductType(m_templateFromPath); // TODO Exception empty file + ma
     Q_ASSERT(!productType.isEmpty());
-    const auto &filePathMandatory
-            = m_workingDir.absoluteFilePath("mandatoryFieldIds.ini");
 
     QXlsx::Document doc(m_templateFromPath);
     const auto &fieldId_index = _get_fieldId_index(doc);
@@ -85,15 +83,15 @@ void TemplateFiller::setTemplates(
         // 2. Resolve "Previous" mandatory fields
     const auto &previousFieldIdMandatory = _get_fieldIdMandatoryPrevious();
 
+    m_attributePossibleMissingTable = new AttributePossibleMissingTable{commonSettingsDir};
+    m_attributeValueReplacedTable = new AttributeValueReplacedTable{commonSettingsDir};
     m_mandatoryAttributesTable = new AttributesMandatoryTable{
-            filePathMandatory, productType, fieldIdMandatory, previousFieldIdMandatory, fieldId_index};
-    m_attributeEquivalentTable = new AttributeEquivalentTable{m_workingDir.path()};
-    m_attributeFlagsTable = new AttributeFlagsTable{m_workingDir.path()};
+            commonSettingsDir, productType, fieldIdMandatory, previousFieldIdMandatory, fieldId_index};
+    m_attributeEquivalentTable = new AttributeEquivalentTable{commonSettingsDir};
+    m_attributeFlagsTable = new AttributeFlagsTable{commonSettingsDir};
     m_marketplaceFrom = _get_marketplaceFrom();
     m_attributeFlagsTable->recordAttributeNotRecordedYet(m_marketplaceFrom, fieldIdMandatory);
     m_attributeFlagsTable->recordAttributeNotRecordedYet(m_marketplaceFrom, m_mandatoryAttributesTable->getMandatoryIds());
-    m_attributePossibleMissingTable = new AttributePossibleMissingTable{m_workingDir.path()};
-    m_attributeValueReplacedTable = new AttributeValueReplacedTable{m_workingDir.path()};
 }
 
 void TemplateFiller::_clearAttributeManagers()

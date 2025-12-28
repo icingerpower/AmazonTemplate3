@@ -1,4 +1,5 @@
 #include <QDir>
+#include <algorithm>
 #include <QColor>
 #include <QBrush>
 
@@ -49,31 +50,41 @@ QSet<QString> AttributeFlagsTable::getUnrecordedFieldIds(
 void AttributeFlagsTable::recordAttributeNotRecordedYet(
         const QString &marketplaceId, const QSet<QString> &fieldIds)
 {
+    bool added = false;
     for (const auto &fieldId : fieldIds)
     {
         QHash<QString, QString> marketplace_ids{{marketplaceId, fieldId}};
-        QVariantList variantList;
-        for (int i = 0; i < m_indFirstFlag; ++i)
+        int pos = getPosAttr(marketplace_ids);
+        if (pos < 0)
         {
-            const auto &colName = m_colNames[i];
-            if (marketplace_ids.contains(colName))
+            QVariantList variantList;
+            for (int i = 0; i < m_indFirstFlag; ++i)
             {
-                variantList << marketplace_ids[colName];
+                const auto &colName = m_colNames[i];
+                if (marketplace_ids.contains(colName))
+                {
+                    variantList << marketplace_ids[colName];
+                }
+                else
+                {
+                    variantList << QString{};
+                }
             }
-            else
+            // Append false for each flag column.
+            for (int i = m_indFirstFlag; i < m_colNames.size(); ++i)
             {
-                variantList << QString{};
+                variantList << false;
             }
+            beginInsertRows(QModelIndex{}, 0, 0);
+            m_listOfVariantList.insert(0, variantList);
+            endInsertRows();
+            added = true;
         }
-        // Append false for each flag column.
-        for (int i = m_indFirstFlag; i < m_colNames.size(); ++i)
-        {
-            variantList << false;
-        }
-        beginInsertRows(QModelIndex{}, 0, 0);
-        m_listOfVariantList.insert(0, variantList);
+    }
+    if (added)
+    {
+        _sort();
         _saveInFile();
-        endInsertRows();
     }
 }
 
@@ -96,6 +107,7 @@ void AttributeFlagsTable::recordAttribute(const QHash<QString, QString> &marketp
                 }
             }
         }
+        _sort();
     }
     else
     {
@@ -116,6 +128,7 @@ void AttributeFlagsTable::recordAttribute(const QHash<QString, QString> &marketp
         }
         beginInsertRows(QModelIndex{}, 0, 0);
         m_listOfVariantList.insert(0, variantList);
+        _sort();
         _saveInFile();
         endInsertRows();
     }
@@ -178,6 +191,7 @@ void AttributeFlagsTable::recordAttribute(
                 }
             }
         }
+        _sort();
 
         /* // We don't update flags for now
         for (int i=m_indFirstFlag; i<m_colNames.size(); ++i)
@@ -219,6 +233,7 @@ void AttributeFlagsTable::recordAttribute(
         }
         beginInsertRows(QModelIndex{}, 0, 0);
         m_listOfVariantList.insert(0, variantList);
+        _sort();
         _saveInFile();
         endInsertRows();
     }
@@ -264,7 +279,7 @@ QVariant AttributeFlagsTable::data(const QModelIndex &index, int role) const
         }
         if (allFalse)
         {
-            return QBrush(QColor(255, 182, 193));
+            return QBrush(QColor(139, 0, 0));
         }
     }
     return QVariant{};
@@ -342,6 +357,7 @@ void AttributeFlagsTable::_loadFromFile()
             m_listOfVariantList << newElements;
         }
         file.close();
+        _sort();
     }
 }
 
@@ -374,6 +390,34 @@ void AttributeFlagsTable::_saveInFile()
         }
         file.close();
     }
+}
+
+void AttributeFlagsTable::_sort()
+{
+    // Determine column indices for sorting priority
+    int idxV02 = m_colNames.indexOf(Attribute::AMAZON_V02);
+    int idxV01 = m_colNames.indexOf(Attribute::AMAZON_V01);
+    int idxTemu = m_colNames.indexOf(Attribute::TEMU_EN);
+    if (idxV02 == -1 || idxV01 == -1 || idxTemu == -1)
+        return; // required columns not present
+
+    // Stable sort to maintain relative order where values are equal
+    std::stable_sort(m_listOfVariantList.begin(), m_listOfVariantList.end(),
+        [&](const QVariantList &a, const QVariantList &b) {
+            const QString aV02 = a[idxV02].toString();
+            const QString bV02 = b[idxV02].toString();
+            if (aV02 != bV02)
+                return aV02 < bV02;
+            const QString aV01 = a[idxV01].toString();
+            const QString bV01 = b[idxV01].toString();
+            if (aV01 != bV01)
+                return aV01 < bV01;
+            const QString aTemu = a[idxTemu].toString();
+            const QString bTemu = b[idxTemu].toString();
+            return aTemu < bTemu;
+        });
+    // Notify views that the layout changed
+    emit layoutChanged();
 }
 
 

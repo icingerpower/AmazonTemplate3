@@ -42,6 +42,7 @@ public:
     Qt::ItemFlags flags(const QModelIndex& index) const override;
 
 private:
+    void _sort();
     QString m_filePath;
     QStringList m_colNames;
     int m_indFirstFlag;

@@ -11,7 +11,9 @@ const QStringList Attribute::MARKETPLACES{
 const QHash<Attribute::Flag, QString> Attribute::FLAG_STRING{
     {ChildOnly, "ChildOnly"}
     , {NoAI, "NoAI"}
+    , {PutFirstValue, "PutFirstValue"}
     , {SameValue, "SameValue"}
+    , {Size, "Size"}
     , {ChildSameValue, "ChildSameValue"}
     , {ForCustomInstructions, "ForCustomInstructions"}
     , {ReadablePreviousTemplates, "ReadablePreviousTemplates"}

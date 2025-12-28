@@ -151,7 +151,7 @@ void MainWindow::browseSourceMain()
         auto *fileModelToFill
             = new FileModelToFill{workingDirPath, ui->treeViewToFill};
         m_templateFiller = new TemplateFiller{
-                m_workingDir.path()
+                WorkingDirectoryManager::instance()->workingDir().path()
                 , filePath
                 , fileModelToFill->getFilePaths()};
         ui->treeViewToFill->setModel(fileModelToFill);

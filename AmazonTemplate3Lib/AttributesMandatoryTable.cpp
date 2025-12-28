@@ -1,12 +1,14 @@
-#include "AttributesMandatoryTable.h"
-#include "AttributesMandatoryAiTable.h"
 #include <QSettings>
 #include <QColor>
+#include <QDir>
+
+#include "AttributesMandatoryTable.h"
+#include "AttributesMandatoryAiTable.h"
 
 const QString AttributesMandatoryTable::KEY_MANDATORY{"attrMandatory"};
 
 AttributesMandatoryTable::AttributesMandatoryTable(
-        const QString &settingPath,
+        const QString &workingDir,
         const QString &productType,
         const QSet<QString> &curTemplateFieldIdsMandatory,
         const QSet<QString> &previousTemplateFieldIdsMandatory,
@@ -14,8 +16,9 @@ AttributesMandatoryTable::AttributesMandatoryTable(
         QObject *parent)
     : QAbstractTableModel(parent)
 {
+
     m_needAiReview = false;
-    m_settingsPath = settingPath;
+    m_settingsPath = QDir{workingDir}.absoluteFilePath("mandatoryFieldIds.ini");
     m_productType = productType.toLower();
     QSettings settings{m_settingsPath, QSettings::IniFormat};
 

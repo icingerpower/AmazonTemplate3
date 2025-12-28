@@ -16,12 +16,14 @@ public:
         NoFlag = 1
         , ChildOnly = 1
         , NoAI = 2
-        , SameValue = 4
-        , ChildSameValue = 8
-        , ForCustomInstructions = 16
-        , ReadablePreviousTemplates = 32
-        , MandatoryAmazon = 64
-        , MandatoryTemu = 128
+        , PutFirstValue = 4
+        , Size = 4
+        , SameValue = 8
+        , ChildSameValue = 16
+        , ForCustomInstructions = 32
+        , ReadablePreviousTemplates = 64
+        , MandatoryAmazon = 128
+        , MandatoryTemu = 256
     };
     static const QHash<Flag, QString> FLAG_STRING;
     static const QMap<QString, Flag> STRING_FLAG;
