@@ -15,11 +15,13 @@ public:
     bool contains(const QString &marketplaceId,
                            const QString &countryCode,
                            const QString &langCode,
+                           const QString &productType,
                            const QString &attrId) const;
 
     void recordAttribute(const QString &marketplaceId,
                          const QString &countryCode,
                          const QString &langCode,
+                         const QString &productType,
                          const QString &attrId,
                          const QStringList &possibleValues);
 

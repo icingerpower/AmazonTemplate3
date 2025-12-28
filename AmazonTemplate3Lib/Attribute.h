@@ -49,7 +49,6 @@ private:
     QHash<QString, QHash<QString, QHash<QString, QHash<QString, QSet<QString>>>>> m_marketplaceId_countryCode_langCode_category_possibleValues;
     QHash<QString, QHash<QString, QHash<QString, QHash<QString, QHash<QString, QString>>>>> m_marketplaceId_countryCode_langCode_category_replacedValues; // When there is an error in an amazon template, a possible value is replace by another with the right value
     QList<QSet<QString>> m_equivalences; // {{"Femme", "Women"}, {"Homme", "Men"}}
-    static QHash<QString, QHash<QString, QSharedPointer<Attribute>>> marketplaceId_attributeId_attributeInfos;
 };
 // Will be saved in the following CSV tab format
 // amazon.fr / deparment / fr / fr / femme / homme

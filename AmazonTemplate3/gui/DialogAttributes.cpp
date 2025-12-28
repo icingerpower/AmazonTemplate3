@@ -62,6 +62,7 @@ void DialogAttributes::missingPossibleAdd()
                     dialogMissing.getMarketplaceId(),
                     dialogMissing.getCountryCode(),
                     dialogMissing.getLangCode(),
+                    dialogMissing.getProductType(),
                     dialogMissing.getAttributeId(),
                     dialogMissing.getPossibleValues());
     }

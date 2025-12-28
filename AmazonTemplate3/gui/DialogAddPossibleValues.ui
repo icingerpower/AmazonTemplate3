@@ -49,13 +49,23 @@
       <widget class="QLineEdit" name="lineEditLangCode"/>
      </item>
      <item row="3" column="0">
+      <widget class="QLabel" name="labelProductType">
+       <property name="text">
+        <string>Product Type:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="1">
+      <widget class="QLineEdit" name="lineEditProductType"/>
+     </item>
+     <item row="4" column="0">
       <widget class="QLabel" name="labelAttributeId">
        <property name="text">
         <string>Attribute ID:</string>
        </property>
       </widget>
      </item>
-     <item row="3" column="1">
+     <item row="4" column="1">
       <widget class="QLineEdit" name="lineEditAttributeId"/>
      </item>
     </layout>

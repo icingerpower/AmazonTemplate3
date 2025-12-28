@@ -65,7 +65,7 @@ void TemplateFiller::setTemplates(
         , const QString &templateFromPath
         , const QStringList &templateToPaths)
 {
-    const auto &productType = _readProductType(templateFromPath); // TODO Exception empty file + ma
+    const auto &productType = _get_productType(templateFromPath); // TODO Exception empty file + ma
     if (productType.isEmpty())
     {
         ExceptionTemplate exception;
@@ -379,10 +379,70 @@ void TemplateFiller::checkPreviewImages()
     }
 }
 
+void TemplateFiller::checkPossibleValues()
+{
+    // Will check if some possible values need to be added for some lang code
+    QStringList filePaths{m_templateFromPath};
+    filePaths << m_templateToPaths;
+    QSet<QString> allFieldIds;
+    for (const auto &filePath : filePaths)
+    {
+        QXlsx::Document doc(filePath);
+        const auto &fieldId_possibleValues = _get_fieldId_possibleValues(doc);
+        const auto &curFieldIds = fieldId_possibleValues.keys();
+        for (const auto &fieldId : curFieldIds)
+        {
+            allFieldIds.insert(fieldId);
+        }
+    }
+    allFieldIds.intersect(m_mandatoryAttributesTable->getMandatoryIds());
+    bool addedMissing = false;
+    for (const auto &filePath : filePaths)
+    {
+        QXlsx::Document doc(filePath);
+        const auto &countryCode = _getCountryCode(filePath);
+        const auto &langCode = _getLangCode(filePath);
+        const auto &marketplace = _get_marketplace(doc);
+        const auto &productType = _get_productType(filePath);
+        const auto &fieldId_possibleValues = _get_fieldId_possibleValues(doc);
+        const auto &curFieldIdsPossibleList = fieldId_possibleValues.keys();
+        QSet<QString> curFieldIdsPossible{curFieldIdsPossibleList.begin(), curFieldIdsPossibleList.end()};
+        const auto &fieldId_index = _get_fieldId_index(doc);
+        const auto &curFieldIdsList = fieldId_index.keys();
+        QSet<QString> curFieldIds{curFieldIdsList.begin(), curFieldIdsList.end()};
+        QSet<QString> missingFieldIds = allFieldIds;
+        missingFieldIds.intersect(curFieldIds);
+        missingFieldIds.subtract(curFieldIdsPossible);
+        for (const auto &missingFieldId : missingFieldIds)
+        {
+            if (!m_attributePossibleMissingTable->contains(
+                        marketplace, countryCode, langCode, productType, missingFieldId))
+            {
+                m_attributePossibleMissingTable->recordAttribute(
+                            marketplace
+                            , countryCode
+                            , langCode
+                            , productType
+                            , missingFieldId
+                            , {"TODO"}
+                            );
+                addedMissing = true;
+            }
+        }
+    }
+    if (addedMissing)
+    {
+        ExceptionTemplate exception;
+        exception.setInfos(QObject::tr("Possible attributes missing"),
+                           QObject::tr("Some field has their possible attributes missing. Complete them in the attributes view."));
+        exception.raise();
+    }
+}
+
 QStringList TemplateFiller::findPreviousTemplatePath() const
 {
     qDebug() << "TemplateFiller::findPreviousTemplatePath...";
-    const QString &type = _readProductType(m_templateFromPath);
+    const QString &type = _get_productType(m_templateFromPath);
     QStringList templatePaths;
     QDirIterator it(m_workingDir.absolutePath() + "/..", QStringList() << "*FILLED*.xlsm", QDir::Files, QDirIterator::Subdirectories);
     while (it.hasNext())
@@ -413,7 +473,7 @@ QStringList TemplateFiller::findPreviousTemplatePath() const
     return templatePaths;
 }
 
-QString TemplateFiller::_readProductType(const QString &filePath) const
+QString TemplateFiller::_get_productType(const QString &filePath) const
 {
     QXlsx::Document doc(filePath);
     _selectTemplateSheet(doc);
@@ -430,6 +490,24 @@ QString TemplateFiller::_readProductType(const QString &filePath) const
     {
         return cellProductType->value().toString();
     }
+    else
+    {
+        const auto &fieldId_possibleValues = _get_fieldId_possibleValues(doc);
+        QString fieldId;
+        if (version == V01)
+        {
+            fieldId = "feed_product_type";
+        }
+        else if (version == V02)
+        {
+            fieldId = "product_type#1.value";
+        }
+        else
+        {
+            Q_ASSERT(false);
+        }
+        return *fieldId_possibleValues[fieldId].begin();
+    }
     return QString{};
 }
 
@@ -442,7 +520,7 @@ QSharedPointer<QSettings> TemplateFiller::settingsWorkingDir() const
 QCoro::Task<TemplateFiller::AttributesToValidate> TemplateFiller::findAttributesMandatoryToValidateManually() const
 {
     TemplateFiller::AttributesToValidate attributesToValidateManually;
-    const auto &productType = _readProductType(m_templateFromPath);
+    const auto &productType = _get_productType(m_templateFromPath);
     Q_ASSERT(!productType.isEmpty());
     QXlsx::Document doc{m_templateFromPath};
     _selectTemplateSheet(doc);
@@ -752,7 +830,12 @@ QHash<QString, int> TemplateFiller::_get_fieldId_index(
 QString TemplateFiller::_get_marketplaceFrom() const
 {
     QXlsx::Document doc{m_templateFromPath};
-    _selectTemplateSheet(doc);
+    return _get_marketplace(doc);
+}
+
+QString TemplateFiller::_get_marketplace(QXlsx::Document &doc) const
+{
+     _selectTemplateSheet(doc);
     auto version = _getDocumentVersion(doc);
     if (version == V01)
     {
@@ -877,7 +960,7 @@ QHash<QString, QSet<QString>> TemplateFiller::_get_fieldId_possibleValues(
             QString fieldId{cellFieldId->value().toString()};
             _formatFieldId(fieldId);
             QString fieldName{cellFieldName->value().toString()};
-            if (fieldName.isEmpty() && !fieldId.isEmpty())
+            if (!fieldName.isEmpty() && !fieldId.isEmpty())
             {
                 fieldName_fieldId[fieldName] = fieldId;
             }

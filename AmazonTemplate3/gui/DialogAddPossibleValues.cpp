@@ -28,6 +28,11 @@ QString DialogAddPossibleValues::getLangCode() const
     return ui->lineEditLangCode->text().trimmed();
 }
 
+QString DialogAddPossibleValues::getProductType() const
+{
+    return ui->lineEditProductType->text().trimmed();
+}
+
 QString DialogAddPossibleValues::getAttributeId() const
 {
     return ui->lineEditAttributeId->text().trimmed();

@@ -10,6 +10,8 @@
 #include <xlsxdocument.h>
 #include <QCoro/QCoroTask>
 
+#include "Attribute.h"
+
 class AttributesMandatoryAiTable;
 class AttributesMandatoryTable;
 class AttributeEquivalentTable;
@@ -35,9 +37,10 @@ public:
     };
     void setTemplates(const QString &commonSettingsDir, const QString &templateFromPath
                       , const QStringList &templateToPaths);
-    void checkParentSkus(); // TODO raise exeption
-    void checkKeywords(); // TODO raise exeption
-    void checkPreviewImages(); // TODO raise exeption
+    void checkParentSkus();
+    void checkKeywords();
+    void checkPreviewImages();
+    void checkPossibleValues();
     QStringList getImagePreviewFileNames() const;
     QString checkSkus() const; // check child / parent are correct without duplicates
 
@@ -95,6 +98,7 @@ private:
     int _getRowFieldId(VersionAmz version) const;
     QHash<QString, int> _get_fieldId_index(QXlsx::Document &doc) const;
     QString _get_marketplaceFrom() const;
+    QString _get_marketplace(QXlsx::Document &doc) const;
     QSet<QString> _get_fieldIdMandatory(QXlsx::Document &doc) const;
     QSet<QString> _get_fieldIdMandatoryAll() const;
     QSet<QString> _get_fieldIdMandatoryPrevious() const;
@@ -107,8 +111,9 @@ private:
     int _getIndColSkuParent(const QHash<QString, int> &fieldId_index) const;
     int _getIndColColorName(const QHash<QString, int> &fieldId_index) const;
     int _getIndColProductType(const QHash<QString, int> &fieldId_index) const;
-    QString _readProductType(const QString &filePath) const;
+    QString _get_productType(const QString &filePath) const;
     QSharedPointer<QSettings> settingsWorkingDir() const; // Settings of current working directory
+    QHash<QString, QHash<QString, QSharedPointer<Attribute>>> marketplaceId_attributeId_attributeInfos;
 };
 
 #endif // TEMPLATEFILLER_H

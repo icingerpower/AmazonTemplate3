@@ -203,8 +203,10 @@ void MainWindow::_setGenerateButtonsEnabled(bool enable)
 
 void MainWindow::baseControls()
 {
-    try {
+    try
+    {
         m_templateFiller->checkParentSkus();
+        m_templateFiller->checkPossibleValues();
         m_templateFiller->checkPreviewImages();
         m_templateFiller->checkKeywords();
         QMessageBox::warning(

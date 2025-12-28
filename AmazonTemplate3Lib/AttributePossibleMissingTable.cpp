@@ -9,6 +9,7 @@ const QStringList AttributePossibleMissingTable::HEADERS{
     QObject::tr("marketplace")
     , QObject::tr("country")
     , QObject::tr("lang")
+    , QObject::tr("product type")
     , QObject::tr("attribute")
     , QObject::tr("possible values")
 };
@@ -33,15 +34,17 @@ bool AttributePossibleMissingTable::contains(
         const QString &marketplaceId
         , const QString &countryCode
         , const QString &langCode
+        , const QString &productType
         , const QString &attrId) const
 {
     for (const auto &row : std::as_const(m_listOfStringList))
     {
-        if (row.size() >= 4 &&
+        if (row.size() >= 5 &&
             row[0] == marketplaceId &&
             row[1] == countryCode &&
             row[2] == langCode &&
-            row[3] == attrId)
+            row[3] == productType &&
+            row[4] == attrId)
         {
             return true;
         }
@@ -53,13 +56,14 @@ void AttributePossibleMissingTable::recordAttribute(
         const QString &marketplaceId,
         const QString &countryCode,
         const QString &langCode,
+        const QString &productType,
         const QString &attrId,
         const QStringList &possibleValues)
 {
-    if (!contains(marketplaceId, countryCode, langCode, attrId))
+    if (!contains(marketplaceId, countryCode, langCode, productType, attrId))
     {
         QStringList newRow;
-        newRow << marketplaceId << countryCode << langCode << attrId << possibleValues.join(CELL_SEP);
+        newRow << marketplaceId << countryCode << langCode << productType << attrId << possibleValues.join(CELL_SEP);
 
         beginInsertRows(QModelIndex{}, 0, 0);
         m_listOfStringList.insert(0, newRow);
