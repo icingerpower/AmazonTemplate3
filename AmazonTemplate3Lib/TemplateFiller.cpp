@@ -9,7 +9,7 @@
 #include "AttributeFlagsTable.h"
 #include "AttributePossibleMissingTable.h"
 #include "AttributeValueReplacedTable.h"
-#include "TemplateExceptions.h"
+#include "ExceptionTemplate.h"
 #include "TemplateFiller.h"
 
 const QHash<QString, QSet<QString>> TemplateFiller::SHEETS_MANDATORY{
@@ -65,6 +65,14 @@ void TemplateFiller::setTemplates(
         , const QString &templateFromPath
         , const QStringList &templateToPaths)
 {
+    const auto &productType = _readProductType(templateFromPath); // TODO Exception empty file + ma
+    if (productType.isEmpty())
+    {
+        ExceptionTemplate exception;
+        exception.setInfos(QObject::tr("Empty template")
+                           , QObject::tr("The template is not filled as no product type could be found."));
+        exception.raise();
+    }
     m_templateFromPath = templateFromPath;
     m_templateToPaths = templateToPaths;
     m_countryCodeFrom = _getCountryCode(templateFromPath);
@@ -74,9 +82,6 @@ void TemplateFiller::setTemplates(
     m_workingDirImage = m_workingDir.absoluteFilePath("images");
     _clearAttributeManagers();
     m_mandatoryAttributesAiTable = new AttributesMandatoryAiTable;
-    const auto &productType = _readProductType(m_templateFromPath); // TODO Exception empty file + ma
-    Q_ASSERT(!productType.isEmpty());
-
     QXlsx::Document doc(m_templateFromPath);
     const auto &fieldId_index = _get_fieldId_index(doc);
     const auto &fieldIdMandatory = _get_fieldIdMandatoryAll();
@@ -162,7 +167,7 @@ void TemplateFiller::checkParentSkus()
             }
             else
             {
-                TemplateExceptions exception;
+                ExceptionTemplate exception;
                 exception.setInfos(
                             QObject::tr("Double skus"),
                             QObject::tr("The following skus appears twice:") + " " + sku);
@@ -177,7 +182,7 @@ void TemplateFiller::checkParentSkus()
                     && skuParent != lastParent
                     && parentsDone.contains(skuParent))
             {
-                TemplateExceptions exception;
+                ExceptionTemplate exception;
                 exception.setInfos(
                             QObject::tr("Uncoherent parent"),
                             QObject::tr("The following parent appears twice:") + " " + skuParent);
@@ -198,7 +203,7 @@ void TemplateFiller::checkKeywords()
                 QStringList{"keywor*.txt", "Keywor*.txt"}, QDir::Files, QDir::Name);
     if (keywordsFileInfos.size() == 0)
     {
-        TemplateExceptions exception;
+        ExceptionTemplate exception;
         exception.setInfos(
                     QObject::tr("Keywords file missing"),
                     QObject::tr("The keywords.txt file is missing"));
@@ -220,14 +225,14 @@ void TemplateFiller::checkKeywords()
                 const auto &langCodeTo = _getLangCode(templateToPath);
                 if (!countryCode_langCodes.contains(countryCodeTo))
                 {
-                    TemplateExceptions exception;
+                    ExceptionTemplate exception;
                     exception.setInfos(
                                 QObject::tr("Keywords file issue"),
                                 QObject::tr("The keywords.txt file doesn't contains the country code") + ": " + countryCodeTo);
                 }
                 else if (countryCode_langCodes[countryCodeTo].contains(langCodeTo))
                 {
-                    TemplateExceptions exception;
+                    ExceptionTemplate exception;
                     exception.setInfos(
                                 QObject::tr("Keywords file issue"),
                                 QObject::tr("The keywords.txt file doesn't contains") + ": " + countryCodeTo + "/" + langCodeTo);
@@ -354,6 +359,7 @@ void TemplateFiller::checkPreviewImages()
         }
         if (!skuImageBaseName.isEmpty() && !existingImageBaseNames.contains(skuImageBaseName))
         {
+            Q_ASSERT(!skuImageBaseName.startsWith("P-"));
             missingImageBaseNames.insert(skuImageBaseName);
         }
     }
@@ -365,7 +371,7 @@ void TemplateFiller::checkPreviewImages()
     }
     if (missingImageFileNames.size() > 0)
     {
-        TemplateExceptions exception;
+        ExceptionTemplate exception;
         exception.setInfos(
                     QObject::tr("Preview images missing"),
                     QObject::tr("The following AI preview images are missing in the folder images") + ":\n" + missingImageFileNames.join("\n"));

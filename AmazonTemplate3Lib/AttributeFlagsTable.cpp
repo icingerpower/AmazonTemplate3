@@ -20,6 +20,7 @@ AttributeFlagsTable::AttributeFlagsTable(
     {
         m_colNames << flagName;
     }
+    _loadFromFile();
 }
 
 QSet<QString> AttributeFlagsTable::getUnrecordedFieldIds(
@@ -300,10 +301,6 @@ bool AttributeFlagsTable::setData(
 
 Qt::ItemFlags AttributeFlagsTable::flags(const QModelIndex &index) const
 {
-    if (index.column() < m_indFirstFlag)
-    {
-        return Qt::ItemIsEnabled | Qt::ItemIsSelectable;
-    }
     return Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsEditable;
 }
 
@@ -324,37 +321,40 @@ void AttributeFlagsTable::_loadFromFile()
         }
         for (int i=1; i<lines.size(); ++i)
         {
-            QVariantList newElements;
-            const auto &oldElements = lines[i].split(COL_SEP);
-            int j=0;
-            for (const auto &newColName : m_colNames)
+            if (!lines[i].trimmed().isEmpty())
             {
-                if (oldColName_index.contains(newColName))
+                QVariantList newElements;
+                const auto &oldElements = lines[i].split(COL_SEP);
+                int j=0;
+                for (const auto &newColName : m_colNames)
                 {
-                    int oldColIndex = oldColName_index[newColName];
-                    if (j < m_indFirstFlag)
+                    if (oldColName_index.contains(newColName))
                     {
-                        newElements <<  oldElements[oldColIndex];
+                        int oldColIndex = oldColName_index[newColName];
+                        if (j < m_indFirstFlag)
+                        {
+                            newElements <<  oldElements[oldColIndex];
+                        }
+                        else
+                        {
+                            newElements << (oldElements[oldColIndex] == STR_TRUE);
+                        }
                     }
                     else
                     {
-                        newElements << (oldElements[oldColIndex] == STR_TRUE);
+                        if (j < m_indFirstFlag)
+                        {
+                            newElements << QString{};
+                        }
+                        else
+                        {
+                            newElements << false;
+                        }
                     }
+                    ++j;
                 }
-                else
-                {
-                    if (j < m_indFirstFlag)
-                    {
-                        newElements << QString{};
-                    }
-                    else
-                    {
-                        newElements << false;
-                    }
-                }
-                ++j;
+                m_listOfVariantList << newElements;
             }
-            m_listOfVariantList << newElements;
         }
         file.close();
         _sort();

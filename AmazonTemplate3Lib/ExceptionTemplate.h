@@ -3,11 +3,11 @@
 
 #include <QException>
 
-class TemplateExceptions : public QException
+class ExceptionTemplate : public QException
 {
 public:
     void raise() const override;
-    TemplateExceptions *clone() const override;
+    ExceptionTemplate *clone() const override;
     void setInfos(const QString &title, const QString &error);
 
     const QString &title() const;

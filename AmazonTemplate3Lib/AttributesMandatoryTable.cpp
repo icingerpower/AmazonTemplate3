@@ -71,7 +71,6 @@ AttributesMandatoryTable::AttributesMandatoryTable(
             m_idsMandatory[fieldId] = true;
         }
     }
-
     _saveInSettings();
 }
 

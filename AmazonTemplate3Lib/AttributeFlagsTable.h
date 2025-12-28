@@ -18,6 +18,7 @@ public:
             const QString &workingDirectory, QObject *parent = nullptr);
     QSet<QString> getUnrecordedFieldIds(
             const QString &marketplace, const QSet<QString> &fieldIds) const;
+    //Attribute::Flag getFlag(const QString &attrId, const QString &marketplace) const;
 
     void recordAttributeNotRecordedYet(
             const QString &marketplace, const QSet<QString> &fieldIds);

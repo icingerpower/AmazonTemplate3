@@ -3,7 +3,7 @@
 #include <QProgressDialog>
 
 #include <TemplateFiller.h>
-#include <TemplateExceptions.h>
+#include <ExceptionTemplate.h>
 #include <AttributesMandatoryAiTable.h>
 #include <FileModelToFill.h>
 #include <FileModelSources.h>
@@ -114,55 +114,63 @@ void MainWindow::browseSourceMain()
     const QString key{"MainWindow__browseSourceMain"};
     QDir lastDir{settings.value(key, QDir{}.path()).toString()};
     const QString &filePath = QFileDialog::getOpenFileName(
-        this,
-        tr("Template file pre-filled"),
-        lastDir.path(),
-        QString{"Xlsx (*TOFILL*.xlsx *TOFILL*.XLSX *TOFILL*.xlsm *TOFILL*.XLSM)"},
-        nullptr,
-        QFileDialog::DontUseNativeDialog);
+                this,
+                tr("Template file pre-filled"),
+                lastDir.path(),
+                QString{"Xlsx (*TOFILL*.xlsx *TOFILL*.XLSX *TOFILL*.xlsm *TOFILL*.XLSM)"},
+                nullptr,
+                QFileDialog::DontUseNativeDialog);
     if (!filePath.isEmpty())
     {
-        _clearTemplateFiller();
-        m_workingDir = QFileInfo{filePath}.dir();
-        m_settingsFilePath = m_workingDir.absoluteFilePath("settings.ini");
-        auto settingsDir = settingsFolder();
-        if (settingsDir->contains(m_settingsKeyExtraInfos))
-        {
-            ui->textEditExtraInfos->setText(
-                        settingsDir->value(m_settingsKeyExtraInfos).toString());
+        try {
+            _clearTemplateFiller();
+            m_workingDir = QFileInfo{filePath}.dir();
+            m_settingsFilePath = m_workingDir.absoluteFilePath("settings.ini");
+            auto settingsDir = settingsFolder();
+            if (settingsDir->contains(m_settingsKeyExtraInfos))
+            {
+                ui->textEditExtraInfos->setText(
+                            settingsDir->value(m_settingsKeyExtraInfos).toString());
+            }
+            else
+            {
+                ui->textEditExtraInfos->clear();
+            }
+            const auto &workingDirPath = m_workingDir.path();
+            settings.setValue(key, workingDirPath);
+            ui->lineEditTo->setText(filePath);
+            _enableGenerateButtonIfValid();
+            auto *curModelSource = ui->treeViewSources->model();
+            auto *fileModelSources
+                    = new FileModelSources{workingDirPath, ui->treeViewSources};
+            ui->treeViewSources->setModel(fileModelSources);
+            ui->treeViewSources->setRootIndex(
+                        fileModelSources->index(workingDirPath));
+            ui->treeViewSources->header()->resizeSection(0, 300);
+            auto *curModelToFill = ui->treeViewToFill->model();
+            auto *fileModelToFill
+                    = new FileModelToFill{workingDirPath, ui->treeViewToFill};
+            m_templateFiller = new TemplateFiller{
+                    WorkingDirectoryManager::instance()->workingDir().path()
+                    , filePath
+                    , fileModelToFill->getFilePaths()};
+            ui->treeViewToFill->setModel(fileModelToFill);
+            ui->treeViewToFill->setRootIndex(fileModelToFill->index(workingDirPath));
+            ui->treeViewToFill->header()->resizeSection(0, 300);
+            if (curModelToFill != nullptr)
+            {
+                curModelToFill->deleteLater();
+                curModelSource->deleteLater();
+            }
+            _setControlButtonsEnabled(true);
         }
-        else
+        catch (const ExceptionTemplate &exception)
         {
-            ui->textEditExtraInfos->clear();
+            QMessageBox::warning(
+                        this,
+                        exception.title(),
+                        exception.error());
         }
-        ui->buttonExtractProductInfos->setEnabled(true);
-        const auto &workingDirPath = m_workingDir.path();
-        settings.setValue(key, workingDirPath);
-        ui->lineEditTo->setText(filePath);
-        _enableGenerateButtonIfValid();
-        auto *curModelSource = ui->treeViewSources->model();
-        auto *fileModelSources
-            = new FileModelSources{workingDirPath, ui->treeViewSources};
-        ui->treeViewSources->setModel(fileModelSources);
-        ui->treeViewSources->setRootIndex(
-            fileModelSources->index(workingDirPath));
-        ui->treeViewSources->header()->resizeSection(0, 300);
-        auto *curModelToFill = ui->treeViewToFill->model();
-        auto *fileModelToFill
-            = new FileModelToFill{workingDirPath, ui->treeViewToFill};
-        m_templateFiller = new TemplateFiller{
-                WorkingDirectoryManager::instance()->workingDir().path()
-                , filePath
-                , fileModelToFill->getFilePaths()};
-        ui->treeViewToFill->setModel(fileModelToFill);
-        ui->treeViewToFill->setRootIndex(fileModelToFill->index(workingDirPath));
-        ui->treeViewToFill->header()->resizeSection(0, 300);
-        if (curModelToFill != nullptr)
-        {
-            curModelToFill->deleteLater();
-            curModelSource->deleteLater();
-        }
-        _setControlButtonsEnabled(true);
     }
 }
 
@@ -204,7 +212,7 @@ void MainWindow::baseControls()
                     tr("Controls done"),
                     tr("Controls successfully done"));
     }
-    catch (const TemplateExceptions &exception)
+    catch (const ExceptionTemplate &exception)
     {
         QMessageBox::warning(
                     this,

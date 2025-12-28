@@ -61,8 +61,8 @@ add_library(AmazonTemplate3Lib STATIC
   AttributesMandatoryAiTable.cpp
   AttributesMandatoryTable.h
   AttributesMandatoryTable.cpp
-  TemplateExceptions.h
-  TemplateExceptions.cpp
+  ExceptionTemplate.h
+  ExceptionTemplate.cpp
   FileModelSources.h
   FileModelSources.cpp
   FileModelToFill.h
@@ -110,8 +110,8 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   AttributesMandatoryAiTable.cpp
   AttributesMandatoryTable.h
   AttributesMandatoryTable.cpp
-  TemplateExceptions.h
-  TemplateExceptions.cpp
+  ExceptionTemplate.h
+  ExceptionTemplate.cpp
 )
 
 target_link_libraries(AmazonTemplate3Lib_Tests PRIVATE
