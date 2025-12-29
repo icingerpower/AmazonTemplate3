@@ -205,10 +205,19 @@ void MainWindow::baseControls()
 {
     try
     {
+        qDebug() << "m_templateFiller->checkParentSkus()...";
         m_templateFiller->checkParentSkus();
+        qDebug() << "m_templateFiller->checkPossibleValues()...";
         m_templateFiller->checkPossibleValues();
+        qDebug() << "m_templateFiller->buildAttributes()...";
+        m_templateFiller->buildAttributes();
+        qDebug() << "m_templateFiller->checkColumnsFilled()...";
+        m_templateFiller->checkColumnsFilled();
+        qDebug() << "m_templateFiller->checkPreviewImages()...";
         m_templateFiller->checkPreviewImages();
+        qDebug() << "m_templateFiller->checkKeywords()...";
         m_templateFiller->checkKeywords();
+        qDebug() << "m_templateFiller->checks...DONE SUCCESSFULLY";
         QMessageBox::warning(
                     this,
                     tr("Controls done"),

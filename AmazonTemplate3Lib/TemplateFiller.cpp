@@ -65,7 +65,8 @@ void TemplateFiller::setTemplates(
         , const QString &templateFromPath
         , const QStringList &templateToPaths)
 {
-    const auto &productType = _get_productType(templateFromPath); // TODO Exception empty file + ma
+    QXlsx::Document doc(templateFromPath);
+    const auto &productType = _get_productType(doc); // TODO Exception empty file + ma
     if (productType.isEmpty())
     {
         ExceptionTemplate exception;
@@ -75,14 +76,13 @@ void TemplateFiller::setTemplates(
     }
     m_templateFromPath = templateFromPath;
     m_templateToPaths = templateToPaths;
-    m_countryCodeFrom = _getCountryCode(templateFromPath);
-    m_langCodeFrom = _getLangCode(templateFromPath);
+    m_countryCodeFrom = _get_countryCode(templateFromPath);
+    m_langCodeFrom = _get_langCode(templateFromPath);
     m_workingDirCommon = commonSettingsDir;
     m_workingDir = QFileInfo{m_templateFromPath}.dir();
     m_workingDirImage = m_workingDir.absoluteFilePath("images");
     _clearAttributeManagers();
     m_mandatoryAttributesAiTable = new AttributesMandatoryAiTable;
-    QXlsx::Document doc(m_templateFromPath);
     const auto &fieldId_index = _get_fieldId_index(doc);
     const auto &fieldIdMandatory = _get_fieldIdMandatoryAll();
         // 2. Resolve "Previous" mandatory fields
@@ -97,6 +97,13 @@ void TemplateFiller::setTemplates(
     m_marketplaceFrom = _get_marketplaceFrom();
     m_attributeFlagsTable->recordAttributeNotRecordedYet(m_marketplaceFrom, fieldIdMandatory);
     m_attributeFlagsTable->recordAttributeNotRecordedYet(m_marketplaceFrom, m_mandatoryAttributesTable->getMandatoryIds());
+    m_connectionFlagsTable = m_mandatoryAttributesTable->connect(m_mandatoryAttributesTable,
+                              &AttributesMandatoryTable::dataChanged,
+                              m_mandatoryAttributesTable,
+                              [this](){
+    const auto &newMandatoryIds = m_mandatoryAttributesTable->getMandatoryIds();
+    m_attributeFlagsTable->recordAttributeNotRecordedYet(m_marketplaceFrom, newMandatoryIds);
+    });
 }
 
 void TemplateFiller::_clearAttributeManagers()
@@ -113,6 +120,7 @@ void TemplateFiller::_clearAttributeManagers()
     m_mandatoryAttributesTable = nullptr;
     if (m_attributeEquivalentTable != nullptr)
     {
+        m_attributeEquivalentTable->disconnect(m_connectionFlagsTable);
         m_attributeEquivalentTable->deleteLater();
     }
     m_attributeEquivalentTable = nullptr;
@@ -226,8 +234,8 @@ void TemplateFiller::checkKeywords()
         {
             if (templateToPath.contains("amazon", Qt::CaseInsensitive))
             {
-                const auto &countryCodeTo = _getCountryCode(templateToPath);
-                const auto &langCodeTo = _getLangCode(templateToPath);
+                const auto &countryCodeTo = _get_countryCode(templateToPath);
+                const auto &langCodeTo = _get_langCode(templateToPath);
                 if (!countryCode_langCodes.contains(countryCodeTo))
                 {
                     ExceptionTemplate exception;
@@ -409,10 +417,10 @@ TemplateFiller::checkPossibleValues()
     for (const auto &filePath : filePaths)
     {
         QXlsx::Document doc(filePath);
-        const auto &countryCode = _getCountryCode(filePath);
-        const auto &langCode = _getLangCode(filePath);
+        const auto &countryCode = _get_countryCode(filePath);
+        const auto &langCode = _get_langCode(filePath);
         const auto &marketplace = _get_marketplace(doc);
-        const auto &productType = _get_productType(filePath);
+        const auto &productType = _get_productType(doc);
         const auto &fieldId_possibleValues = _get_fieldId_possibleValues(doc);
         for (auto it = fieldId_possibleValues.begin();
              it != fieldId_possibleValues.end(); ++it)
@@ -485,11 +493,11 @@ void TemplateFiller::buildAttributes()
     for (const auto &templatePath : templatePaths)
     {
         TemplateInfo infos;
-        infos.productType = _get_productType(templatePath);
         QXlsx::Document doc{templatePath};
+        infos.productType = _get_productType(doc);
         infos.marketplace = _get_marketplace(doc);
-        infos.countryCode = _getCountryCode(templatePath);
-        infos.langCode = _getLangCode(templatePath);
+        infos.countryCode = _get_countryCode(templatePath);
+        infos.langCode = _get_langCode(templatePath);
         templatePath_infos[templatePath] = infos;
     }
 
@@ -531,6 +539,112 @@ void TemplateFiller::buildAttributes()
     }
 }
 
+void TemplateFiller::checkColumnsFilled()
+{
+    Q_ASSERT(marketplaceId_attributeId_attributeInfos.size() > 0); // Build attribute should have been called
+    QXlsx::Document doc{m_templateFromPath};
+    const auto &marketplace = _get_marketplace(doc);
+    const auto &fieldIds = m_mandatoryAttributesTable->getMandatoryIds();
+    QSet<QString> fieldIdsNeededAll;
+    QSet<QString> fieldIdsNeededChildren;
+    QSet<QString> fieldIdsNeededNoParent;
+
+    for (const auto &fieldId : fieldIds)
+    {
+        if (fieldId.startsWith("supplier_declared_dg_hz_regulation#1.value"))
+        {
+            int TEMP=10;++TEMP;
+        }
+        if (m_attributeFlagsTable->hasFlag(
+                    marketplace, fieldId, Attribute::NoAI))
+        {
+            fieldIdsNeededChildren.insert(fieldId);
+            if (!m_attributeFlagsTable->hasFlag(
+                        marketplace, fieldId, Attribute::ChildOnly))
+            {
+                fieldIdsNeededAll.insert(fieldId);
+            }
+        }
+        if (!m_attributeFlagsTable->hasFlag(
+                    marketplace, fieldId, Attribute::ChildOnly))
+        {
+            fieldIdsNeededNoParent.insert(fieldId);
+        }
+    }
+    const auto &dim = doc.dimension();
+    int lastRow = dim.lastRow();
+    auto version = _getDocumentVersion(doc);
+    int row = _getRowFieldId(version) + 1;
+    const auto &fieldId_index = _get_fieldId_index(doc);
+    const auto &parentSku_skus = _get_parentSku_skus(doc);
+    int indColSku = _getIndColSku(fieldId_index);
+    QSet<QString> fieldIdsWithMissingValue;
+    QSet<QString> fieldIdsShouldNotHaveValue;
+    for (int i=row; i<lastRow; ++i)
+    {
+        const auto &sku = _get_cellVal(doc, i, indColSku);
+        if (sku.startsWith("ABC"))
+        {
+            continue;
+        }
+        else if (sku.isEmpty())
+        {
+            break;
+        }
+        bool isParent = parentSku_skus.contains(sku);
+        const auto &fieldIdsToCheck = isParent ? fieldIdsNeededAll : fieldIdsNeededChildren;
+        for (const auto &fieldId : fieldIdsToCheck)
+        {
+            int colIndex = fieldId_index[fieldId];
+            const auto &celVal = _get_cellVal(doc, i, colIndex);
+            if (celVal.isEmpty())
+            {
+                fieldIdsWithMissingValue.insert(fieldId);
+            }
+        }
+        if (isParent)
+        {
+            for (const auto &fieldId : fieldIdsNeededNoParent)
+            {
+                int colIndex = fieldId_index[fieldId];
+                const auto &celVal = _get_cellVal(doc, i, colIndex);
+                if (!celVal.isEmpty())
+                {
+                    fieldIdsShouldNotHaveValue.insert(fieldId);
+                }
+            }
+        }
+    }
+    if (fieldIdsWithMissingValue.size() > 0)
+    {
+        QStringList fieldIdsWithMissingValueList{fieldIdsWithMissingValue.begin(), fieldIdsWithMissingValue.end()};
+        fieldIdsWithMissingValueList.sort();
+        ExceptionTemplate exception;
+        exception.setInfos(QObject::tr("Values missing")
+                           , QObject::tr("The following field ids doesn't have a required value") + ":\n" + fieldIdsWithMissingValueList.join("\n"));
+        exception.raise();
+    }
+    if (fieldIdsShouldNotHaveValue.size() > 0)
+    {
+        QStringList fieldIdsShouldNotHaveValueList{fieldIdsShouldNotHaveValue.begin(), fieldIdsShouldNotHaveValue.end()};
+        fieldIdsShouldNotHaveValueList.sort();
+        ExceptionTemplate exception;
+        exception.setInfos(QObject::tr("Wrong values for parent")
+                           , QObject::tr("The following field ids have values for parent while no value is required") + ":\n" + fieldIdsShouldNotHaveValueList.join("\n"));
+        exception.raise();
+    }
+}
+
+QString TemplateFiller::_get_cellVal(QXlsx::Document &doc, int row, int col) const
+{
+    auto cell = doc.cellAt(row+1, col + 1);
+    if (cell)
+    {
+         return cell->value().toString();
+    }
+    return QString{};
+}
+
 QStringList TemplateFiller::findPreviousTemplatePath() const
 {
     qDebug() << "TemplateFiller::findPreviousTemplatePath...";
@@ -565,9 +679,8 @@ QStringList TemplateFiller::findPreviousTemplatePath() const
     return templatePaths;
 }
 
-QString TemplateFiller::_get_productType(const QString &filePath) const
+QString TemplateFiller::_get_productType(QXlsx::Document &doc) const
 {
-    QXlsx::Document doc(filePath);
     _selectTemplateSheet(doc);
 
     const auto &fieldId_index = _get_fieldId_index(doc);
@@ -601,6 +714,13 @@ QString TemplateFiller::_get_productType(const QString &filePath) const
         return *fieldId_possibleValues[fieldId].begin();
     }
     return QString{};
+
+}
+
+QString TemplateFiller::_get_productType(const QString &filePath) const
+{
+    QXlsx::Document doc(filePath);
+    return _get_productType(doc);
 }
 
 QSharedPointer<QSettings> TemplateFiller::settingsWorkingDir() const
@@ -612,9 +732,9 @@ QSharedPointer<QSettings> TemplateFiller::settingsWorkingDir() const
 QCoro::Task<TemplateFiller::AttributesToValidate> TemplateFiller::findAttributesMandatoryToValidateManually() const
 {
     TemplateFiller::AttributesToValidate attributesToValidateManually;
-    const auto &productType = _get_productType(m_templateFromPath);
-    Q_ASSERT(!productType.isEmpty());
     QXlsx::Document doc{m_templateFromPath};
+    const auto &productType = _get_productType(doc);
+    Q_ASSERT(!productType.isEmpty());
     _selectTemplateSheet(doc);
     const auto &fieldId_index = _get_fieldId_index(doc);
     const auto &fieldIdMandatory = _get_fieldIdMandatoryAll();
@@ -719,7 +839,7 @@ int TemplateFiller::_getIndColColorName(const QHash<QString, int> &fieldId_index
     return _getIndCol(fieldId_index, FIELD_IDS_COLOR_NAME);
 }
 
-QString TemplateFiller::_getCountryCode(const QString &templateFilePath) const
+QString TemplateFiller::_get_countryCode(const QString &templateFilePath) const
 {
     QStringList elements = QFileInfo{templateFilePath}.baseName().split("-");
     bool isNum = false;
@@ -1155,7 +1275,7 @@ void TemplateFiller::_formatFieldId(QString &fieldId) const
     Q_ASSERT(!fieldId.contains("[") && !fieldId.contains("]"));
 }
 
-QString TemplateFiller::_getLangCode(const QString &templateFilePath) const
+QString TemplateFiller::_get_langCode(const QString &templateFilePath) const
 {
     QStringList elements = QFileInfo{templateFilePath}.baseName().split("-");
     bool isNum = false;

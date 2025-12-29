@@ -87,6 +87,13 @@ Attribute::Flag AttributeFlagsTable::getFlags(
     return flags;
 }
 
+bool AttributeFlagsTable::hasFlag(
+        const QString &marketplace, const QString &fieldId, Attribute::Flag flag) const
+{
+    Attribute::Flag flags = getFlags(marketplace, fieldId);
+    return (flags & flag) == flag;
+}
+
 void AttributeFlagsTable::recordAttributeNotRecordedYet(
         const QString &marketplaceId, const QSet<QString> &fieldIds)
 {

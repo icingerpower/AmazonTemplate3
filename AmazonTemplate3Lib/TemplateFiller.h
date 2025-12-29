@@ -43,8 +43,8 @@ public:
     void checkPreviewImages();
     QHash<QString, QHash<QString, QHash<QString, QHash<QString, QSet<QString> > > > > checkPossibleValues();
     void buildAttributes();
+    void checkColumnsFilled();
     QStringList getImagePreviewFileNames() const;
-    QString checkSkus() const; // check child / parent are correct without duplicates
 
      // Return all field with values or ask AI after reading field ids
     QStringList findPreviousTemplatePath() const;
@@ -77,6 +77,7 @@ private:
     AttributesMandatoryAiTable *m_mandatoryAttributesAiTable;
     AttributeEquivalentTable *m_attributeEquivalentTable;
     AttributeFlagsTable *m_attributeFlagsTable;
+    QMetaObject::Connection m_connectionFlagsTable;
     AttributePossibleMissingTable *m_attributePossibleMissingTable;
     AttributeValueReplacedTable *m_attributeValueReplacedTable;
     void _clearAttributeManagers();
@@ -88,10 +89,11 @@ private:
     QString m_templateFromPath;
     QStringList m_templateToPaths;
     QStringList _get_allTemplatePaths() const;
+    QString _get_cellVal(QXlsx::Document &doc, int row, int col) const;
     QString m_langCodeFrom;
     QString m_countryCodeFrom;
-    QString _getCountryCode(const QString &templateFilePath) const;
-    QString _getLangCode(const QString &templateFilePath) const;
+    QString _get_countryCode(const QString &templateFilePath) const;
+    QString _get_langCode(const QString &templateFilePath) const;
     QString _getLangCodeFromText(const QString &langInfos) const;
     void _selectTemplateSheet(QXlsx::Document &doc) const;
     void _selectValidValuesSheet(QXlsx::Document &doc) const;
@@ -114,6 +116,7 @@ private:
     int _getIndColSkuParent(const QHash<QString, int> &fieldId_index) const;
     int _getIndColColorName(const QHash<QString, int> &fieldId_index) const;
     int _getIndColProductType(const QHash<QString, int> &fieldId_index) const;
+    QString _get_productType(QXlsx::Document &doc) const;
     QString _get_productType(const QString &filePath) const;
     QSharedPointer<QSettings> settingsWorkingDir() const; // Settings of current working directory
     QHash<QString, QHash<QString, QSharedPointer<Attribute>>> marketplaceId_attributeId_attributeInfos;
