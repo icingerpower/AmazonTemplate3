@@ -39,7 +39,7 @@ const QMap<QString, Attribute::Flag> Attribute::STRING_FLAG
     return _STRING_FLAG;
 }();
 
-bool Attribute::hasFlag(const QString &marketplaceId, Flag flag) const
+bool Attribute::hasFlag(const QString &marketplace, Flag flag) const
 {
     const int mask = static_cast<int>(flag);
 
@@ -47,26 +47,26 @@ bool Attribute::hasFlag(const QString &marketplaceId, Flag flag) const
     return (value & mask) == mask;
 }
 
-bool Attribute::isChoice(const QString &marketplaceId) const
+bool Attribute::isChoice(const QString &marketplace) const
 {
-    auto it = m_marketplaceId_countryCode_langCode_category_possibleValues.constFind(marketplaceId);
-    return it != m_marketplaceId_countryCode_langCode_category_possibleValues.constEnd()
+    auto it = m_marketplace_countryCode_langCode_category_possibleValues.constFind(marketplace);
+    return it != m_marketplace_countryCode_langCode_category_possibleValues.constEnd()
             && it.value().size() > 0;
 }
 
 const QSet<QString> &Attribute::possibleValues(
-        const QString &marketplaceId
+        const QString &marketplace
         , const QString &countryCode
         , const QString &langCode
         , const QString &category) const
 {
-    if (m_marketplaceId_countryCode_langCode_category_possibleValues.contains(marketplaceId)
-            && m_marketplaceId_countryCode_langCode_category_possibleValues[marketplaceId].contains(countryCode)
-            && m_marketplaceId_countryCode_langCode_category_possibleValues[marketplaceId][countryCode].contains(langCode)
-            && m_marketplaceId_countryCode_langCode_category_possibleValues[marketplaceId][countryCode][langCode].contains(category)
+    if (m_marketplace_countryCode_langCode_category_possibleValues.contains(marketplace)
+            && m_marketplace_countryCode_langCode_category_possibleValues[marketplace].contains(countryCode)
+            && m_marketplace_countryCode_langCode_category_possibleValues[marketplace][countryCode].contains(langCode)
+            && m_marketplace_countryCode_langCode_category_possibleValues[marketplace][countryCode][langCode].contains(category)
             )
     {
-        auto itMkt = m_marketplaceId_countryCode_langCode_category_possibleValues.constFind(marketplaceId);
+        auto itMkt = m_marketplace_countryCode_langCode_category_possibleValues.constFind(marketplace);
         auto itCountry = itMkt.value().constFind(countryCode);
         auto itLang = itCountry.value().constFind(langCode);
         auto itCat = itLang.value().constFind(category);
@@ -86,18 +86,24 @@ void Attribute::addFlag(const QString &flagString)
 }
 
 void Attribute::setPossibleValues(
-        const QString &marketplaceId
+        const QString &marketplace
         , const QString &countryCode
         , const QString &langCode
         , const QString &category
         , const QSet<QString> &possibleValues)
 {
-    m_marketplaceId_countryCode_langCode_category_possibleValues
-            [marketplaceId][countryCode][langCode][category] = possibleValues;
+    m_marketplace_countryCode_langCode_category_possibleValues
+            [marketplace][countryCode][langCode][category] = possibleValues;
 }
 
 void Attribute::setFlag(Flag newFlag)
 {
     m_flag = newFlag;
+}
+
+const QHash<QString, QHash<QString, QHash<QString, QHash<QString, QSet<QString>>>>>
+&Attribute::marketplace_countryCode_langCode_category_possibleValues() const
+{
+    return m_marketplace_countryCode_langCode_category_possibleValues;
 }
 

@@ -11,6 +11,7 @@
 #include <QCoro/QCoroTask>
 
 #include "Attribute.h"
+#include "fillers/AbstractFiller.h"
 
 class AttributesMandatoryAiTable;
 class AttributesMandatoryTable;
@@ -84,6 +85,8 @@ private:
     AttributeValueReplacedTable *m_attributeValueReplacedTable;
     void _clearAttributeManagers();
     QString m_productType;
+    AbstractFiller::Age m_age;
+    AbstractFiller::Gender m_gender;
     QString m_marketplaceFrom;
     QDir m_workingDirCommon;
     QDir m_workingDir;
@@ -120,10 +123,13 @@ private:
     int _getIndColSkuParent(const QHash<QString, int> &fieldId_index) const;
     int _getIndColColorName(const QHash<QString, int> &fieldId_index) const;
     int _getIndColProductType(const QHash<QString, int> &fieldId_index) const;
+    int _getIndColAge(const QHash<QString, int> &fieldId_index) const;
+    int _getIndColGender(const QHash<QString, int> &fieldId_index) const;
+    QCoro::Task<void> _readAgeGender();
     QString _get_productType(QXlsx::Document &doc) const;
     QString _get_productType(const QString &filePath) const;
     QSharedPointer<QSettings> settingsWorkingDir() const; // Settings of current working directory
-    QHash<QString, QHash<QString, QSharedPointer<Attribute>>> m_marketplaceId_attributeId_attributeInfos;
+    QHash<QString, QHash<QString, QSharedPointer<Attribute>>> m_marketplace_attributeId_attributeInfos;
     QHash<QString, QHash<QString, QString>> _get_sku_fieldId_fromValues(
             const QString &templatePath
             , const QSet<QString> &fieldIdsWhiteList = QSet<QString>{}) const;

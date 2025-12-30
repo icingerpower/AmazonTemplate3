@@ -18,8 +18,8 @@ public:
     };
     enum Age{
         Adult,
-        kid,
-        baby,
+        Kid,
+        Baby,
         UndefinedAge
     };
     static const QList<const AbstractFiller *> ALL_FILLERS_SORTED;

@@ -3,6 +3,9 @@
 
 #include <QAbstractTableModel>
 #include <QStringList>
+#include <QCoro/QCoroTask>
+
+class Attribute;
 
 class AttributeEquivalentTable : public QAbstractTableModel
 {
@@ -12,10 +15,24 @@ public:
     explicit AttributeEquivalentTable(
             const QString &workingDirectory, QObject *parent = nullptr);
 
-    bool hasEquivalent(const QString &attrId, const QString &value) const;
-    int getPosAttr(const QString &attrId) const;
-    void recordAttribute(const QString &attrId,
-                         const QStringList &equivalentValues);
+    int getPosAttr(const QString &fieldIdAmzV02, const QString &value) const;
+    int getPosAttr(const QString &fieldIdAmzV02, const QSet<QString> &equivalentValues) const;
+    bool hasEquivalent(const QString &fieldIdAmzV02, const QString &value) const;
+    void recordAttribute(const QString &fieldIdAmzV02,
+                         const QSet<QString> &equivalentValues);
+    const QSet<QString> &getEquivalentValues(
+            const QString &fieldIdAmzV02, const QString &value) const;
+    QCoro::Task<void> askAiEquivalentValues(
+            const QString &fieldIdAmzV02, const QString &value, const Attribute *attribute);
+
+    QSet<QString> getEquivalentGenderWomen() const;
+    QSet<QString> getEquivalentGenderMen() const;
+    QSet<QString> getEquivalentGenderUnisex() const;
+
+    QSet<QString> getEquivalentAgeAdult() const;
+    QSet<QString> getEquivalentAgeKid() const;
+    QSet<QString> getEquivalentAgeBaby() const;
+
 
     // Header:
     QVariant headerData(
@@ -35,8 +52,10 @@ public:
 
 private:
     static const QStringList HEADERS;
+    void _buildHash();
     QString m_filePath;
     QList<QStringList> m_listOfStringList;
+    QHash<QString, QList<QSet<QString>>> m_fieldIdAmzV02_listOfEquivalents;
     void _loadFromFile();
     void _saveInFile();
 };

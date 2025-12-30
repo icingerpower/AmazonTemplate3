@@ -31,14 +31,14 @@ public:
     static const QStringList MARKETPLACES;
     static const QHash<QString, bool> MARKETPLACES_HAS_PARENT_LINE;
 
-    bool hasFlag(const QString &marketplaceId, Flag flag) const;
-    bool isChoice(const QString &marketplaceId) const;
-    const QSet<QString> &possibleValues(const QString &marketplaceId
+    bool hasFlag(const QString &marketplace, Flag flag) const;
+    bool isChoice(const QString &marketplace) const;
+    const QSet<QString> &possibleValues(const QString &marketplace
                                         , const QString &countryCode
                                         , const QString &langCode
                                         , const QString &category) const;
     void addFlag(const QString &flagString);
-    void setPossibleValues(const QString &marketplaceId
+    void setPossibleValues(const QString &marketplace
                            , const QString &countryCode
                            , const QString &langCode
                            , const QString &category
@@ -46,9 +46,13 @@ public:
 
     void setFlag(Flag newFlag);
 
+
+    const QHash<QString, QHash<QString, QHash<QString, QHash<QString, QSet<QString>>>>>
+    &marketplace_countryCode_langCode_category_possibleValues() const;
+
 private:
     Flag m_flag;
-    QHash<QString, QHash<QString, QHash<QString, QHash<QString, QSet<QString>>>>> m_marketplaceId_countryCode_langCode_category_possibleValues;
+    QHash<QString, QHash<QString, QHash<QString, QHash<QString, QSet<QString>>>>> m_marketplace_countryCode_langCode_category_possibleValues;
 };
 
 #endif // ATTRIBUTE_H

@@ -31,7 +31,7 @@ void AttributePossibleMissingTable::remove(const QModelIndex &index)
 }
 
 bool AttributePossibleMissingTable::contains(
-        const QString &marketplaceId
+        const QString &marketplace
         , const QString &countryCode
         , const QString &langCode
         , const QString &productType
@@ -40,7 +40,7 @@ bool AttributePossibleMissingTable::contains(
     for (const auto &row : std::as_const(m_listOfStringList))
     {
         if (row.size() >= 5 &&
-            row[0] == marketplaceId &&
+            row[0] == marketplace &&
             row[1] == countryCode &&
             row[2] == langCode &&
             row[3] == productType &&
@@ -53,17 +53,17 @@ bool AttributePossibleMissingTable::contains(
 }
 
 void AttributePossibleMissingTable::recordAttribute(
-        const QString &marketplaceId,
+        const QString &marketplace,
         const QString &countryCode,
         const QString &langCode,
         const QString &productType,
         const QString &attrId,
         const QStringList &possibleValues)
 {
-    if (!contains(marketplaceId, countryCode, langCode, productType, attrId))
+    if (!contains(marketplace, countryCode, langCode, productType, attrId))
     {
         QStringList newRow;
-        newRow << marketplaceId << countryCode << langCode << productType << attrId << possibleValues.join(CELL_SEP);
+        newRow << marketplace << countryCode << langCode << productType << attrId << possibleValues.join(CELL_SEP);
 
         beginInsertRows(QModelIndex{}, 0, 0);
         m_listOfStringList.insert(0, newRow);
@@ -73,7 +73,7 @@ void AttributePossibleMissingTable::recordAttribute(
 }
 
 QSet<QString> AttributePossibleMissingTable::possibleValues(
-        const QString &marketplaceId
+        const QString &marketplace
         , const QString &countryCode
         , const QString &langCode
         , const QString &productType
@@ -83,7 +83,7 @@ QSet<QString> AttributePossibleMissingTable::possibleValues(
     for (const auto &row : std::as_const(m_listOfStringList))
     {
         if (row.size() >= 5 &&
-            row[0] == marketplaceId &&
+            row[0] == marketplace &&
             row[1] == countryCode &&
             row[2] == langCode &&
             row[3] == productType &&

@@ -126,12 +126,12 @@ bool AttributeFlagsTable::hasFlag(
 }
 
 void AttributeFlagsTable::recordAttributeNotRecordedYet(
-        const QString &marketplaceId, const QSet<QString> &fieldIds)
+        const QString &marketplace, const QSet<QString> &fieldIds)
 {
     bool added = false;
     for (const auto &fieldId : fieldIds)
     {
-        QHash<QString, QString> marketplace_ids{{marketplaceId, fieldId}};
+        QHash<QString, QString> marketplace_ids{{marketplace, fieldId}};
         int pos = getPosAttr(marketplace_ids);
         if (pos < 0)
         {

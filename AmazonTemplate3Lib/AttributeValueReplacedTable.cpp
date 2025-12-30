@@ -31,7 +31,7 @@ void AttributeValueReplacedTable::remove(const QModelIndex &index)
 }
 
 bool AttributeValueReplacedTable::contains(
-        const QString &marketplaceId
+        const QString &marketplace
         , const QString &countryCode
         , const QString &langCode
         , const QString &fieldId
@@ -40,7 +40,7 @@ bool AttributeValueReplacedTable::contains(
     for (const auto &row : std::as_const(m_listOfStringList))
     {
         if (row.size() >= 5 &&
-            row[0] == marketplaceId &&
+            row[0] == marketplace &&
             row[1] == countryCode &&
             row[2] == langCode &&
             row[3] == fieldId &&
@@ -53,7 +53,7 @@ bool AttributeValueReplacedTable::contains(
 }
 
 bool AttributeValueReplacedTable::replaceIfContains(
-        const QString &marketplaceId
+        const QString &marketplace
         , const QString &countryCode
         , const QString &langCode
         , const QString &fieldId
@@ -62,7 +62,7 @@ bool AttributeValueReplacedTable::replaceIfContains(
     for (const auto &row : std::as_const(m_listOfStringList))
     {
         if (row.size() >= 5 &&
-            row[0] == marketplaceId &&
+            row[0] == marketplace &&
             row[1] == countryCode &&
             row[2] == langCode &&
             row[3] == fieldId &&
@@ -95,17 +95,17 @@ void AttributeValueReplacedTable::replaceIfContains(
 
 
 void AttributeValueReplacedTable::recordAttribute(
-        const QString &marketplaceId,
+        const QString &marketplace,
         const QString &countryCode,
         const QString &langCode,
         const QString &fieldId,
         const QString &valueFrom,
         const QString &valueTo)
 {
-    if (!contains(marketplaceId, countryCode, langCode, fieldId, valueFrom))
+    if (!contains(marketplace, countryCode, langCode, fieldId, valueFrom))
     {
         QStringList newRow;
-        newRow << marketplaceId << countryCode << langCode << fieldId << valueFrom << valueTo;
+        newRow << marketplace << countryCode << langCode << fieldId << valueFrom << valueTo;
 
         beginInsertRows(QModelIndex{}, 0, 0);
         m_listOfStringList.insert(0, newRow);

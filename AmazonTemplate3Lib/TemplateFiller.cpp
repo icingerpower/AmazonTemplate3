@@ -11,7 +11,6 @@
 #include "AttributeValueReplacedTable.h"
 #include "ExceptionTemplate.h"
 #include "TemplateFiller.h"
-#include "fillers/AbstractFiller.h"
 
 const QHash<QString, QSet<QString>> TemplateFiller::SHEETS_MANDATORY{
     {"Définitions des données", {"Obligatoire"}}
@@ -47,6 +46,8 @@ TemplateFiller::TemplateFiller(
         , const QStringList &templateToPaths
         , const QStringList &templateSourcePaths)
 {
+    m_age = AbstractFiller::Adult;
+    m_gender = AbstractFiller::UndefinedGender;
     m_mandatoryAttributesTable = nullptr;
     m_mandatoryAttributesAiTable = nullptr;
     m_attributeEquivalentTable = nullptr;
@@ -516,7 +517,7 @@ void TemplateFiller::buildAttributes()
         for (auto it = marketplace_fieldId.begin();
              it != marketplace_fieldId.end(); ++it)
         {
-            m_marketplaceId_attributeId_attributeInfos[it.key()][it.value()] = attribute;
+            m_marketplace_attributeId_attributeInfos[it.key()][it.value()] = attribute;
         }
         attribute->setFlag(m_attributeFlagsTable->getFlags(marketplace, mandatoryId));
         for (const auto &templatePath : templatePaths)
@@ -548,7 +549,7 @@ void TemplateFiller::buildAttributes()
 
 void TemplateFiller::checkColumnsFilled()
 {
-    //Q_ASSERT(m_marketplaceId_attributeId_attributeInfos.size() > 0); // Build attribute should have been called
+    //Q_ASSERT(m_marketplace_attributeId_attributeInfos.size() > 0); // Build attribute should have been called
     QXlsx::Document doc{m_templateFromPath};
     const auto &marketplace = _get_marketplace(doc);
     const auto &fieldIds = m_mandatoryAttributesTable->getMandatoryIds();
@@ -640,6 +641,7 @@ void TemplateFiller::checkColumnsFilled()
 
 QCoro::Task<void> TemplateFiller::fillValues()
 {
+    buildAttributes();
     _fillValuesSources();
     m_sku_fieldId_fromValues = _get_sku_fieldId_fromValues(m_templateFromPath);
     const auto &mandatoryFieldIds = m_mandatoryAttributesTable->getMandatoryIds();
@@ -652,15 +654,14 @@ QCoro::Task<void> TemplateFiller::fillValues()
     const auto &productType = _get_productType(document);
     const auto &langCodeFrom = _get_langCode(m_templateFromPath);
     const auto &countryCodeFrom = _get_countryCode(m_templateFromPath);
-    AbstractFiller::Gender gender; // TODO
-    AbstractFiller::Age age; // TODO
+    co_await _readAgeGender();
 
     co_await AbstractFiller::fillValuesForAi(this,
                                              productType,
                                              countryCodeFrom,
                                              langCodeFrom,
-                                             gender,
-                                             age,
+                                             m_gender,
+                                             m_age,
                                              m_sku_fieldId_fromValues,
                                              m_sku_attribute_valuesForAi);
 
@@ -693,8 +694,8 @@ QCoro::Task<void> TemplateFiller::fillValues()
                                 , countryCodeTo
                                 , langCodeTo
                                 , keywords
-                                , gender
-                                , age
+                                , m_gender
+                                , m_age
                                 , m_sku_fieldId_fromValues
                                 , m_sku_attribute_valuesForAi
                                 , m_langCode_sku_fieldId_toValues[langCodeTo]
@@ -888,12 +889,12 @@ QString TemplateFiller::_get_productType(QXlsx::Document &doc) const
         return *fieldId_possibleValues[fieldId].begin();
     }
     return QString{};
-
 }
+
 
 QString TemplateFiller::_get_productType(const QString &filePath) const
 {
-    QXlsx::Document doc(filePath);
+    QXlsx::Document doc{filePath};
     return _get_productType(doc);
 }
 
@@ -1018,6 +1019,22 @@ int TemplateFiller::_getIndCol(
     }
     Q_ASSERT(false);
     return -1;
+}
+
+int TemplateFiller::_getIndColGender(
+        const QHash<QString, int> &fieldId_index) const
+{
+    const QStringList possibleValues{
+        "target_gender", "target_gender#1.value"};
+    return _getIndCol(fieldId_index, possibleValues);
+}
+
+int TemplateFiller::_getIndColAge(
+        const QHash<QString, int> &fieldId_index) const
+{
+    const QStringList possibleValues{
+        "age_range_description", "age_range_description#1.value"};
+    return _getIndCol(fieldId_index, possibleValues);
 }
 
 int TemplateFiller::_getIndColProductType(
@@ -1574,4 +1591,138 @@ QString TemplateFiller::_getLangCodeFromText(const QString &langInfos) const
         return "ES";
     }
     return langInfos;
+}
+
+
+QCoro::Task<void> TemplateFiller::_readAgeGender()
+{
+    QXlsx::Document doc(m_templateFromPath);
+    _selectTemplateSheet(doc);
+    const auto &fieldId_index = _get_fieldId_index(doc);
+    int indColAge = _getIndColAge(fieldId_index);
+    int indColGender = _getIndColGender(fieldId_index);
+
+    QSharedPointer<Attribute> ageAttribute;
+    QSharedPointer<Attribute> genderAttribute;
+    
+    const QSet<QString> ageFieldIds {"target_audience_keyword", "target_audience_base", "age_range_description"};
+
+    const QSet<QString> genderFieldIds{"target_gender", "department_name"};
+    
+    const auto &marketplace = _get_marketplaceFrom();
+
+    // Find attributes
+    QString ageFieldIdFound;
+    QString genderFieldIdFound;
+    
+    for (const auto &id : ageFieldIds)
+    {
+        bool found = false;
+        for (auto it = fieldId_index.begin(); it != fieldId_index.end(); ++it)
+        {
+            if (it.key().startsWith(id))
+            {
+                QString realId = it.key();
+                // Find attribute in our map
+                if (m_marketplace_attributeId_attributeInfos.contains(marketplace) && 
+                    m_marketplace_attributeId_attributeInfos[marketplace].contains(realId))
+                {
+                    ageAttribute = m_marketplace_attributeId_attributeInfos[marketplace][realId];
+                    ageFieldIdFound = realId;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (found) break;
+    }
+    
+    for (const auto &id : genderFieldIds)
+    {
+        bool found = false;
+        for (auto it = fieldId_index.begin(); it != fieldId_index.end(); ++it)
+        {
+            if (it.key().startsWith(id))
+            {
+                QString realId = it.key();
+                if (m_marketplace_attributeId_attributeInfos.contains(marketplace) && 
+                    m_marketplace_attributeId_attributeInfos[marketplace].contains(realId))
+                {
+                    genderAttribute = m_marketplace_attributeId_attributeInfos[marketplace][realId];
+                    genderFieldIdFound = realId;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (found) break;
+    }
+
+    auto version = _getDocumentVersion(doc);
+    int rowData = _getRowFieldId(version) + 1;
+
+
+    // Check Age - 3 conditions
+    if (ageAttribute)
+    {
+        const QString &age = _get_cellVal(doc, rowData + 3, indColAge + 1); // +2 in case exemple row and Parent in first row
+        if (m_attributeEquivalentTable->getEquivalentAgeAdult().isEmpty())
+        {
+            co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                 ageFieldIdFound, "Adult", ageAttribute.data());
+        }
+        if (m_attributeEquivalentTable->getEquivalentAgeKid().isEmpty())
+        {
+            co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                 ageFieldIdFound, "Child", ageAttribute.data());
+        }
+        if (m_attributeEquivalentTable->getEquivalentAgeBaby().isEmpty())
+        {
+             co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                 ageFieldIdFound, "Infant", ageAttribute.data());
+        }
+        if (m_attributeEquivalentTable->getEquivalentAgeAdult().contains(age))
+        {
+            m_age = AbstractFiller::Adult;
+        }
+        else if (m_attributeEquivalentTable->getEquivalentAgeKid().contains(age))
+        {
+            m_age = AbstractFiller::Kid;
+        }
+        else if (m_attributeEquivalentTable->getEquivalentAgeBaby().contains(age))
+        {
+            m_age = AbstractFiller::Baby;
+        }
+    }
+
+    // Check Gender - 3 conditions
+    if (genderAttribute)
+    {
+        const QString &gender = _get_cellVal(doc, rowData + 3, indColGender + 1); // +2 in case exemple row and Parent in first row
+        if (m_attributeEquivalentTable->getEquivalentGenderMen().isEmpty()) {
+             co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                 genderFieldIdFound, "Male", genderAttribute.data());
+        }
+        if (m_attributeEquivalentTable->getEquivalentGenderWomen().isEmpty()) {
+             co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                 genderFieldIdFound, "Female", genderAttribute.data());
+        }
+        if (m_attributeEquivalentTable->getEquivalentGenderUnisex().isEmpty()) {
+             co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                 genderFieldIdFound, "Unisex", genderAttribute.data());
+        }
+        if (m_attributeEquivalentTable->getEquivalentGenderMen().contains(gender))
+        {
+            m_gender = AbstractFiller::Male;
+        }
+        else if (m_attributeEquivalentTable->getEquivalentGenderWomen().contains(gender))
+        {
+            m_gender = AbstractFiller::Female;
+        }
+        else if (m_attributeEquivalentTable->getEquivalentGenderUnisex().contains(gender))
+        {
+            m_gender = AbstractFiller::Unisex;
+        }
+    }
+    co_return;
 }
