@@ -23,6 +23,37 @@ AttributeFlagsTable::AttributeFlagsTable(
     _loadFromFile();
 }
 
+QString AttributeFlagsTable::getFieldId(
+        const QString &marketplaceFrom
+        , const QString &fieldIdFrom
+        , const QString &marketplaceTo) const
+{
+    if (marketplaceFrom == marketplaceTo)
+    {
+        return fieldIdFrom;
+    }
+    
+    if (m_marketplace_fieldId_indRow.contains(marketplaceFrom))
+    {
+        const auto &fieldId_indRow = m_marketplace_fieldId_indRow[marketplaceFrom];
+        if (fieldId_indRow.contains(fieldIdFrom))
+        {
+            int rowIndex = fieldId_indRow[fieldIdFrom];
+            int colIndex = m_colNames.indexOf(marketplaceTo);
+            
+            if (colIndex != -1 && rowIndex >= 0 && rowIndex < m_listOfVariantList.size())
+            {
+                // Ensure colIndex is within bounds of the specific row (though rows should be full size)
+                if (colIndex < m_listOfVariantList[rowIndex].size())
+                {
+                    return m_listOfVariantList[rowIndex][colIndex].toString();
+                }
+            }
+        }
+    }
+    return QString{};
+}
+
 QSet<QString> AttributeFlagsTable::getUnrecordedFieldIds(
         const QString &marketplace, const QSet<QString> &fieldIds) const
 {
@@ -357,6 +388,12 @@ void AttributeFlagsTable::_loadFromFile()
     {
         QTextStream stream{&file};
         const auto &lines = stream.readAll().split("\n");
+        if (lines.isEmpty())
+        {
+            file.close();
+            return;
+        }
+
         const auto &oldColNames = lines[0].split(COL_SEP);
         QHash<QString, int> oldColName_index;
         int i = 0;
@@ -374,19 +411,25 @@ void AttributeFlagsTable::_loadFromFile()
                 int j=0;
                 for (const auto &newColName : m_colNames)
                 {
+                    bool valueFound = false;
                     if (oldColName_index.contains(newColName))
                     {
                         int oldColIndex = oldColName_index[newColName];
-                        if (j < m_indFirstFlag)
+                        if (oldColIndex < oldElements.size())
                         {
-                            newElements <<  oldElements[oldColIndex];
-                        }
-                        else
-                        {
-                            newElements << (oldElements[oldColIndex] == STR_TRUE);
+                            if (j < m_indFirstFlag)
+                            {
+                                newElements << oldElements[oldColIndex];
+                            }
+                            else
+                            {
+                                newElements << (oldElements[oldColIndex] == STR_TRUE);
+                            }
+                            valueFound = true;
                         }
                     }
-                    else
+
+                    if (!valueFound)
                     {
                         if (j < m_indFirstFlag)
                         {
@@ -394,6 +437,7 @@ void AttributeFlagsTable::_loadFromFile()
                         }
                         else
                         {
+                            // If a flags didn't have a value saved, the default value will be false.
                             newElements << false;
                         }
                     }

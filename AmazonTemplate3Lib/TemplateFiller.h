@@ -25,7 +25,7 @@ public:
     static const QSet<QString> VALUES_MANDATORY;
     static const QHash<QString, QSet<QString>> SHEETS_MANDATORY;
     TemplateFiller(const QString &workingDirCommon, const QString &templateFromPath
-                      , const QStringList &templateToPaths);
+                      , const QStringList &templateToPaths, const QStringList &templateSourcePaths);
     ~TemplateFiller();
     struct AttributesToValidate{
         QSet<QString> addedAi;
@@ -37,7 +37,8 @@ public:
     };
     void setTemplates(const QString &commonSettingsDir
                       , const QString &templateFromPath
-                      , const QStringList &templateToPaths);
+                      , const QStringList &templateToPaths
+                      , const QStringList &templateSourcePaths);
     void checkParentSkus();
     void checkKeywords();
     void checkPreviewImages();
@@ -45,6 +46,7 @@ public:
     void buildAttributes();
     void checkColumnsFilled();
     QStringList getImagePreviewFileNames() const;
+    QCoro::Task<void> fillValues();
 
      // Return all field with values or ask AI after reading field ids
     QStringList findPreviousTemplatePath() const;
@@ -88,6 +90,7 @@ private:
     QDir m_workingDirImage;
     QString m_templateFromPath;
     QStringList m_templateToPaths;
+    QStringList m_templateSourcePaths;
     QStringList _get_allTemplatePaths() const;
     QString _get_cellVal(QXlsx::Document &doc, int row, int col) const;
     QString m_langCodeFrom;
@@ -109,6 +112,7 @@ private:
     QSet<QString> _get_fieldIdMandatoryPrevious() const;
     QHash<QString, QSet<QString>> _get_fieldId_possibleValues(QXlsx::Document &doc) const;
     QHash<QString, QSet<QString>> _get_parentSku_skus(QXlsx::Document &doc) const;
+    QHash<QString, QHash<QString, QSet<QString>>> _get_parentSku_variation_skus(QXlsx::Document &doc) const;
     void _formatFieldId(QString &fieldId) const;
     int _getIndCol(const QHash<QString, int> &fieldId_index
                    , const QStringList &possibleValues) const;
@@ -119,7 +123,18 @@ private:
     QString _get_productType(QXlsx::Document &doc) const;
     QString _get_productType(const QString &filePath) const;
     QSharedPointer<QSettings> settingsWorkingDir() const; // Settings of current working directory
-    QHash<QString, QHash<QString, QSharedPointer<Attribute>>> marketplaceId_attributeId_attributeInfos;
+    QHash<QString, QHash<QString, QSharedPointer<Attribute>>> m_marketplaceId_attributeId_attributeInfos;
+    QHash<QString, QHash<QString, QString>> _get_sku_fieldId_fromValues(
+            const QString &templatePath
+            , const QSet<QString> &fieldIdsWhiteList = QSet<QString>{}) const;
+
+    QHash<QString, QMap<QString, QString>> m_sku_attribute_valuesForAi;
+    QHash<QString, QHash<QString, QString>> m_sku_fieldId_fromValues;
+    QHash<QString, QHash<QString, QHash<QString, QHash<QString, QString>>>> m_countryCode_langCode_sku_fieldId_sourceValues;
+    QHash<QString, QHash<QString, QHash<QString, QString>>> m_langCode_sku_fieldId_toValues;
+    QHash<QString, QHash<QString, QHash<QString, QHash<QString, QString>>>> m_countryCode_langCode_sku_fieldId_toValues;
+    void _fillValuesSources();
+    void _saveTemplates();
 };
 
 #endif // TEMPLATEFILLER_H

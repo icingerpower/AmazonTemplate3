@@ -74,6 +74,10 @@ void MainWindow::_connectSlots()
             &QLineEdit::textChanged,
             this,
             &MainWindow::onApiKeyChanged);
+    connect(ui->buttonGenerate,
+            &QPushButton::clicked,
+            this,
+            &MainWindow::generate);
 }
 
 void MainWindow::onApiKeyChanged(const QString &key)
@@ -89,6 +93,40 @@ void MainWindow::onApiKeyChanged(const QString &key)
         settings->remove(m_settingsKeyApi);
     }
     _enableGenerateButtonIfValid();
+}
+
+void MainWindow::generate()
+{
+    baseControlsWithoutPopup();
+    
+    auto progress = new QProgressDialog(
+                tr("Filling template..."),
+                QString{}, 0, 0, this);
+    progress->setWindowModality(Qt::ApplicationModal);
+    progress->setCancelButton(nullptr);
+    progress->setMinimumDuration(0);
+    progress->setAutoClose(false);
+    progress->setAutoReset(false);
+    progress->setValue(0);
+    progress->show();
+
+    QPointer<QProgressDialog> progressGuard{progress};
+
+    qDebug() << "Filling templates...";
+    QCoro::connect(m_templateFiller->fillValues(),
+                   this, [this, progressGuard]()
+    {
+        if (progressGuard)
+        {
+            progressGuard->close();
+            progressGuard->deleteLater();
+        }
+        
+        QMessageBox::information(
+            this,
+            tr("Generation done"),
+            tr("Template filled successfully"));
+    });
 }
 
 void MainWindow::_clearTemplateFiller()
@@ -153,7 +191,9 @@ void MainWindow::browseSourceMain()
             m_templateFiller = new TemplateFiller{
                     WorkingDirectoryManager::instance()->workingDir().path()
                     , filePath
-                    , fileModelToFill->getFilePaths()};
+                    , fileModelToFill->getFilePaths()
+                    , fileModelSources->getFilePaths()
+            };
             ui->treeViewToFill->setModel(fileModelToFill);
             ui->treeViewToFill->setRootIndex(fileModelToFill->index(workingDirPath));
             ui->treeViewToFill->header()->resizeSection(0, 300);
@@ -203,25 +243,33 @@ void MainWindow::_setGenerateButtonsEnabled(bool enable)
 
 void MainWindow::baseControls()
 {
+    if (baseControlsWithoutPopup())
+    {
+        QMessageBox::information(
+                    this,
+                    tr("Controls done"),
+                    tr("Controls successfully done"));
+    }
+}
+
+bool MainWindow::baseControlsWithoutPopup()
+{
     try
     {
         qDebug() << "m_templateFiller->checkParentSkus()...";
         m_templateFiller->checkParentSkus();
         qDebug() << "m_templateFiller->checkPossibleValues()...";
         m_templateFiller->checkPossibleValues();
-        qDebug() << "m_templateFiller->buildAttributes()...";
-        m_templateFiller->buildAttributes();
         qDebug() << "m_templateFiller->checkColumnsFilled()...";
         m_templateFiller->checkColumnsFilled();
+        //qDebug() << "m_templateFiller->buildAttributes()...";
+        //m_templateFiller->buildAttributes();
         qDebug() << "m_templateFiller->checkPreviewImages()...";
         m_templateFiller->checkPreviewImages();
         qDebug() << "m_templateFiller->checkKeywords()...";
         m_templateFiller->checkKeywords();
         qDebug() << "m_templateFiller->checks...DONE SUCCESSFULLY";
-        QMessageBox::warning(
-                    this,
-                    tr("Controls done"),
-                    tr("Controls successfully done"));
+        return true;
     }
     catch (const ExceptionTemplate &exception)
     {
@@ -230,6 +278,7 @@ void MainWindow::baseControls()
                     exception.title(),
                     exception.error());
     }
+    return false;
 }
 
 void MainWindow::findValidateMandatoryFieldIds()

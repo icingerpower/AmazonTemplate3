@@ -13,7 +13,7 @@ public:
     static const QString AMAZON_V02;
     static const QString TEMU_EN;
     enum Flag{
-        NoFlag = 1
+        NoFlag = 0
         , ChildOnly = 1
         , NoAI = 2
         , PutFirstValue = 4
@@ -22,8 +22,9 @@ public:
         , ChildSameValue = 16
         , ForCustomInstructions = 32
         , ReadablePreviousTemplates = 64
-        , MandatoryAmazon = 128
-        , MandatoryTemu = 256
+        , Copy = 128
+        , MandatoryAmazon = 256
+        , MandatoryTemu = 512
     };
     static const QHash<Flag, QString> FLAG_STRING;
     static const QMap<QString, Flag> STRING_FLAG;

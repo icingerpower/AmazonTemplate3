@@ -20,6 +20,10 @@ public:
             const QString &marketplace, const QSet<QString> &fieldIds) const;
     QHash<QString, QString> get_marketplace_id(
             const QString &marketplace, const QString &fieldId) const;
+    QString getFieldId(
+            const QString &marketplaceFrom
+            , const QString &fieldIdFrom
+            , const QString &marketplaceTo) const;
     Attribute::Flag getFlags(const QString &marketplace, const QString &fieldId) const;
     bool hasFlag(const QString &marketplace, const QString &fieldId, Attribute::Flag flag) const;
     //Attribute::Flag getFlag(const QString &attrId, const QString &marketplace) const;

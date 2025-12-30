@@ -25,10 +25,12 @@ public:
 public slots:
     void browseSourceMain();
     void baseControls();
+    bool baseControlsWithoutPopup();
     void findValidateMandatoryFieldIds();
     void viewAttributes();
     void extractProductInfos();
     void onApiKeyChanged(const QString &key);
+    void generate();
 
 private:
     Ui::MainWindow *ui;

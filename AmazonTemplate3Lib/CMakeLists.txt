@@ -8,6 +8,8 @@ include(../common.cmake)
 include(../../common/openai/openai2.cmake)
 include(../../common/utils/utils.cmake)
 
+include(fillers/fillers.cmake)
+
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core Widgets Network)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Widgets Network)
 
@@ -77,6 +79,7 @@ add_library(AmazonTemplate3Lib STATIC
   AttributePossibleMissingTable.cpp
   AttributeEquivalentTable.h
   AttributeEquivalentTable.cpp
+  ${FILLER_FILES}
 )
 
 target_link_libraries(AmazonTemplate3Lib PRIVATE

@@ -11,6 +11,7 @@
 #include "AttributeValueReplacedTable.h"
 #include "ExceptionTemplate.h"
 #include "TemplateFiller.h"
+#include "fillers/AbstractFiller.h"
 
 const QHash<QString, QSet<QString>> TemplateFiller::SHEETS_MANDATORY{
     {"Définitions des données", {"Obligatoire"}}
@@ -43,7 +44,8 @@ const QSet<QString> TemplateFiller::VALUES_MANDATORY
 TemplateFiller::TemplateFiller(
         const QString &workingDirCommon
         , const QString &templateFromPath
-        , const QStringList &templateToPaths)
+        , const QStringList &templateToPaths
+        , const QStringList &templateSourcePaths)
 {
     m_mandatoryAttributesTable = nullptr;
     m_mandatoryAttributesAiTable = nullptr;
@@ -51,7 +53,10 @@ TemplateFiller::TemplateFiller(
     m_attributeFlagsTable = nullptr;
     m_attributePossibleMissingTable = nullptr;
     m_attributeValueReplacedTable = nullptr;
-    setTemplates(workingDirCommon, templateFromPath, templateToPaths);
+    setTemplates(workingDirCommon
+                 , templateFromPath
+                 , templateToPaths
+                 , templateSourcePaths);
 }
 
 TemplateFiller::~TemplateFiller()
@@ -63,7 +68,8 @@ TemplateFiller::~TemplateFiller()
 void TemplateFiller::setTemplates(
         const QString &commonSettingsDir
         , const QString &templateFromPath
-        , const QStringList &templateToPaths)
+        , const QStringList &templateToPaths
+        , const QStringList &templateSourcePaths)
 {
     QXlsx::Document doc(templateFromPath);
     const auto &productType = _get_productType(doc); // TODO Exception empty file + ma
@@ -76,6 +82,7 @@ void TemplateFiller::setTemplates(
     }
     m_templateFromPath = templateFromPath;
     m_templateToPaths = templateToPaths;
+    m_templateSourcePaths = templateSourcePaths;
     m_countryCodeFrom = _get_countryCode(templateFromPath);
     m_langCodeFrom = _get_langCode(templateFromPath);
     m_workingDirCommon = commonSettingsDir;
@@ -509,7 +516,7 @@ void TemplateFiller::buildAttributes()
         for (auto it = marketplace_fieldId.begin();
              it != marketplace_fieldId.end(); ++it)
         {
-            marketplaceId_attributeId_attributeInfos[it.key()][it.value()] = attribute;
+            m_marketplaceId_attributeId_attributeInfos[it.key()][it.value()] = attribute;
         }
         attribute->setFlag(m_attributeFlagsTable->getFlags(marketplace, mandatoryId));
         for (const auto &templatePath : templatePaths)
@@ -541,7 +548,7 @@ void TemplateFiller::buildAttributes()
 
 void TemplateFiller::checkColumnsFilled()
 {
-    Q_ASSERT(marketplaceId_attributeId_attributeInfos.size() > 0); // Build attribute should have been called
+    //Q_ASSERT(m_marketplaceId_attributeId_attributeInfos.size() > 0); // Build attribute should have been called
     QXlsx::Document doc{m_templateFromPath};
     const auto &marketplace = _get_marketplace(doc);
     const auto &fieldIds = m_mandatoryAttributesTable->getMandatoryIds();
@@ -551,10 +558,6 @@ void TemplateFiller::checkColumnsFilled()
 
     for (const auto &fieldId : fieldIds)
     {
-        if (fieldId.startsWith("supplier_declared_dg_hz_regulation#1.value"))
-        {
-            int TEMP=10;++TEMP;
-        }
         if (m_attributeFlagsTable->hasFlag(
                     marketplace, fieldId, Attribute::NoAI))
         {
@@ -565,7 +568,7 @@ void TemplateFiller::checkColumnsFilled()
                 fieldIdsNeededAll.insert(fieldId);
             }
         }
-        if (!m_attributeFlagsTable->hasFlag(
+        if (m_attributeFlagsTable->hasFlag(
                     marketplace, fieldId, Attribute::ChildOnly))
         {
             fieldIdsNeededNoParent.insert(fieldId);
@@ -634,6 +637,177 @@ void TemplateFiller::checkColumnsFilled()
         exception.raise();
     }
 }
+
+QCoro::Task<void> TemplateFiller::fillValues()
+{
+    _fillValuesSources();
+    m_sku_fieldId_fromValues = _get_sku_fieldId_fromValues(m_templateFromPath);
+    const auto &mandatoryFieldIds = m_mandatoryAttributesTable->getMandatoryIds();
+    QStringList sortedFieldIds{mandatoryFieldIds.begin(), mandatoryFieldIds.end()};
+    sortedFieldIds.sort();
+
+    QXlsx::Document document(m_templateFromPath);
+    const auto &parentSku_variation_skus = _get_parentSku_variation_skus(document);
+    const auto &marketplaceFrom = _get_marketplace(document);
+    const auto &productType = _get_productType(document);
+    const auto &langCodeFrom = _get_langCode(m_templateFromPath);
+    const auto &countryCodeFrom = _get_countryCode(m_templateFromPath);
+    AbstractFiller::Gender gender; // TODO
+    AbstractFiller::Age age; // TODO
+
+    co_await AbstractFiller::fillValuesForAi(this,
+                                             productType,
+                                             countryCodeFrom,
+                                             langCodeFrom,
+                                             gender,
+                                             age,
+                                             m_sku_fieldId_fromValues,
+                                             m_sku_attribute_valuesForAi);
+
+    for (const auto &targetPath : m_templateToPaths) // TODO check order and make sure from is made first for possible values
+    {
+        QXlsx::Document docTo{targetPath};
+        const auto &countryCodeTo = _get_countryCode(targetPath);
+        const auto &langCodeTo = _get_langCode(targetPath);
+        const auto &marketplaceTo = _get_marketplace(docTo);
+        QString keywords; // TODO
+
+        for (const auto &filler : AbstractFiller::ALL_FILLERS_SORTED)
+        {
+            for (const auto &fieldIdFrom : sortedFieldIds)
+            {
+                if (filler->canFill(this, marketplaceFrom, fieldIdFrom))
+                {
+                    const auto &fieldIdTo = m_attributeFlagsTable->getFieldId(
+                                marketplaceFrom, fieldIdFrom, marketplaceTo);
+                    co_await filler->fill(
+                                this
+                                , parentSku_variation_skus
+                                , marketplaceFrom
+                                , marketplaceTo
+                                , fieldIdFrom
+                                , fieldIdTo
+                                , productType
+                                , countryCodeFrom
+                                , langCodeFrom
+                                , countryCodeTo
+                                , langCodeTo
+                                , keywords
+                                , gender
+                                , age
+                                , m_sku_fieldId_fromValues
+                                , m_sku_attribute_valuesForAi
+                                , m_langCode_sku_fieldId_toValues[langCodeTo]
+                                , m_countryCode_langCode_sku_fieldId_toValues[countryCodeTo][langCodeTo]
+                                );
+                }
+            }
+        }
+    }
+    _saveTemplates();
+    co_return;
+}
+
+void TemplateFiller::_fillValuesSources()
+{
+    const auto &mandatoryFieldIds = m_mandatoryAttributesTable->getMandatoryIds();
+    const auto &marketplaceFrom = _get_marketplaceFrom();
+    if (m_templateSourcePaths.size() > 0)
+    {
+        for (const auto &templateSourcePath : m_templateSourcePaths)
+        {
+            const auto &countryCode = _get_countryCode(templateSourcePath);
+            const auto &langCode = _get_langCode(templateSourcePath);
+            QSet<QString> whiteListSourceFieldIds;
+            QXlsx::Document document(templateSourcePath);
+            const auto &marketplaceSource = _get_marketplace(document);
+            for (const auto &mandatoryFieldId : mandatoryFieldIds)
+            {
+                if (m_attributeFlagsTable->hasFlag(marketplaceFrom, mandatoryFieldId, Attribute::ReadablePreviousTemplates))
+                {
+                    const auto &mandatoryFieldIdSource = m_attributeFlagsTable->getFieldId(
+                            marketplaceFrom, mandatoryFieldId, marketplaceSource);
+                    whiteListSourceFieldIds.insert(mandatoryFieldIdSource);
+                }
+            }
+            m_countryCode_langCode_sku_fieldId_sourceValues[countryCode][langCode]
+                    = _get_sku_fieldId_fromValues(templateSourcePath, whiteListSourceFieldIds);
+        }
+    }
+}
+
+void TemplateFiller::_saveTemplates()
+{
+    // 1. Get ordered SKUs from source template
+    QXlsx::Document docFrom(m_templateFromPath);
+    _selectTemplateSheet(docFrom);
+    const auto &fieldId_index_from = _get_fieldId_index(docFrom);
+    int indColSkuFrom = _getIndColSku(fieldId_index_from);
+    auto versionFrom = _getDocumentVersion(docFrom);
+    int rowDataFrom = _getRowFieldId(versionFrom) + 1;
+    const auto &dimFrom = docFrom.dimension();
+    int lastRowFrom = dimFrom.lastRow();
+    
+    QStringList orderedSkus;
+    for (int i=rowDataFrom; i<lastRowFrom; ++i)
+    {
+        auto cellSku = docFrom.cellAt(i+1, indColSkuFrom + 1);
+        if (cellSku)
+        {
+            QString sku = cellSku->value().toString();
+            if (!sku.isEmpty() && !sku.startsWith("ABC"))
+            {
+                orderedSkus << sku;
+            }
+        }
+    }
+
+    // 2. Fill target templates
+    for (const auto &targetPath : m_templateToPaths)
+    {
+        const auto &countryCode = _get_countryCode(targetPath);
+        const auto &langCode = _get_langCode(targetPath);
+        QXlsx::Document docTo{targetPath};
+        _selectTemplateSheet(docTo);
+        
+        const auto &fieldId_index = _get_fieldId_index(docTo);
+        int indColSku = _getIndColSku(fieldId_index);
+        
+        // Find where to start writing (after existing data)
+        int writeRow = docTo.dimension().lastRow();
+        
+        for (const auto &sku : orderedSkus)
+        {
+            if (m_countryCode_langCode_sku_fieldId_toValues.contains(countryCode)
+                    && m_countryCode_langCode_sku_fieldId_toValues[countryCode].contains(langCode)
+                    && m_countryCode_langCode_sku_fieldId_toValues[countryCode][langCode].contains(sku))
+            {
+                docTo.write(writeRow + 1, indColSku + 1, sku); // Write SKU
+
+                const auto &fieldId_value = m_countryCode_langCode_sku_fieldId_toValues[countryCode][langCode][sku];
+                for (auto it = fieldId_value.begin(); it != fieldId_value.end(); ++it)
+                {
+                    const auto &fieldId = it.key();
+                    if (fieldId_index.contains(fieldId))
+                    {
+                        int col = fieldId_index[fieldId];
+                        docTo.write(writeRow + 1, col+1, it.value());
+                    }
+                }
+                ++writeRow;
+            }
+        }
+
+        QString toFillFilePathNew{targetPath};
+        toFillFilePathNew.replace("TOFILL", "FILLED");
+        Q_ASSERT(toFillFilePathNew != targetPath);
+        if (toFillFilePathNew != targetPath)
+        {
+            docTo.saveAs(toFillFilePathNew);
+        }
+    }
+}
+
 
 QString TemplateFiller::_get_cellVal(QXlsx::Document &doc, int row, int col) const
 {
@@ -727,6 +901,46 @@ QSharedPointer<QSettings> TemplateFiller::settingsWorkingDir() const
 {
     const auto &settingsPath = m_workingDir.absoluteFilePath("settings.ini");
     return QSharedPointer<QSettings>::create(settingsPath, QSettings::IniFormat);
+}
+
+QHash<QString, QHash<QString, QString>> TemplateFiller::_get_sku_fieldId_fromValues(
+        const QString &templatePath, const QSet<QString> &fieldIdsWhiteList) const
+{
+    QHash<QString, QHash<QString, QString>> sku_fieldId_values;
+    QXlsx::Document document(templatePath);
+    _selectTemplateSheet(document);
+    const auto &fieldId_index = _get_fieldId_index(document);
+    int indColSku = _getIndColSku(fieldId_index);
+    const auto &dim = document.dimension();
+    int lastRow = dim.lastRow();
+    auto version = _getDocumentVersion(document);
+    int row = _getRowFieldId(version) + 1;
+    for (int i=row; i<lastRow; ++i)
+    {
+        const auto &sku = _get_cellVal(document, i, indColSku);
+        if (sku.startsWith("ABC"))
+        {
+            continue;
+        }
+        if (!sku.isEmpty())
+        {
+            for (auto it = fieldId_index.cbegin();
+                 it != fieldId_index.cend(); ++it)
+            {
+                const auto &fieldId = it.key();
+                int colIndex = it.value();
+                const auto &value = _get_cellVal(document, i, colIndex);
+                if (!value.isEmpty())
+                {
+                    if (fieldIdsWhiteList.isEmpty() || fieldIdsWhiteList.contains(fieldId))
+                    {
+                        sku_fieldId_values[sku][fieldId] = value;
+                    }
+                }
+            }
+        }
+    }
+    return sku_fieldId_values;
 }
 
 QCoro::Task<TemplateFiller::AttributesToValidate> TemplateFiller::findAttributesMandatoryToValidateManually() const
@@ -1262,6 +1476,44 @@ QHash<QString, QSet<QString>> TemplateFiller::_get_parentSku_skus(
         parentSku_skus[skuParent].insert(sku);
     }
     return parentSku_skus;
+}
+
+QHash<QString, QHash<QString, QSet<QString>>> TemplateFiller::_get_parentSku_variation_skus(QXlsx::Document &doc) const
+{
+    QHash<QString, QHash<QString, QSet<QString>>> parentSku_variation_skus;
+    const auto &fieldId_index = _get_fieldId_index(doc);
+    int indColSku = _getIndColSku(fieldId_index);
+    int indColSkuParent = _getIndColSkuParent(fieldId_index);
+    int indColColor = _getIndColColorName(fieldId_index);
+
+    const auto &dim = doc.dimension();
+    int lastRow = dim.lastRow();
+    auto version = _getDocumentVersion(doc);
+    int row = _getRowFieldId(version) + 1;
+
+    for (int i=row; i<lastRow; ++i)
+    {
+        auto sku = _get_cellVal(doc, row, indColSku);
+        if (sku.isEmpty())
+        {
+            break;
+        }
+        if (sku.startsWith("ABC"))
+        {
+            continue;
+        }
+
+        auto skuParent = _get_cellVal(doc, row, indColSkuParent);
+        if (skuParent.isEmpty())
+        {
+            continue;
+        }
+
+        auto color = _get_cellVal(doc, row, indColColor);
+
+        parentSku_variation_skus[skuParent][color].insert(sku);
+    }
+    return parentSku_variation_skus;
 }
 
 void TemplateFiller::_formatFieldId(QString &fieldId) const
