@@ -92,8 +92,11 @@ void Attribute::setPossibleValues(
         , const QString &category
         , const QSet<QString> &possibleValues)
 {
-    m_marketplace_countryCode_langCode_category_possibleValues
-            [marketplace][countryCode][langCode][category] = possibleValues;
+    if (possibleValues.size() > 0)
+    {
+        m_marketplace_countryCode_langCode_category_possibleValues
+                [marketplace][countryCode][langCode][category] = possibleValues;
+    }
 }
 
 void Attribute::setFlag(Flag newFlag)

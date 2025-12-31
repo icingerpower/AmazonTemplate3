@@ -76,3 +76,8 @@ target_link_libraries(AttributesMandatoryTableTests PRIVATE
     Qt${QT_VERSION_MAJOR}::Network
     Qt${QT_VERSION_MAJOR}::Gui
     QCoro6::Core)
+add_executable(AttributeValueReplacedTableTests tst_attributevaluereplacedtable.cpp)
+target_link_libraries(AttributeValueReplacedTableTests PRIVATE AmazonTemplate3Lib_Tests)
+target_include_directories(AttributeValueReplacedTableTests PRIVATE ../AmazonTemplate3Lib)
+add_test(NAME AttributeValueReplacedTableTests COMMAND AttributeValueReplacedTableTests)
+target_link_libraries(AttributeValueReplacedTableTests PRIVATE Qt${QT_VERSION_MAJOR}::Test Qt${QT_VERSION_MAJOR}::Core)

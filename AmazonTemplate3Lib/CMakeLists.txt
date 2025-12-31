@@ -115,6 +115,8 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   AttributesMandatoryTable.cpp
   ExceptionTemplate.h
   ExceptionTemplate.cpp
+  AttributeValueReplacedTable.h
+  AttributeValueReplacedTable.cpp
 )
 
 target_link_libraries(AmazonTemplate3Lib_Tests PRIVATE

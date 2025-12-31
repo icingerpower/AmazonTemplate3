@@ -6,12 +6,13 @@
 #include "AttributeValueReplacedTable.h"
 
 const QStringList AttributeValueReplacedTable::HEADERS{
-    QObject::tr("marketplace")
-    , QObject::tr("country")
-    , QObject::tr("lang")
-    , QObject::tr("attribute")
-    , QObject::tr("from")
-    , QObject::tr("to")
+    QObject::tr("Marketplace")
+    , QObject::tr("Country")
+    , QObject::tr("Lang")
+    , QObject::tr("Product Type")
+    , QObject::tr("Field id")
+    , QObject::tr("From")
+    , QObject::tr("To")
 };
 
 AttributeValueReplacedTable::AttributeValueReplacedTable(
@@ -34,17 +35,19 @@ bool AttributeValueReplacedTable::contains(
         const QString &marketplace
         , const QString &countryCode
         , const QString &langCode
+        , const QString &productType
         , const QString &fieldId
         , const QString &valueFrom) const
 {
     for (const auto &row : std::as_const(m_listOfStringList))
     {
-        if (row.size() >= 5 &&
+        if (row.size() >= 6 && // Increased size check
             row[0] == marketplace &&
             row[1] == countryCode &&
             row[2] == langCode &&
-            row[3] == fieldId &&
-            row[4] == valueFrom)
+            row[3] == productType && // Added productType check
+            row[4] == fieldId &&     // Shifted index
+            row[5] == valueFrom)     // Shifted index
         {
             return true;
         }
@@ -56,19 +59,21 @@ bool AttributeValueReplacedTable::replaceIfContains(
         const QString &marketplace
         , const QString &countryCode
         , const QString &langCode
+        , const QString &productType
         , const QString &fieldId
         , QString &valueToUpdate) const
 {
     for (const auto &row : std::as_const(m_listOfStringList))
     {
-        if (row.size() >= 5 &&
+        if (row.size() >= 6 &&
             row[0] == marketplace &&
             row[1] == countryCode &&
             row[2] == langCode &&
-            row[3] == fieldId &&
-            row[4] == valueToUpdate)
+            row[3] == productType &&
+            row[4] == fieldId &&
+            row[5] == valueToUpdate)
         {
-            valueToUpdate = row[5];
+            valueToUpdate = row[6];
             return true;
         }
     }
@@ -79,6 +84,7 @@ void AttributeValueReplacedTable::replaceIfContains(
         const QString &marketplace
         , const QString &countryCode
         , const QString &langCode
+        , const QString &productType
         , const QString &fieldId
         , QSet<QString> &possibleValues) const
 {
@@ -87,7 +93,7 @@ void AttributeValueReplacedTable::replaceIfContains(
     {
         QString valueReplaced = possibleValue;
         replaceIfContains(
-                    marketplace, countryCode, langCode, fieldId, valueReplaced);
+                    marketplace, countryCode, langCode, productType, fieldId, valueReplaced);
         possibleValuesReplaced.insert(valueReplaced);
     }
     possibleValues = possibleValuesReplaced;
@@ -98,14 +104,15 @@ void AttributeValueReplacedTable::recordAttribute(
         const QString &marketplace,
         const QString &countryCode,
         const QString &langCode,
+        const QString &productType,
         const QString &fieldId,
         const QString &valueFrom,
         const QString &valueTo)
 {
-    if (!contains(marketplace, countryCode, langCode, fieldId, valueFrom))
+    if (!contains(marketplace, countryCode, langCode, productType, fieldId, valueFrom))
     {
         QStringList newRow;
-        newRow << marketplace << countryCode << langCode << fieldId << valueFrom << valueTo;
+        newRow << marketplace << countryCode << langCode << productType << fieldId << valueFrom << valueTo;
 
         beginInsertRows(QModelIndex{}, 0, 0);
         m_listOfStringList.insert(0, newRow);

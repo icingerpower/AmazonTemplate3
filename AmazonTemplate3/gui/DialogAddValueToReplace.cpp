@@ -28,6 +28,11 @@ QString DialogAddValueToReplace::getLangCode() const
     return ui->lineEditLangCode->text().trimmed();
 }
 
+QString DialogAddValueToReplace::getProductType() const
+{
+    return ui->lineEditProductType->text().trimmed();
+}
+
 QString DialogAddValueToReplace::getAttributeId() const
 {
     return ui->lineEditAttributeId->text().trimmed();

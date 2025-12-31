@@ -15,23 +15,27 @@ public:
     bool contains(const QString &marketplace,
                   const QString &countryCode,
                   const QString &langCode,
+                  const QString &productType,
                   const QString &fieldId,
                   const QString &valueFrom) const;
     bool replaceIfContains(const QString &marketplace,
                            const QString &countryCode,
                            const QString &langCode,
+                           const QString &productType,
                            const QString &fieldId,
                            QString &valueToUpdate) const;
     void replaceIfContains(
             const QString &marketplace,
             const QString &countryCode,
             const QString &langCode,
+            const QString &productType,
             const QString &fieldId,
             QSet<QString> &possibleValues) const;
 
     void recordAttribute(const QString &marketplace,
                          const QString &countryCode,
                          const QString &langCode,
+                         const QString &productType,
                          const QString &fieldId,
                          const QString &valueFrom,
                          const QString &valueTo);

@@ -18,6 +18,7 @@ public:
     QString getMarketplaceId() const;
     QString getCountryCode() const;
     QString getLangCode() const;
+    QString getProductType() const;
     QString getAttributeId() const;
     QString getValueFrom() const;
     QString getValueTo() const;

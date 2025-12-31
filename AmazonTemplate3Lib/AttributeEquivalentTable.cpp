@@ -86,18 +86,20 @@ void AttributeEquivalentTable::recordAttribute(
         const QSet<QString> &equivalentValues)
 {
     int posAttr = -1;
-    if (!m_fieldIdAmzV02_listOfEquivalents.contains(fieldIdAmzV02))
+    if (m_fieldIdAmzV02_listOfEquivalents.contains(fieldIdAmzV02))
     {
         posAttr = getPosAttr(fieldIdAmzV02, equivalentValues);
     }
     if (!m_fieldIdAmzV02_listOfEquivalents.contains(fieldIdAmzV02) || posAttr == -1)
     {
-        QStringList newRow;
-        newRow << fieldIdAmzV02;
+        QStringList newRow{fieldIdAmzV02};
+        QStringList equivalentsList;
         for (const auto &equivalentValue : equivalentValues)
         {
-            newRow << equivalentValue;
+            equivalentsList << equivalentValue;
         }
+        equivalentsList.sort();
+        newRow << equivalentsList.join(CELL_SEP);
         beginInsertRows(QModelIndex{}, 0, 0);
         m_listOfStringList.insert(0, newRow);
         _saveInFile();
@@ -148,6 +150,11 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
 {
     const auto &marketplace_countryCode_langCode_category_possibleValues
             = attribute->marketplace_countryCode_langCode_category_possibleValues();
+   if (marketplace_countryCode_langCode_category_possibleValues.size() == 0)
+   {
+       qDebug() << "AttributeEquivalentTable::askAiEquivalentValues FAILED as " + fieldIdAmzV02 + " doesn't have possible values";
+       co_return;
+   }
     
     // Prepare AI prompts
     auto buildPrompt = [fieldIdAmzV02, value, marketplace_countryCode_langCode_category_possibleValues](int) -> QString {
@@ -226,6 +233,8 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
             } else if (v.startsWith("'") && v.endsWith("'")) {
                 v = v.mid(1, v.length() - 2);
             }
+            v.replace("\"", "").replace("'", "");
+            v = v.trimmed();
             if (!v.isEmpty()) result.insert(v);
         }
         return result;
@@ -242,6 +251,7 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
     
     // Phase 1
     {
+        qDebug() << "AttributeEquivalentTable::askAiEquivalentValues starting phase 1 for " + fieldIdAmzV02;
         auto step = QSharedPointer<OpenAi2::StepMultipleAsk>::create();
         step->id = fieldIdAmzV02 + "_" + value + "_p1";
         step->name = "Attribute equivalence Phase 1 (2x unanimous)";
@@ -269,6 +279,7 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
     
     // Phase 2
     {
+        qDebug() << "AttributeEquivalentTable::askAiEquivalentValues starting phase 2 for " + fieldIdAmzV02;
         auto step = QSharedPointer<OpenAi2::StepMultipleAskAi>::create();
         step->id = fieldIdAmzV02 + "_" + value + "_p2";
         step->name = "Attribute equivalence Phase 2 (3x AI choose)";
@@ -330,7 +341,7 @@ QSet<QString> AttributeEquivalentTable::getEquivalentAgeAdult() const
 
 QSet<QString> AttributeEquivalentTable::getEquivalentAgeKid() const
 {
-    return getEquivalentValues("age_range_description#1.value", "Child");
+    return getEquivalentValues("age_range_description#1.value", "Little Kid");
 }
 
 QSet<QString> AttributeEquivalentTable::getEquivalentAgeBaby() const

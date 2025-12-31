@@ -43,7 +43,7 @@ public:
     void checkParentSkus();
     void checkKeywords();
     void checkPreviewImages();
-    QHash<QString, QHash<QString, QHash<QString, QHash<QString, QSet<QString> > > > > checkPossibleValues();
+    QHash<QString, QHash<QString, QHash<QString, QHash<QString, QHash<QString, QSet<QString> > > > > > checkPossibleValues();
     void buildAttributes();
     void checkColumnsFilled();
     QStringList getImagePreviewFileNames() const;

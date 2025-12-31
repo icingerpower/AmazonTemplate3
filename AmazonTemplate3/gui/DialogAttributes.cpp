@@ -89,6 +89,7 @@ void DialogAttributes::replaceAdd()
                     dialogReplace.getMarketplaceId(),
                     dialogReplace.getCountryCode(),
                     dialogReplace.getLangCode(),
+                    dialogReplace.getProductType(),
                     dialogReplace.getAttributeId(),
                     dialogReplace.getValueFrom(),
                     dialogReplace.getValueTo());

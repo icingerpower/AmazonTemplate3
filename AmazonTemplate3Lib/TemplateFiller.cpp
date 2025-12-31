@@ -216,6 +216,14 @@ void TemplateFiller::checkParentSkus()
             }
         }
     }
+    if (skus.size() == 0)
+    {
+        ExceptionTemplate exception;
+        exception.setInfos(
+                    QObject::tr("No SKUs"),
+                    QObject::tr("No skus found. Please check your file."));
+        exception.raise();
+    }
 }
 
 void TemplateFiller::checkKeywords()
@@ -400,7 +408,7 @@ void TemplateFiller::checkPreviewImages()
     }
 }
 
-QHash<QString, QHash<QString, QHash<QString, QHash<QString, QSet<QString>>>>>
+QHash<QString, QHash<QString, QHash<QString, QHash<QString, QHash<QString, QSet<QString>>>>>>
 TemplateFiller::checkPossibleValues()
 {
     // Will check if some possible values need to be added for some lang code
@@ -418,8 +426,8 @@ TemplateFiller::checkPossibleValues()
         }
     }
 
-    QHash<QString, QHash<QString, QHash<QString, QHash<QString, QSet<QString>>>>>
-            marketplace_countryCode_langCode_fieldId_possibleValues;
+    QHash<QString, QHash<QString, QHash<QString, QHash<QString, QHash<QString, QSet<QString>>>>>>
+            marketplace_countryCode_langCode_productType_fieldId_possibleValues;
     allFieldIds.intersect(m_mandatoryAttributesTable->getMandatoryIds());
     bool addedMissing = false;
     for (const auto &filePath : filePaths)
@@ -435,10 +443,13 @@ TemplateFiller::checkPossibleValues()
         {
             const auto &fieldId = it.key();
             auto possibleValues = it.value();
-            m_attributeValueReplacedTable->replaceIfContains(
-                            marketplace, countryCode, langCode, fieldId, possibleValues);
-            marketplace_countryCode_langCode_fieldId_possibleValues
-                    [marketplace][countryCode][langCode][fieldId] = possibleValues;
+            if (possibleValues.size() > 0)
+            {
+                m_attributeValueReplacedTable->replaceIfContains(
+                            marketplace, countryCode, langCode, productType, fieldId, possibleValues);
+                marketplace_countryCode_langCode_productType_fieldId_possibleValues
+                        [marketplace][countryCode][langCode][productType][fieldId] = possibleValues;
+            }
         }
         const auto &curFieldIdsPossibleList = fieldId_possibleValues.keys();
         QSet<QString> curFieldIdsPossible{curFieldIdsPossibleList.begin(), curFieldIdsPossibleList.end()};
@@ -467,11 +478,14 @@ TemplateFiller::checkPossibleValues()
             {
                 auto possibleValues = m_attributePossibleMissingTable->possibleValues(
                             marketplace, countryCode, langCode, productType, missingFieldId);
-                m_attributeValueReplacedTable->replaceIfContains(
-                            marketplace, countryCode, langCode, missingFieldId, possibleValues);
-                marketplace_countryCode_langCode_fieldId_possibleValues
-                        [marketplace][countryCode][langCode][missingFieldId]
-                        = possibleValues;
+                if (possibleValues.size() > 0)
+                {
+                    m_attributeValueReplacedTable->replaceIfContains(
+                                marketplace, countryCode, langCode, productType, missingFieldId, possibleValues);
+                    marketplace_countryCode_langCode_productType_fieldId_possibleValues
+                            [marketplace][countryCode][langCode][productType][missingFieldId]
+                            = possibleValues;
+                }
             }
         }
     }
@@ -482,7 +496,7 @@ TemplateFiller::checkPossibleValues()
                            QObject::tr("Some field has their possible attributes missing. Complete them in the attributes view."));
         exception.raise();
     }
-    return marketplace_countryCode_langCode_fieldId_possibleValues;
+    return marketplace_countryCode_langCode_productType_fieldId_possibleValues;
 }
 
 void TemplateFiller::buildAttributes()
@@ -540,7 +554,7 @@ void TemplateFiller::buildAttributes()
                             infos.langCode,
                             infos.productType,
                             marketplace_countryCode_langCode_fieldId_possibleValues
-                            [infos.marketplace][infos.countryCode][infos.langCode][mandatoryId]
+                            [infos.marketplace][infos.countryCode][infos.langCode][infos.productType][mandatoryId]
                         );
             }
         }
@@ -643,6 +657,7 @@ QCoro::Task<void> TemplateFiller::fillValues()
 {
     buildAttributes();
     _fillValuesSources();
+    co_await _readAgeGender();
     m_sku_fieldId_fromValues = _get_sku_fieldId_fromValues(m_templateFromPath);
     const auto &mandatoryFieldIds = m_mandatoryAttributesTable->getMandatoryIds();
     QStringList sortedFieldIds{mandatoryFieldIds.begin(), mandatoryFieldIds.end()};
@@ -654,7 +669,6 @@ QCoro::Task<void> TemplateFiller::fillValues()
     const auto &productType = _get_productType(document);
     const auto &langCodeFrom = _get_langCode(m_templateFromPath);
     const auto &countryCodeFrom = _get_countryCode(m_templateFromPath);
-    co_await _readAgeGender();
 
     co_await AbstractFiller::fillValuesForAi(this,
                                              productType,
@@ -1665,7 +1679,7 @@ QCoro::Task<void> TemplateFiller::_readAgeGender()
     // Check Age - 3 conditions
     if (ageAttribute)
     {
-        const QString &age = _get_cellVal(doc, rowData + 3, indColAge + 1); // +2 in case exemple row and Parent in first row
+        const QString &age = _get_cellVal(doc, rowData + 2, indColAge); // +2 in case exemple row and Parent in first row
         if (m_attributeEquivalentTable->getEquivalentAgeAdult().isEmpty())
         {
             co_await m_attributeEquivalentTable->askAiEquivalentValues(
@@ -1674,7 +1688,7 @@ QCoro::Task<void> TemplateFiller::_readAgeGender()
         if (m_attributeEquivalentTable->getEquivalentAgeKid().isEmpty())
         {
             co_await m_attributeEquivalentTable->askAiEquivalentValues(
-                 ageFieldIdFound, "Child", ageAttribute.data());
+                 ageFieldIdFound, "Little Kid", ageAttribute.data());
         }
         if (m_attributeEquivalentTable->getEquivalentAgeBaby().isEmpty())
         {
@@ -1698,7 +1712,7 @@ QCoro::Task<void> TemplateFiller::_readAgeGender()
     // Check Gender - 3 conditions
     if (genderAttribute)
     {
-        const QString &gender = _get_cellVal(doc, rowData + 3, indColGender + 1); // +2 in case exemple row and Parent in first row
+        const QString &gender = _get_cellVal(doc, rowData + 2, indColGender); // +2 in case exemple row and Parent in first row
         if (m_attributeEquivalentTable->getEquivalentGenderMen().isEmpty()) {
              co_await m_attributeEquivalentTable->askAiEquivalentValues(
                  genderFieldIdFound, "Male", genderAttribute.data());
