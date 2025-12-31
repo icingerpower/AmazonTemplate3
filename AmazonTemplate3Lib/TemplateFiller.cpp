@@ -719,6 +719,7 @@ QCoro::Task<void> TemplateFiller::fillValues()
                                 , marketplaceTo
                                 , fieldIdFrom
                                 , fieldIdTo
+                                , m_marketplace_attributeId_attributeInfos[marketplaceFrom][fieldIdFrom].data()
                                 , productType
                                 , countryCodeFrom
                                 , langCodeFrom
@@ -729,6 +730,7 @@ QCoro::Task<void> TemplateFiller::fillValues()
                                 , m_age
                                 , m_sku_fieldId_fromValues
                                 , m_sku_attribute_valuesForAi
+                                , m_countryCode_langCode_sku_fieldId_toValues[countryCodeFrom][langCodeFrom]
                                 , m_langCode_sku_fieldId_toValues[langCodeTo]
                                 , m_countryCode_langCode_sku_fieldId_toValues[countryCodeTo][langCodeTo]
                                 );

@@ -24,6 +24,7 @@ QCoro::Task<void> FillerCopy::fill(
         , const QString &marketplaceTo
         , const QString &fieldIdFrom
         , const QString &fieldIdTo
+        , const Attribute *attribute
         , const QString &productType
         , const QString &countryCodeFrom
         , const QString &langCodeFrom
@@ -34,6 +35,7 @@ QCoro::Task<void> FillerCopy::fill(
         , Age age
         , const QHash<QString, QHash<QString, QString>> &sku_fieldId_fromValues
         , const QHash<QString, QMap<QString, QString>> &sku_attribute_valuesForAi
+        , const QHash<QString, QHash<QString, QString> > &sku_fieldId_toValuesFrom
         , QHash<QString, QHash<QString, QString>> &sku_fieldId_toValueslangCommon
         , QHash<QString, QHash<QString, QString>> &sku_fieldId_toValues) const
 {
