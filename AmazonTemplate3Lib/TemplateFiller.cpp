@@ -83,6 +83,11 @@ void TemplateFiller::setTemplates(
     }
     m_templateFromPath = templateFromPath;
     m_templateToPaths = templateToPaths;
+    if (m_templateToPaths.contains(m_templateFromPath))
+    {
+        m_templateToPaths.removeAll(m_templateFromPath);
+        m_templateToPaths.insert(0, m_templateFromPath);
+    }
     m_templateSourcePaths = templateSourcePaths;
     m_countryCodeFrom = _get_countryCode(templateFromPath);
     m_langCodeFrom = _get_langCode(templateFromPath);
@@ -147,6 +152,11 @@ void TemplateFiller::_clearAttributeManagers()
         m_attributeValueReplacedTable->deleteLater();
     }
     m_attributeValueReplacedTable = nullptr;
+}
+
+const QString &TemplateFiller::marketplaceFrom() const
+{
+    return m_marketplaceFrom;
 }
 
 QStringList TemplateFiller::_get_allTemplatePaths() const
@@ -320,8 +330,9 @@ QHash<QString, QSet<QString>> TemplateFiller::_readKeywords(const QStringList &f
     return countryCode_langCodes;
 }
 
-void TemplateFiller::checkPreviewImages()
+QHash<QString, QString> TemplateFiller::checkPreviewImages()
 {
+    QHash<QString, QString> sku_imagePath;
     const auto &imageFileInfos = m_workingDirImage.entryInfoList(
                 QStringList{"*.jpg"}, QDir::Files);
     QSet<QString> existingImageBaseNames;
@@ -391,6 +402,10 @@ void TemplateFiller::checkPreviewImages()
             Q_ASSERT(!skuImageBaseName.startsWith("P-"));
             missingImageBaseNames.insert(skuImageBaseName);
         }
+        if (!skuImageBaseName.isEmpty())
+        {
+            sku_imagePath[sku] = m_workingDirImage.absoluteFilePath(skuImageBaseName + ".jpg");
+        }
     }
     QStringList missingImageFileNames{missingImageBaseNames.begin(), missingImageBaseNames.end()};
     std::sort(missingImageFileNames.begin(), missingImageFileNames.end());
@@ -406,6 +421,7 @@ void TemplateFiller::checkPreviewImages()
                     QObject::tr("The following AI preview images are missing in the folder images") + ":\n" + missingImageFileNames.join("\n"));
         exception.raise();
     }
+    return sku_imagePath;
 }
 
 QHash<QString, QHash<QString, QHash<QString, QHash<QString, QHash<QString, QSet<QString>>>>>>
@@ -656,6 +672,7 @@ void TemplateFiller::checkColumnsFilled()
 QCoro::Task<void> TemplateFiller::fillValues()
 {
     buildAttributes();
+    m_sku_imagePreviewFilePath = checkPreviewImages();
     _fillValuesSources();
     co_await _readAgeGender();
     m_sku_fieldId_fromValues = _get_sku_fieldId_fromValues(m_templateFromPath);
@@ -823,6 +840,35 @@ void TemplateFiller::_saveTemplates()
     }
 }
 
+const QHash<QString, QString> &TemplateFiller::sku_imagePreviewFilePath() const
+{
+    return m_sku_imagePreviewFilePath;
+}
+
+void TemplateFiller::saveAiValue(
+        const QString &settingsFileName, const QString &id, const QString &value) const
+{
+    Q_ASSERT(settingsFileName.endsWith(".ini"));
+    const QString &settingsFilePath = m_workingDir.absoluteFilePath(settingsFileName);
+    QSettings settings{settingsFilePath, QSettings::IniFormat};
+    settings.setValue(id, value);
+}
+
+bool TemplateFiller::hasAiValue(const QString &settingsFileName, const QString &id) const
+{
+    Q_ASSERT(settingsFileName.endsWith(".ini"));
+    const QString &settingsFilePath = m_workingDir.absoluteFilePath(settingsFileName);
+    QSettings settings{settingsFilePath, QSettings::IniFormat};
+    return settings.contains(id);
+}
+
+QString TemplateFiller::getAiReply(const QString &settingsFileName, const QString &id) const
+{
+    Q_ASSERT(settingsFileName.endsWith(".ini"));
+    const QString &settingsFilePath = m_workingDir.absoluteFilePath(settingsFileName);
+    QSettings settings{settingsFilePath, QSettings::IniFormat};
+    return settings.value(id).toString();
+}
 
 QString TemplateFiller::_get_cellVal(QXlsx::Document &doc, int row, int col) const
 {

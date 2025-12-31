@@ -42,11 +42,10 @@ public:
                       , const QStringList &templateSourcePaths);
     void checkParentSkus();
     void checkKeywords();
-    void checkPreviewImages();
+    QHash<QString, QString> checkPreviewImages();
     QHash<QString, QHash<QString, QHash<QString, QHash<QString, QHash<QString, QSet<QString> > > > > > checkPossibleValues();
     void buildAttributes();
     void checkColumnsFilled();
-    QStringList getImagePreviewFileNames() const;
     QCoro::Task<void> fillValues();
 
      // Return all field with values or ask AI after reading field ids
@@ -72,6 +71,13 @@ public:
     AttributePossibleMissingTable *attributePossibleMissingTable() const;
 
     AttributeValueReplacedTable *attributeValueReplacedTable() const;
+
+    const QString &marketplaceFrom() const;
+
+    const QHash<QString, QString> &sku_imagePreviewFilePath() const;
+    void saveAiValue(const QString &settingsFileName, const QString &id, const QString &value) const;
+    bool hasAiValue(const QString &settingsFileName, const QString &id) const;
+    QString getAiReply(const QString &settingsFileName, const QString &id) const;
 
 private:
     QHash<QString, QHash<QString, QString>> m_countryCode_langCode_keywords;
@@ -141,6 +147,7 @@ private:
     QHash<QString, QHash<QString, QHash<QString, QHash<QString, QString>>>> m_countryCode_langCode_sku_fieldId_toValues;
     void _fillValuesSources();
     void _saveTemplates();
+    QHash<QString, QString> m_sku_imagePreviewFilePath;
 };
 
 #endif // TEMPLATEFILLER_H

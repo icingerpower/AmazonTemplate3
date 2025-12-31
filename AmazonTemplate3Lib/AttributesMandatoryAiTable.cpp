@@ -1,6 +1,8 @@
-#include "AttributesMandatoryAiTable.h"
 #include <QSettings>
+
 #include "../../common/openai/OpenAi2.h"
+
+#include "AttributesMandatoryAiTable.h"
 
 const QString AttributesMandatoryAiTable::SETTINGS_KEYS_GROUP{"attributesReviewed"};
 
