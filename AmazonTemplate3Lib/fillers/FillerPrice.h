@@ -1,9 +1,9 @@
-#ifndef FILLERCOPY_H
-#define FILLERCOPY_H
+#ifndef FILLERPRICE_H
+#define FILLERPRICE_H
 
 #include "AbstractFiller.h"
 
-class FillerCopy : public AbstractFiller
+class FillerPrice : public AbstractFiller
 {
 public:
     bool canFill(const TemplateFiller *templateFiller
@@ -32,4 +32,4 @@ public:
             ) const override;
 };
 
-#endif // FILLERCOPY_H
+#endif // FILLERPRICE_H

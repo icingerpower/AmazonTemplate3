@@ -96,7 +96,22 @@ void TemplateFiller::setTemplates(
     m_workingDirImage = m_workingDir.absoluteFilePath("images");
     _clearAttributeManagers();
     m_mandatoryAttributesAiTable = new AttributesMandatoryAiTable;
-    const auto &fieldId_index = _get_fieldId_index(doc);
+    auto all_fieldId_index = _get_fieldId_index(doc);
+    for (const auto &templateToPath : m_templateToPaths)
+    {
+        if (templateToPath != m_templateFromPath)
+        {
+            QXlsx::Document docTo(templateToPath);
+            const auto &fieldId_index_to = _get_fieldId_index(docTo);
+            for (auto it = fieldId_index_to.cbegin(); it != fieldId_index_to.cend(); ++it)
+            {
+                if (!all_fieldId_index.contains(it.key()))
+                {
+                    all_fieldId_index[it.key()] = -1;
+                }
+            }
+        }
+    }
     const auto &fieldIdMandatory = _get_fieldIdMandatoryAll();
         // 2. Resolve "Previous" mandatory fields
     const auto &previousFieldIdMandatory = _get_fieldIdMandatoryPrevious();
@@ -104,7 +119,7 @@ void TemplateFiller::setTemplates(
     m_attributePossibleMissingTable = new AttributePossibleMissingTable{commonSettingsDir};
     m_attributeValueReplacedTable = new AttributeValueReplacedTable{commonSettingsDir};
     m_mandatoryAttributesTable = new AttributesMandatoryTable{
-            commonSettingsDir, productType, fieldIdMandatory, previousFieldIdMandatory, fieldId_index};
+            commonSettingsDir, productType, fieldIdMandatory, previousFieldIdMandatory, all_fieldId_index};
     m_attributeEquivalentTable = new AttributeEquivalentTable{commonSettingsDir};
     m_attributeFlagsTable = new AttributeFlagsTable{commonSettingsDir};
     m_marketplaceFrom = _get_marketplaceFrom();
@@ -629,22 +644,28 @@ void TemplateFiller::checkColumnsFilled()
         const auto &fieldIdsToCheck = isParent ? fieldIdsNeededAll : fieldIdsNeededChildren;
         for (const auto &fieldId : fieldIdsToCheck)
         {
-            int colIndex = fieldId_index[fieldId];
-            const auto &celVal = _get_cellVal(doc, i, colIndex);
-            if (celVal.isEmpty())
+            if (fieldId_index.contains(fieldId))
             {
-                fieldIdsWithMissingValue.insert(fieldId);
+                int colIndex = fieldId_index[fieldId];
+                const auto &celVal = _get_cellVal(doc, i, colIndex);
+                if (celVal.isEmpty())
+                {
+                    fieldIdsWithMissingValue.insert(fieldId);
+                }
             }
         }
         if (isParent)
         {
             for (const auto &fieldId : fieldIdsNeededNoParent)
             {
-                int colIndex = fieldId_index[fieldId];
-                const auto &celVal = _get_cellVal(doc, i, colIndex);
-                if (!celVal.isEmpty())
+                if (fieldId_index.contains(fieldId))
                 {
-                    fieldIdsShouldNotHaveValue.insert(fieldId);
+                    int colIndex = fieldId_index[fieldId];
+                    const auto &celVal = _get_cellVal(doc, i, colIndex);
+                    if (!celVal.isEmpty())
+                    {
+                        fieldIdsShouldNotHaveValue.insert(fieldId);
+                    }
                 }
             }
         }
@@ -809,14 +830,17 @@ void TemplateFiller::_saveTemplates()
         
         // Find where to start writing (after existing data)
         int writeRow = docTo.dimension().lastRow();
+        auto versionTo = _getDocumentVersion(docTo);
+        int rowHeader = _getRowFieldId(versionTo) + 1;
+        docTo.setRowHidden(rowHeader, false);
         
         for (const auto &sku : orderedSkus)
         {
+            docTo.write(writeRow + 1, indColSku + 1, sku); // Write SKU
             if (m_countryCode_langCode_sku_fieldId_toValues.contains(countryCode)
                     && m_countryCode_langCode_sku_fieldId_toValues[countryCode].contains(langCode)
                     && m_countryCode_langCode_sku_fieldId_toValues[countryCode][langCode].contains(sku))
             {
-                docTo.write(writeRow + 1, indColSku + 1, sku); // Write SKU
 
                 const auto &fieldId_value = m_countryCode_langCode_sku_fieldId_toValues[countryCode][langCode][sku];
                 for (auto it = fieldId_value.begin(); it != fieldId_value.end(); ++it)
@@ -828,8 +852,8 @@ void TemplateFiller::_saveTemplates()
                         docTo.write(writeRow + 1, col+1, it.value());
                     }
                 }
-                ++writeRow;
             }
+            ++writeRow;
         }
 
         QString toFillFilePathNew{targetPath};
@@ -1572,7 +1596,7 @@ QHash<QString, QHash<QString, QSet<QString>>> TemplateFiller::_get_parentSku_var
 
     for (int i=row; i<lastRow; ++i)
     {
-        auto sku = _get_cellVal(doc, row, indColSku);
+        const auto &sku = _get_cellVal(doc, i, indColSku);
         if (sku.isEmpty())
         {
             break;
@@ -1582,13 +1606,13 @@ QHash<QString, QHash<QString, QSet<QString>>> TemplateFiller::_get_parentSku_var
             continue;
         }
 
-        auto skuParent = _get_cellVal(doc, row, indColSkuParent);
+        const auto &skuParent = _get_cellVal(doc, i, indColSkuParent);
         if (skuParent.isEmpty())
         {
             continue;
         }
 
-        auto color = _get_cellVal(doc, row, indColColor);
+        const auto &color = _get_cellVal(doc, i, indColColor);
 
         parentSku_variation_skus[skuParent][color].insert(sku);
     }

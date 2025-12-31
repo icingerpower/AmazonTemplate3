@@ -43,7 +43,10 @@ QCoro::Task<void> FillerCopy::fill(
          it != sku_fieldId_fromValues.cend(); ++it)
     {
         const auto &sku = it.key();
-        sku_fieldId_toValues[sku][fieldIdTo] = it.value()[fieldIdFrom];
+        if (it.value().contains(fieldIdFrom))
+        {
+            sku_fieldId_toValues[sku][fieldIdTo] = it.value()[fieldIdFrom];
+        }
     }
     co_return;
 }

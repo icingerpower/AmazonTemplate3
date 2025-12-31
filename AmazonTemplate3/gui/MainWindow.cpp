@@ -25,6 +25,7 @@ MainWindow::MainWindow(QWidget *parent)
 {
     m_templateFiller = nullptr;
     ui->setupUi(this);
+    ui->progressBar->hide();
     _setGenerateButtonsEnabled(false);
     m_settingsKeyExtraInfos = "MainWindowExtraInfos";
     m_settingsKeyApi = "MainWindowKey";
@@ -97,36 +98,38 @@ void MainWindow::onApiKeyChanged(const QString &key)
 
 void MainWindow::generate()
 {
-    baseControlsWithoutPopup();
-    
-    auto progress = new QProgressDialog(
-                tr("Filling template..."),
-                QString{}, 0, 0, this);
-    progress->setWindowModality(Qt::ApplicationModal);
-    progress->setCancelButton(nullptr);
-    progress->setMinimumDuration(0);
-    progress->setAutoClose(false);
-    progress->setAutoReset(false);
-    progress->setValue(0);
-    progress->show();
-
-    QPointer<QProgressDialog> progressGuard{progress};
-
-    qDebug() << "Filling templates...";
-    QCoro::connect(m_templateFiller->fillValues(),
-                   this, [this, progressGuard]()
+    if (baseControlsWithoutPopup())
     {
-        if (progressGuard)
+
+        auto progress = new QProgressDialog(
+                    tr("Filling template..."),
+                    QString{}, 0, 0, this);
+        progress->setWindowModality(Qt::ApplicationModal);
+        progress->setCancelButton(nullptr);
+        progress->setMinimumDuration(0);
+        progress->setAutoClose(false);
+        progress->setAutoReset(false);
+        progress->setValue(0);
+        progress->show();
+
+        QPointer<QProgressDialog> progressGuard{progress};
+
+        qDebug() << "Filling templates...";
+        QCoro::connect(m_templateFiller->fillValues(),
+                       this, [this, progressGuard]()
         {
-            progressGuard->close();
-            progressGuard->deleteLater();
-        }
-        
-        QMessageBox::information(
-            this,
-            tr("Generation done"),
-            tr("Template filled successfully"));
-    });
+            if (progressGuard)
+            {
+                progressGuard->close();
+                progressGuard->deleteLater();
+            }
+
+            QMessageBox::information(
+                        this,
+                        tr("Generation done"),
+                        tr("Template filled successfully"));
+        });
+    }
 }
 
 void MainWindow::_clearTemplateFiller()

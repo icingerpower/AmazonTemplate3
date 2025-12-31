@@ -8,6 +8,7 @@
 #include "AttributeFlagsTable.h"
 #include "TemplateFiller.h"
 #include "FillerCopy.h"
+#include "FillerPrice.h"
 
 
 #include "AbstractFiller.h"
@@ -18,6 +19,8 @@ const QList<const AbstractFiller *> AbstractFiller::ALL_FILLERS_SORTED
         QList<const AbstractFiller *> allFillers;
         static const FillerCopy fillerCopy;
         allFillers << &fillerCopy;
+        static const FillerPrice fillerPrice;
+        allFillers << &fillerPrice;
         return allFillers;
         }();
 
