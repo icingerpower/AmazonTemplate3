@@ -81,3 +81,9 @@ target_link_libraries(AttributeValueReplacedTableTests PRIVATE AmazonTemplate3Li
 target_include_directories(AttributeValueReplacedTableTests PRIVATE ../AmazonTemplate3Lib)
 add_test(NAME AttributeValueReplacedTableTests COMMAND AttributeValueReplacedTableTests)
 target_link_libraries(AttributeValueReplacedTableTests PRIVATE Qt${QT_VERSION_MAJOR}::Test Qt${QT_VERSION_MAJOR}::Core)
+
+add_executable(FillerSizeTests tst_fillersize.cpp)
+target_link_libraries(FillerSizeTests PRIVATE AmazonTemplate3Lib_Tests)
+target_include_directories(FillerSizeTests PRIVATE ../AmazonTemplate3Lib)
+add_test(NAME FillerSizeTests COMMAND FillerSizeTests)
+target_link_libraries(FillerSizeTests PRIVATE Qt${QT_VERSION_MAJOR}::Test Qt${QT_VERSION_MAJOR}::Core QCoro6::Core)

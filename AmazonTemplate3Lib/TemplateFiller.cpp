@@ -984,9 +984,15 @@ QString TemplateFiller::_get_productType(const QString &filePath) const
     return _get_productType(doc);
 }
 
-QSharedPointer<QSettings> TemplateFiller::settingsWorkingDir() const
+QSharedPointer<QSettings> TemplateFiller::settingsProducts() const
 {
     const auto &settingsPath = m_workingDir.absoluteFilePath("settings.ini");
+    return QSharedPointer<QSettings>::create(settingsPath, QSettings::IniFormat);
+}
+
+QSharedPointer<QSettings> TemplateFiller::settingsCommon() const
+{
+    const auto &settingsPath = m_workingDirCommon.absoluteFilePath("settings.ini");
     return QSharedPointer<QSettings>::create(settingsPath, QSettings::IniFormat);
 }
 
@@ -1443,7 +1449,7 @@ QSet<QString> TemplateFiller::_get_fieldIdMandatoryAll() const
 QSet<QString> TemplateFiller::_get_fieldIdMandatoryPrevious() const
 {
     QSet<QString> previousFieldIdMandatory;
-    auto settings = settingsWorkingDir();
+    auto settings = settingsProducts();
     const QString key{"fieldIdMandatoryPrevious"};
     if (settings->contains(key))
     {

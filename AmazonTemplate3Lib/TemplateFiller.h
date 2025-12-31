@@ -78,6 +78,8 @@ public:
     void saveAiValue(const QString &settingsFileName, const QString &id, const QString &value) const;
     bool hasAiValue(const QString &settingsFileName, const QString &id) const;
     QString getAiReply(const QString &settingsFileName, const QString &id) const;
+    QSharedPointer<QSettings> settingsCommon() const; // Settings of current working directory
+    QSharedPointer<QSettings> settingsProducts() const; // Settings of current working directory
 
 private:
     QHash<QString, QHash<QString, QString>> m_countryCode_langCode_keywords;
@@ -134,7 +136,6 @@ private:
     QCoro::Task<void> _readAgeGender();
     QString _get_productType(QXlsx::Document &doc) const;
     QString _get_productType(const QString &filePath) const;
-    QSharedPointer<QSettings> settingsWorkingDir() const; // Settings of current working directory
     QHash<QString, QHash<QString, QSharedPointer<Attribute>>> m_marketplace_attributeId_attributeInfos;
     QHash<QString, QHash<QString, QString>> _get_sku_fieldId_fromValues(
             const QString &templatePath

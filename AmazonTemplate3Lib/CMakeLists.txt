@@ -115,11 +115,18 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   AttributesMandatoryTable.cpp
   ExceptionTemplate.h
   ExceptionTemplate.cpp
+  AttributeFlagsTable.h
+  AttributeFlagsTable.cpp
+  AttributeEquivalentTable.h
+  AttributeEquivalentTable.cpp
+  AttributePossibleMissingTable.h
+  AttributePossibleMissingTable.cpp
   AttributeValueReplacedTable.h
   AttributeValueReplacedTable.cpp
+  ${FILLER_FILES}
 )
 
-target_link_libraries(AmazonTemplate3Lib_Tests PRIVATE
+target_link_libraries(AmazonTemplate3Lib_Tests PUBLIC
     Qt${QT_VERSION_MAJOR}::Gui
     Qt${QT_VERSION_MAJOR}::Network
     Qt${QT_VERSION_MAJOR}::Core
