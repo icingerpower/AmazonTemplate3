@@ -26,6 +26,7 @@ public:
             , const QString &marketplaceTo) const;
     Attribute::Flag getFlags(const QString &marketplace, const QString &fieldId) const;
     bool hasFlag(const QString &marketplace, const QString &fieldId, Attribute::Flag flag) const;
+    QStringList getSizeFieldIds() const;
     //Attribute::Flag getFlag(const QString &attrId, const QString &marketplace) const;
 
     void recordAttributeNotRecordedYet(

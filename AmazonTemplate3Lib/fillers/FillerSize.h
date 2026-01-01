@@ -36,6 +36,19 @@ public:
             , QHash<QString, QHash<QString, QString>> &sku_fieldId_toValueslangCommon
             , QHash<QString, QHash<QString, QString>> &sku_fieldId_toValues
             ) const override;
+    static void initCatBools(
+            QSettings *settings
+            , const QString &productType
+            , bool &isShoes
+            , bool &isClothe
+            , bool &isNoSizeConv
+            );
+
+    static const QList<QHash<QString, int>> CLOTHE_FEMALE_ADULT_SIZES;
+    static const QList<QHash<QString, int>> CLOTHE_MALE_ADULT_SIZES;
+    static const QList<QHash<QString, double>> SHOE_FEMALE_ADULT_SIZES;
+    static const QList<QHash<QString, double>> SHOE_MALE_ADULT_SIZES;
+
 
 private:
     QVariant convertClothingSize(
@@ -62,13 +75,6 @@ private:
     QCoro::Task<void> askAiToUpdateSettingsForProductType(
             QString productType,
             QSettings *settings) const;
-    void _initCatBools(
-            QSettings *settings
-            , const QString &productType
-            , bool &isShoes
-            , bool &isClothe
-            , bool &isNoSizeConv
-            ) const;
 };
 
 #endif // FILLERSIZE_H

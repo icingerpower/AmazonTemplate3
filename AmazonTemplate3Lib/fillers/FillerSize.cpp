@@ -13,6 +13,158 @@ const QString FillerSize::KEY_SHOE_WORDS{"shoeWords"};
 const QString FillerSize::KEY_CLOTHE_WORDS{"clotheWords"};
 const QString FillerSize::KEY_CAT_NO_CONV_WORDS{"catNoSizeWords"};
 
+const QList<QHash<QString, int>> FillerSize::CLOTHE_FEMALE_ADULT_SIZES = []() {
+    QList<QHash<QString, int>> _list_countryCode_size {
+        {{{"FR", 32}
+            , {"BE", 32}
+            , {"ES", 32}
+            , {"TR", 32}
+            , {"DE", 30}
+            , {"NL", 30}
+            , {"SE", 30}
+            , {"PL", 30}
+            , {"IT", 36}
+            , {"IE", 4} // Irland
+            , {"UK", 4}
+            , {"AU", 4}
+            , {"COM", 0}
+            , {"CA", 0}
+            , {"JP", 5}
+            , {"AE", 0}
+            , {"MX", 0}
+            , {"SA", 0}
+            , {"SG", 0}
+        }}
+    };
+    for (int i=2; i<20; i+=2)
+    {
+        QHash<QString, int> curSizes;
+        for (auto it = _list_countryCode_size[0].begin();
+             it != _list_countryCode_size[0].end(); ++it)
+        {
+            curSizes[it.key()] = it.value() + i;
+        }
+        _list_countryCode_size << curSizes;
+    }
+    return _list_countryCode_size;
+}();
+
+const QList<QHash<QString, int>> FillerSize::CLOTHE_MALE_ADULT_SIZES = []() {
+    int eu = 48; // set the EU men size (valid: 44,46,48,50,52,54,56,58,60)
+    QList<QHash<QString, int>> _list_countryCode_size {
+        {{
+            {"FR", eu},
+            {"BE", eu},
+            {"ES", eu},
+            {"TR", eu},
+            {"DE", eu},
+            {"NL", eu},
+            {"SE", eu},
+            {"PL", eu},
+            {"IT", eu},
+
+            {"IE", eu - 10}, // Ireland (UK/US inch system)
+            {"UK", eu - 10},
+            {"AU", eu - 10},
+            {"COM", eu - 10}, // US
+            {"CA", eu - 10},
+            {"AE", eu - 10},
+            {"MX", eu - 10},
+            {"SA", eu - 10},
+            {"SG", eu - 10}
+        }}
+    };
+    for (int i=2; i<20; i+=2)
+    {
+        QHash<QString, int> curSizes;
+        for (auto it = _list_countryCode_size[0].begin();
+             it != _list_countryCode_size[0].end(); ++it)
+        {
+            curSizes[it.key()] = it.value() + i;
+        }
+        _list_countryCode_size << curSizes;
+    }
+    return _list_countryCode_size;
+}();
+
+const QList<QHash<QString, double>> FillerSize::SHOE_FEMALE_ADULT_SIZES = []() {
+    QList<QHash<QString, double>> _list_countryCode_size;
+    QSet<QString> groupEu{"FR", "BE", "ES", "IT", "DE", "NL", "SE", "PL", "TR"};
+    QSet<QString> groupUs{"COM", "CA", "SA", "SG", "AE"};
+    QSet<QString> groupUk{"UK", "IE", "AU"};
+    QSet<QString> groupJp{"JP", "MX"};
+    QSet<double> corEu_other{40., 41., 43., 44.};
+    double firstSizeEu = 34.;
+    double curSizeUs = 3.-1.;
+    double curSizeUk = 1.-1.;
+    double curSizeJp = 20.-1.;
+    for (double curSizeEu=firstSizeEu; curSizeEu<55; ++curSizeEu)
+    {
+        QHash<QString, double> countrycode_size;
+        for (const auto &countryCode : groupEu)
+        {
+            countrycode_size[countryCode] = curSizeEu;
+        }
+        double otherToAdd = corEu_other.contains(curSizeEu) ? 0.5 : 1.;
+        curSizeUs += otherToAdd;
+        curSizeUk += otherToAdd;
+        curSizeJp += otherToAdd;
+        for (const auto &countryCode : groupUs)
+        {
+            countrycode_size[countryCode] = curSizeUs;
+        }
+        for (const auto &countryCode : groupUk)
+        {
+            countrycode_size[countryCode] = curSizeUk;
+        }
+        for (const auto &countryCode : groupJp)
+        {
+            countrycode_size[countryCode] = curSizeJp;
+        }
+        _list_countryCode_size << countrycode_size;
+    }
+    return _list_countryCode_size;
+}();
+
+const QList<QHash<QString, double>> FillerSize::SHOE_MALE_ADULT_SIZES = []() {
+    QList<QHash<QString, double>> _list_countryCode_size;
+    QSet<QString> groupEu{"FR","BE","ES","IT","DE","NL","SE","PL","TR"};
+    QSet<QString> groupUs{"COM","CA","SA","SG","AE"};
+    QSet<QString> groupUk{"UK","IE","AU"};
+    QSet<QString> groupJp{"JP", "MX"};
+
+    double firstSizeEu = 38.;
+    // US at EU38 = 38−33 = 5
+    double curSizeUs = 5.0 - 1.0;
+    // UK at EU38 = 38−34 = 4
+    double curSizeUk = 4.0 - 1.0;
+    // JP at EU38 = 0.5*38+5 = 24
+    double curSizeJp = 24.0 - 0.5;
+
+    for (double curSizeEu = firstSizeEu; curSizeEu < 55; ++curSizeEu)
+    {
+        QHash<QString, double> countrycode_size;
+        // EU sizes step by 1
+        for (const auto &c : groupEu)
+            countrycode_size[c] = curSizeEu;
+        // increment each map
+        curSizeUs += 1.0;   // US & friends step by 1
+        curSizeUk += 1.0;   // UK/AU/IR step by 1
+        curSizeJp += 0.5;   // JP steps by 0.5 (cm)
+        // US‑group
+        for (const auto &c : groupUs)
+            countrycode_size[c] = curSizeUs;
+        // UK‑group
+        for (const auto &c : groupUk)
+            countrycode_size[c] = curSizeUk;
+        // JP
+        for (const auto &c : groupJp)
+            countrycode_size[c] = curSizeJp;
+        _list_countryCode_size << countrycode_size;
+    }
+    return _list_countryCode_size;
+}();
+
 bool FillerSize::canFill(
         const TemplateFiller *templateFiller, const QString &marketplace, const QString &fieldId) const
 {
@@ -82,16 +234,16 @@ QCoro::Task<void> FillerSize::fill(
         }
     }
     auto settings = templateFiller->settingsCommon();
-            bool isShoes = false;
-            bool isClothe = false;
-            bool isNoSizeConv = false;
-    _initCatBools(settings.data(), productType, isShoes, isClothe, isNoSizeConv);
+    bool isShoes = false;
+    bool isClothe = false;
+    bool isNoSizeConv = false;
+    initCatBools(settings.data(), productType, isShoes, isClothe, isNoSizeConv);
     if (!isShoes && !isClothe && !isNoSizeConv)
     {
         // We ask AI to classify and update settings
         co_await askAiToUpdateSettingsForProductType(
                     productType, settings.data());
-        _initCatBools(settings.data(), productType, isShoes, isClothe, isNoSizeConv);
+        initCatBools(settings.data(), productType, isShoes, isClothe, isNoSizeConv);
     }
 
 
@@ -203,12 +355,12 @@ static QSharedPointer<OpenAi2::StepMultipleAskAi> createClassificationStep(
     return stepClassification;
 }
 
-void FillerSize::_initCatBools(
+void FillerSize::initCatBools(
         QSettings *settings
         , const QString &productType
         , bool &isShoes
         , bool &isClothe
-        , bool &isNoSizeConv) const
+        , bool &isNoSizeConv)
 {
     QStringList shoeWords = settings->value(
                 KEY_SHOE_WORDS,
@@ -326,28 +478,36 @@ QVariant FillerSize::convertUnit(const QString &countryTo, const QVariant &origV
         const auto &u = unitsFound.first();
         
         // Helper lambda to convert chain
-        auto convertChain = [&](double factor, const QString &newUnit) -> QString {
+        auto convertChain = [&](double factor, const QString &newUnit) -> QString
+        {
             QString res;
             static const QRegularExpression reNums("[0-9]+(?:\\.[0-9]+)?");
             auto nums = reNums.globalMatch(u.chain);
             int lastPos = 0;
-            while (nums.hasNext()) {
+            while (nums.hasNext())
+            {
                 auto match = nums.next();
                 // Append separator if any
-                if (match.capturedStart() > lastPos) {
+                if (match.capturedStart() > lastPos)
+                {
                      res += u.chain.mid(lastPos, match.capturedStart() - lastPos);
                 }
                 
                 double val = match.captured(0).toDouble();
                 double newVal = val * factor;
                 // If factor < 1 (cm to inch), 2 decimals. If > 1 (inch to cm), 1 decimal.
-                if (factor < 1.0) 
+                if (factor < 1.0)
+                {
                      res += QString::number(newVal, 'f', 2);
+                }
                 else
+                {
                      res += QString::number(newVal, 'f', 1);
+                }
             }
             // Append remaining if any (unlikely for well formed chain but safety)
-             if (lastPos < u.chain.length() && 0) { // logic above is slightly flawed for append.
+             if (lastPos < u.chain.length() && 0)
+             { // logic above is slightly flawed for append.
              }
              
              // Simpler approach: split by regex separator, convert, join.
@@ -363,19 +523,26 @@ QVariant FillerSize::convertUnit(const QString &countryTo, const QVariant &origV
              // If I reconstruct "val x val" + " unit", it is "val x val unit".
              // If I want unit on each, I need to append unit to each number.
              
-             for (int i=0; i<parts.size(); ++i) {
+             for (int i=0; i<parts.size(); ++i)
+             {
                  double val = parts[i].toDouble();
                  double newVal = val * factor;
                  QString s = (factor < 1.0) ? QString::number(newVal, 'f', 2) : QString::number(newVal, 'f', 1); 
                  // If we want unit on each:
-                 if (factor < 1.0) s += "\""; // inch
+                 if (factor < 1.0)
+                 {
+                     s += "\""; // inch
+                 }
                  
                  convertedParts << s;
              }
              
-             if (factor < 1.0) { // Target Inch
+             if (factor < 1.0)
+             { // Target Inch
                  return convertedParts.join(" x ");
-             } else { // Target Cm
+             }
+             else
+             { // Target Cm
                  return convertedParts.join(" x ") + " cm";
              }
         };
@@ -410,91 +577,28 @@ QVariant FillerSize::convertClothingSize(
     }
     bool isNum = false;
     int num = origValue.toInt(&isNum);
-    const QList<QHash<QString, int>> list_countryCode_size
-    = [targetGender, age_range_description, productType]() -> QList<QHash<QString, int>>
+    QList<QHash<QString, int>> list_countryCode_size;
+    if (targetGender == Gender::UndefinedGender
+        || age_range_description == Age::UndefinedAge)
     {
-        QList<QHash<QString, int>> _list_countryCode_size;
-        if (targetGender == Gender::UndefinedGender
-            || age_range_description == Age::UndefinedAge)
-        {
-            ExceptionTemplate exception;
-            exception.setInfos(QObject::tr("No gender / age"),
-                               QObject::tr("The gender and/or age_range_description was not defined in the template"));
-            exception.raise();
-        }
-        if (targetGender == Gender::Female
-            && age_range_description == Age::Adult)
-        {
-            _list_countryCode_size = QList<QHash<QString, int>> {
-                {{{"FR", 32}
-                    , {"BE", 32}
-                    , {"ES", 32}
-                    , {"TR", 32}
-                    , {"DE", 30}
-                    , {"NL", 30}
-                    , {"SE", 30}
-                    , {"PL", 30}
-                    , {"IT", 36}
-                    , {"IE", 4} // Irland
-                    , {"UK", 4}
-                    , {"AU", 4}
-                    , {"COM", 0}
-                    , {"CA", 0}
-                    , {"JP", 5}
-                    , {"AE", 0}
-                    , {"MX", 0}
-                    , {"SA", 0}
-                    , {"SG", 0}
-                }}
-            };
-        }
-        else if (targetGender == Gender::Male
-                 && age_range_description == Age::Adult)
-        {
-            int eu = 48; // set the EU men size (valid: 44,46,48,50,52,54,56,58,60)
-
-            _list_countryCode_size = QList<QHash<QString, int>> {
-                {{
-                    {"FR", eu},
-                    {"BE", eu},
-                    {"ES", eu},
-                    {"TR", eu},
-                    {"DE", eu},
-                    {"NL", eu},
-                    {"SE", eu},
-                    {"PL", eu},
-                    {"IT", eu},
-
-                    {"IE", eu - 10}, // Ireland (UK/US inch system)
-                    {"UK", eu - 10},
-                    {"AU", eu - 10},
-                    {"COM", eu - 10}, // US
-                    {"CA", eu - 10},
-                    {"AE", eu - 10},
-                    {"MX", eu - 10},
-                    {"SA", eu - 10},
-                    {"SG", eu - 10}
-                }}
-            };
-        }
-        else
-        {
-            // For other cases, we might want to return empty or assert.
-            // Keeping original code style:
-            Q_ASSERT(false);
-        }
-        for (int i=2; i<20; i+=2)
-        {
-            QHash<QString, int> curSizes;
-            for (auto it = _list_countryCode_size[0].begin();
-                 it != _list_countryCode_size[0].end(); ++it)
-            {
-                curSizes[it.key()] = it.value() + i;
-            }
-            _list_countryCode_size << curSizes;
-        }
-        return _list_countryCode_size;
-    }();
+        ExceptionTemplate exception;
+        exception.setInfos(QObject::tr("No gender / age"),
+                           QObject::tr("The gender and/or age_range_description was not defined in the template"));
+        exception.raise();
+    }
+    
+    if (targetGender == Gender::Female && age_range_description == Age::Adult)
+    {
+        list_countryCode_size = CLOTHE_FEMALE_ADULT_SIZES;
+    }
+    else if (targetGender == Gender::Male && age_range_description == Age::Adult)
+    {
+         list_countryCode_size = CLOTHE_MALE_ADULT_SIZES;
+    }
+    else
+    {
+         Q_ASSERT(false);
+    }
     if (isNum)
     {
         for (const auto &countryCode_size : list_countryCode_size)
@@ -576,100 +680,28 @@ QVariant FillerSize::convertShoeSize(
     }
     if (isNum)
     {
-        const QList<QHash<QString, double>> list_countryCode_size
-            = [targetGender, age_range_description]() -> QList<QHash<QString, double>>
+        QList<QHash<QString, double>> list_countryCode_size;
+        if (targetGender == Gender::UndefinedGender
+            || age_range_description == Age::UndefinedAge)
         {
-            QList<QHash<QString, double>> _list_countryCode_size;
-            if (targetGender == Gender::UndefinedGender
-                || age_range_description == Age::UndefinedAge)
-            {
-                ExceptionTemplate exception;
-                exception.setInfos(QObject::tr("No gender / age"),
-                                   QObject::tr("The gender and/or age_range_description was not defined in the template"));
-                exception.raise();
-            }
-            if (targetGender == Gender::Female
-                && age_range_description == Age::Adult)
-            {
-                QSet<QString> groupEu{"FR", "BE", "ES", "IT", "DE", "NL", "SE", "PL", "TR"};
-                QSet<QString> groupUs{"COM", "CA", "SA", "SG", "AE"};
-                QSet<QString> groupUk{"UK", "IE", "AU"};
-                QSet<QString> groupJp{"JP", "MX"};
-                QSet<double> corEu_other{40., 41., 43., 44.};
-                double firstSizeEu = 34.;
-                double curSizeUs = 3.-1.;
-                double curSizeUk = 1.-1.;
-                double curSizeJp = 20.-1.;
-                for (double curSizeEu=firstSizeEu; curSizeEu<55; ++curSizeEu)
-                {
-                    QHash<QString, double> countrycode_size;
-                    for (const auto &countryCode : groupEu)
-                    {
-                        countrycode_size[countryCode] = curSizeEu;
-                    }
-                    double otherToAdd = corEu_other.contains(curSizeEu) ? 0.5 : 1.;
-                    curSizeUs += otherToAdd;
-                    curSizeUk += otherToAdd;
-                    curSizeJp += otherToAdd;
-                    for (const auto &countryCode : groupUs)
-                    {
-                        countrycode_size[countryCode] = curSizeUs;
-                    }
-                    for (const auto &countryCode : groupUk)
-                    {
-                        countrycode_size[countryCode] = curSizeUk;
-                    }
-                    for (const auto &countryCode : groupJp)
-                    {
-                        countrycode_size[countryCode] = curSizeJp;
-                    }
-                    _list_countryCode_size << countrycode_size;
-                }
-            }
-            else if (targetGender == Gender::Male
-                     && age_range_description == Age::Adult)
-            {
-                QSet<QString> groupEu{"FR","BE","ES","IT","DE","NL","SE","PL","TR"};
-                QSet<QString> groupUs{"COM","CA","SA","SG","AE"};
-                QSet<QString> groupUk{"UK","IE","AU"};
-                QSet<QString> groupJp{"JP", "MX"};
+            ExceptionTemplate exception;
+            exception.setInfos(QObject::tr("No gender / age"),
+                               QObject::tr("The gender and/or age_range_description was not defined in the template"));
+            exception.raise();
+        }
 
-                double firstSizeEu = 38.;
-                // US at EU38 = 38−33 = 5
-                double curSizeUs = 5.0 - 1.0;
-                // UK at EU38 = 38−34 = 4
-                double curSizeUk = 4.0 - 1.0;
-                // JP at EU38 = 0.5*38+5 = 24
-                double curSizeJp = 24.0 - 0.5;
-
-                for (double curSizeEu = firstSizeEu; curSizeEu < 55; ++curSizeEu)
-                {
-                    QHash<QString, double> countrycode_size;
-                    // EU sizes step by 1
-                    for (const auto &c : groupEu)
-                        countrycode_size[c] = curSizeEu;
-                    // increment each map
-                    curSizeUs += 1.0;   // US & friends step by 1
-                    curSizeUk += 1.0;   // UK/AU/IR step by 1
-                    curSizeJp += 0.5;   // JP steps by 0.5 (cm)
-                    // US‑group
-                    for (const auto &c : groupUs)
-                        countrycode_size[c] = curSizeUs;
-                    // UK‑group
-                    for (const auto &c : groupUk)
-                        countrycode_size[c] = curSizeUk;
-                    // JP
-                    for (const auto &c : groupJp)
-                        countrycode_size[c] = curSizeJp;
-                    _list_countryCode_size << countrycode_size;
-                }
-            }
-            else
-            {
-                Q_ASSERT(false);
-            }
-            return _list_countryCode_size;
-        }();
+        if (targetGender == Gender::Female && age_range_description == Age::Adult)
+        {
+            list_countryCode_size = SHOE_FEMALE_ADULT_SIZES;
+        }
+        else if (targetGender == Gender::Male && age_range_description == Age::Adult)
+        {
+             list_countryCode_size = SHOE_MALE_ADULT_SIZES;
+        }
+        else
+        {
+             Q_ASSERT(false);
+        }
         for (const auto &countryCode_size : list_countryCode_size)
         {
             if (countryCode_size.contains(countryTo)

@@ -10,6 +10,7 @@
 #include "FillerCopy.h"
 #include "FillerPrice.h"
 #include "FillerSize.h"
+#include "FillerTitle.h"
 
 
 #include "AbstractFiller.h"
@@ -24,6 +25,8 @@ const QList<const AbstractFiller *> AbstractFiller::ALL_FILLERS_SORTED
         allFillers << &fillerPrice;
         static const FillerSize fillerSize;
         allFillers << &fillerSize;
+        static const FillerTitle fillerTitle;
+        allFillers << &fillerTitle;
         return allFillers;
         }();
 

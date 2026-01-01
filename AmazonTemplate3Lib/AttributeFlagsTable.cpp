@@ -125,6 +125,56 @@ bool AttributeFlagsTable::hasFlag(
     return (flags & flag) == flag;
 }
 
+QStringList AttributeFlagsTable::getSizeFieldIds() const
+{
+    QStringList fieldIds;
+    int sizeFlagIndex = -1;
+
+    // Identify which column corresponds to the Size flag
+    for (int i = m_indFirstFlag; i < m_colNames.size(); ++i)
+    {
+        if (Attribute::STRING_FLAG.value(m_colNames[i]) == Attribute::Size)
+        {
+            sizeFlagIndex = i;
+            break;
+        }
+    }
+
+    if (sizeFlagIndex == -1)
+    {
+        return fieldIds;
+    }
+
+    QSet<QString> uniqueFieldIds;
+    for (const auto &variantList : std::as_const(m_listOfVariantList))
+    {
+        if (variantList[sizeFlagIndex].toBool())
+        {
+            // Collect all non-empty field IDs from this row
+            for (int i = 0; i < m_indFirstFlag; ++i)
+            {
+                const QString &val = variantList[i].toString();
+                if (!val.isEmpty())
+                {
+                    uniqueFieldIds.insert(val);
+                }
+            }
+        }
+    }
+
+    fieldIds = uniqueFieldIds.values();
+    QStringList toPutLast{"size_name", "size_map"};
+    for (const auto &fieldId : toPutLast)
+    {
+        if (fieldIds.contains(fieldId))
+        {
+            fieldIds.removeOne(fieldId);
+            fieldIds << fieldId;
+        }
+    }
+    return fieldIds;
+}
+
 void AttributeFlagsTable::recordAttributeNotRecordedYet(
         const QString &marketplace, const QSet<QString> &fieldIds)
 {
