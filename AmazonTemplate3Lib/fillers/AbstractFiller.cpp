@@ -10,6 +10,8 @@
 #include "FillerCopy.h"
 #include "FillerPrice.h"
 #include "FillerSize.h"
+#include "FillerSelectable.h"
+#include "FillerBulletPoints.h"
 #include "FillerTitle.h"
 
 
@@ -25,6 +27,10 @@ const QList<const AbstractFiller *> AbstractFiller::ALL_FILLERS_SORTED
         allFillers << &fillerPrice;
         static const FillerSize fillerSize;
         allFillers << &fillerSize;
+        static const FillerBulletPoints fillerBulletPoints;
+        allFillers << &fillerBulletPoints;
+        static const FillerSelectable fillerSelectable;
+        allFillers << &fillerSelectable;
         static const FillerTitle fillerTitle;
         allFillers << &fillerTitle;
         return allFillers;
