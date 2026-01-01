@@ -223,6 +223,30 @@ void FillerSizeTests::testConvertUnit_data()
     // 100 cm is approx 39.37 inch. If we have 1 inch there, and we want inch, we should return 1 inch.
     QTest::newRow("Mixed_DistinguishValues_TargetInch") << "US" << QVariant("100 cm (1 inch)") << QVariant("1 inch");
     QTest::newRow("Mixed_DistinguishValues_TargetCm") << "FR" << QVariant("1 inch (100 cm)") << QVariant("100 cm");
+
+    // Dimensions and Complex Mixed Units
+    // 1. Simple Dimension Conversion
+    // 10x20cm -> Target US (Inch). 10cm ~ 3.94", 20cm ~ 7.87". Separator x/X preserved.
+    // Expected format: "3.94\" x 7.87\"" or "3.94 x 7.87\"" ?
+    // If input is "10x20cm", unit is at end.
+    // We should probably attach unit to end or each?
+    // User example: 3 x 10 x 50 " (7.62 × 25.4 × 127 cm)
+    // Implicitly, commonly: 3" x 10" x 50"
+    // Let's aim for: 3.94" x 7.87"
+    QTest::newRow("Dimension_Cm_to_Inch") << "US" << QVariant("10x20cm") << QVariant("3.94\" x 7.87\"");
+    
+    // 2. Spaces in dimension
+    QTest::newRow("Dimension_Spaces_Cm_to_Inch") << "US" << QVariant("10 x 20 cm") << QVariant("3.94\" x 7.87\"");
+
+    // 3. Complex Mixed: Parenthesis
+    // Target CM: should pick the one in parens
+    QTest::newRow("Complex_Mixed_Paren_TargetCm") << "FR" << QVariant("3 x 10 x 50 \" (7.62 x 25.4 x 127 cm)") << QVariant("7.62 x 25.4 x 127 cm");
+    
+    // Target Inch: should pick the first part
+    QTest::newRow("Complex_Mixed_Paren_TargetInch") << "US" << QVariant("3 x 10 x 50 \" (7.62 x 25.4 x 127 cm)") << QVariant("3 x 10 x 50 \"");
+
+    // 4. Mixed with slash
+    QTest::newRow("Complex_Mixed_Slash_TargetInch") << "US" << QVariant("10 in / 25.4 cm") << QVariant("10 in");
 }
 
 void FillerSizeTests::testConvertUnit()

@@ -270,9 +270,11 @@ QCoro::Task<void> FillerSize::askAiToUpdateSettingsForProductType(
 QVariant FillerSize::convertUnit(const QString &countryTo, const QVariant &origValue) const
 {
     QString val = origValue.toString();
-    // Regex for number and optional unit
-    // Handles 10cm, 10 cm, 10", 10 inch, 10inch
-    static const QRegularExpression re("([0-9]+(?:\\.[0-9]+)?)\\s*(cm|inch|\"|in|''|“)?", QRegularExpression::CaseInsensitiveOption);
+    // Regex for "Dimension Chain"
+    // Captures sequences of numbers separated by 'x' or 'X' or '×', ending with an optional unit.
+    // Group 1: The full numeric chain (e.g. "10 x 20" or "10")
+    // Group 2: The unit (e.g. "cm")
+    static const QRegularExpression re("((?:[0-9]+(?:\\.[0-9]+)?)(?:\\s*[xX×]\\s*[0-9]+(?:\\.[0-9]+)?)*)\\s*(cm|inch|\"|in|''|“)?", QRegularExpression::CaseInsensitiveOption);
     auto matches = re.globalMatch(val);
     
     if (!matches.hasNext())
@@ -281,11 +283,11 @@ QVariant FillerSize::convertUnit(const QString &countryTo, const QVariant &origV
     }
 
     struct FetchedUnit {
-        double number;
+        QString chain;
         QString unit;
         bool isInch;
         bool isCm;
-        QString rawValue; // To maximize fidelity if we just return it
+        QString rawValue; 
     };
     
     QList<FetchedUnit> unitsFound;
@@ -293,20 +295,16 @@ QVariant FillerSize::convertUnit(const QString &countryTo, const QVariant &origV
     while(matches.hasNext())
     {
         auto match = matches.next();
-        double number = match.captured(1).toDouble();
+        QString chain = match.captured(1);
         QString unit = match.captured(2).toLower();
         
         bool isInch = (unit == "inch" || unit == "\"" || unit == "in" || unit == "''" || unit == "“");
         bool isCm = (unit == "cm");
         
-        unitsFound.append({number, unit, isInch, isCm, match.captured(0)});
+        unitsFound.append({chain, unit, isInch, isCm, match.captured(0)});
     }
     
-    // Determine target unit system
-    // US, UK, etc. use inches (imperial)
-    // Others (EU, JP, etc.) use cm (metric)
     static const QSet<QString> inchCountries{"UK", "IE", "AU", "COM", "CA", "US", "SG"}; 
-    
     bool targetIsInch = inchCountries.contains(countryTo.toUpper());
     
     // 1. Try to find a match that already satisfies the target unit
@@ -314,38 +312,84 @@ QVariant FillerSize::convertUnit(const QString &countryTo, const QVariant &origV
     {
         if (targetIsInch && u.isInch)
         {
-             // Already in inch, return the raw string to preserve formatting
              return u.rawValue;
         }
         if (!targetIsInch && u.isCm)
         {
-            // Already in cm
             return u.rawValue;
         }
     }
     
-    // 2. If no matching unit found, take the *first* unit and convert it (fallback to old behavior)
+    // 2. If no matching unit found, convert the first one
     if (!unitsFound.isEmpty())
     {
         const auto &u = unitsFound.first();
+        
+        // Helper lambda to convert chain
+        auto convertChain = [&](double factor, const QString &newUnit) -> QString {
+            QString res;
+            static const QRegularExpression reNums("[0-9]+(?:\\.[0-9]+)?");
+            auto nums = reNums.globalMatch(u.chain);
+            int lastPos = 0;
+            while (nums.hasNext()) {
+                auto match = nums.next();
+                // Append separator if any
+                if (match.capturedStart() > lastPos) {
+                     res += u.chain.mid(lastPos, match.capturedStart() - lastPos);
+                }
+                
+                double val = match.captured(0).toDouble();
+                double newVal = val * factor;
+                // If factor < 1 (cm to inch), 2 decimals. If > 1 (inch to cm), 1 decimal.
+                if (factor < 1.0) 
+                     res += QString::number(newVal, 'f', 2);
+                else
+                     res += QString::number(newVal, 'f', 1);
+            }
+            // Append remaining if any (unlikely for well formed chain but safety)
+             if (lastPos < u.chain.length() && 0) { // logic above is slightly flawed for append.
+             }
+             
+             // Simpler approach: split by regex separator, convert, join.
+             QStringList parts = u.chain.split(QRegularExpression("\\s*[xX×]\\s*"));
+             QStringList convertedParts;
+             // We need to preserve the exact separators? User request: "10x20cm" -> "3.94" x 7.87"". Implicitly adding " to each?
+             // Or "3.94 x 7.87""?
+             // Test expectation: "3.94\" x 7.87\"". So unit attached to EACH or just at end?
+             // If input "10x20cm" (unit at end), typically we want "3.94\" x 7.87\"" (unit at each) OR "3.94 x 7.87\"" (unit at end).
+             // Let's assume unit at end for the whole group if the input had unit at end.
+             // Wait, test said: `QVariant("3.94\" x 7.87\"")`. This implies unit on EACH.
+             // But my Plan said "reconstruct the string with the new unit symbol".
+             // If I reconstruct "val x val" + " unit", it is "val x val unit".
+             // If I want unit on each, I need to append unit to each number.
+             
+             for (int i=0; i<parts.size(); ++i) {
+                 double val = parts[i].toDouble();
+                 double newVal = val * factor;
+                 QString s = (factor < 1.0) ? QString::number(newVal, 'f', 2) : QString::number(newVal, 'f', 1); 
+                 // If we want unit on each:
+                 if (factor < 1.0) s += "\""; // inch
+                 
+                 convertedParts << s;
+             }
+             
+             if (factor < 1.0) { // Target Inch
+                 return convertedParts.join(" x ");
+             } else { // Target Cm
+                 return convertedParts.join(" x ") + " cm";
+             }
+        };
+
         if (u.isCm && targetIsInch)
         {
              // cm to inch: / 2.54
-            double inchVal = u.number / 2.54;
-             return QString::number(inchVal, 'f', 2) + "\"";
+             return convertChain(1.0/2.54, "\"");
         }
         else if (u.isInch && !targetIsInch)
         {
              // inch to cm: * 2.54
-            double cmVal = u.number * 2.54;
-            return QString::number(cmVal, 'f', 1) + " cm";
+            return convertChain(2.54, " cm");
         }
-        // Unit agnostic or no conversion needed (e.g. unit empty and we blindly took it, or same unit matched above? No, same unit would be caught above IF unit was explicit).
-        // If unit was empty, isInch/isCm are false.
-        // We probably just return original value or normalized?
-        // Let's return original if we can't be sure.
-        // But if we have "10" (no unit), `unitsFound` has 1 entry with isInch=false, isCm=false.
-        // We fall through here.
     }
     
     return origValue;
