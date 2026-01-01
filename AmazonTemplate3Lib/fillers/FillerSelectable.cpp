@@ -46,26 +46,19 @@ QCoro::Task<void> FillerSelectable::fill(
         , QHash<QString, QHash<QString, QString>> &sku_fieldId_toValueslangCommon
         , QHash<QString, QHash<QString, QString>> &sku_fieldId_toValues) const
 {
-    auto attributeFlagsTable = templateFiller->attributeFlagsTable();
-    bool childSameValue = attributeFlagsTable->hasFlag(marketplaceFrom, fieldIdFrom, Attribute::ChildSameValue);
-    bool allSameValue = attributeFlagsTable->hasFlag(marketplaceFrom, fieldIdFrom, Attribute::SameValue);
-    for (auto it = sku_fieldId_fromValues.cbegin();
-         it != sku_fieldId_fromValues.cend(); ++it)
-    {
-        const auto &sku = it.key();
-        const auto &fieldId_fromValues = it.value();
-        if (fieldId_fromValues.contains(fieldIdFrom) && !fieldId_fromValues[fieldIdFrom].isEmpty())
-        {
-            sku_fieldId_toValues[sku][fieldIdTo] = it.value()[fieldIdFrom];
-        }
-    }
-    const QString &fieldIdToV02 = templateFiller->attributeFlagsTable()->getFieldId(
-                marketplaceTo, fieldIdTo, Attribute::AMAZON_V02);
-    AttributeEquivalentTable *equivalentTable
-            = templateFiller->attributeEquivalentTable();
     const auto &possibleValues = attribute->possibleValues(
                 marketplaceTo, countryCodeTo, langCodeTo, productTypeTo);
-    if (possibleValues.size() > 0)
+    if (possibleValues.size() == 1)
+    {
+        const auto &uniquePossibleValue = *possibleValues.cbegin();
+        for (auto it = sku_fieldId_fromValues.cbegin();
+             it != sku_fieldId_fromValues.cend(); ++it)
+        {
+            const auto &sku = it.key();
+            sku_fieldId_toValues[sku][fieldIdTo] = uniquePossibleValue;
+        }
+    }
+    else if (possibleValues.size() > 0)
     {
         if (countryCodeFrom == countryCodeTo && langCodeFrom == langCodeTo)
         {
@@ -160,6 +153,7 @@ static QSharedPointer<OpenAi2::StepMultipleAsk> createSelectStep(
             }
         }
         prompt += "\nPossible Values:\n";
+        Q_ASSERT(possibleValues.size() < 50); // Shold not happen
         QList<QString> sortedValues = possibleValues.values();
         std::sort(sortedValues.begin(), sortedValues.end());
         for (const auto &val : sortedValues)
