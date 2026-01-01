@@ -35,6 +35,11 @@ public:
             , QHash<QString, QHash<QString, QString>> &sku_fieldId_toValueslangCommon
             , QHash<QString, QHash<QString, QString>> &sku_fieldId_toValues
             ) const override;
+    static void fillVariationsParents(
+            const QHash<QString, QHash<QString, QSet<QString>>> &parentSku_variation_skus
+            , QHash<QString, QString> &sku_parentSku
+            , QHash<QString, QString> &sku_variation
+            );
 private:
     QCoro::Task<void> _fillSameLangCountry(
             TemplateFiller *templateFiller

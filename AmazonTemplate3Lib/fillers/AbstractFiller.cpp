@@ -12,6 +12,7 @@
 #include "FillerSize.h"
 #include "FillerSelectable.h"
 #include "FillerBulletPoints.h"
+#include "FillerText.h"
 #include "FillerTitle.h"
 
 
@@ -30,7 +31,9 @@ const QList<const AbstractFiller *> AbstractFiller::ALL_FILLERS_SORTED
         static const FillerBulletPoints fillerBulletPoints;
         allFillers << &fillerBulletPoints;
         static const FillerSelectable fillerSelectable;
-        allFillers << &fillerSelectable;
+        allFillers << &fillerBulletPoints;
+        static const FillerText fillerText;
+        allFillers << &fillerText;
         static const FillerTitle fillerTitle;
         allFillers << &fillerTitle;
         return allFillers;
@@ -198,4 +201,19 @@ QCoro::Task<void> AbstractFiller::fillValuesForAi(
         }
     }
     co_return;
+}
+
+void AbstractFiller::recordAllMarketplace(
+        const TemplateFiller *templateFiller
+        , const QString &marketplace
+        , const QString &fieldId
+        , QHash<QString, QString> &fieldId_values
+        , const QString &value)
+{
+    auto attributeFlagsTable = templateFiller->attributeFlagsTable();
+    const auto &marketplace_ids = attributeFlagsTable->get_marketplace_id(marketplace, fieldId);
+    for (const auto &curFieldId : marketplace_ids)
+    {
+        fieldId_values[curFieldId] = value;
+    }
 }

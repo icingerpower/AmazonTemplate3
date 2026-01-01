@@ -35,6 +35,12 @@ public:
             , const QHash<QString, QHash<QString, QString>> &sku_fieldId_fromValues
             , QHash<QString, QMap<QString, QString>> sku_attribute_valuesForAi
             );
+    static void recordAllMarketplace(
+            const TemplateFiller *templateFiller
+            , const QString &marketplace
+            , const QString &fieldId
+            , QHash<QString, QString> &fieldId_values
+            , const QString &value);
 
     virtual bool canFill(const TemplateFiller *templateFiller
                          , const Attribute *attribute

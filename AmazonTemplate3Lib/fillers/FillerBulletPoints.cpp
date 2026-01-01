@@ -23,7 +23,7 @@ static QSharedPointer<OpenAi2::StepMultipleAsk> createBulletPointsStep(
     step->getPrompt = [langCodeTo, productType, attributes, existingBullets](int nAttempts) -> QString
     {
         Q_UNUSED(nAttempts)
-        QString prompt = QString("You are an expert copywriter. Generate 5 compelling bullet points for a product description in language '%1'.\n").arg(langCodeTo);
+        QString prompt = QString("You are an expert in writing amazon product pages. Generate 5 compelling bullet points for a product description in language '%1'.\n").arg(langCodeTo);
         prompt += QString("Product Type: %1\n").arg(productType);
         prompt += "Attributes:\n";
         for (auto it = attributes.begin(); it != attributes.end(); ++it)
@@ -47,10 +47,20 @@ static QSharedPointer<OpenAi2::StepMultipleAsk> createBulletPointsStep(
         
         if (hasExisting)
         {
-            prompt += "\nExisting Bullet Points (preserve meaning/translate if needed, and complete the list to reach 5):\n";
+            if (langCodeTo == "EN")
+            {
+                prompt += "\nExisting Bullet Points (preserve meaning/translate if needed, complete the list to reach 5). If any measurement is in inches (in, inch, \", ″), keep the inches value and add the centimeters conversion right after in parentheses, e.g., 10 in (25.4 cm).\n";
+            }
+            else
+            {
+                prompt += "\nExisting Bullet Points (preserve meaning/translate if needed, complete the list to reach 5). If any measurement is in inches (in, inch, \", ″), convert it to centimeters and output only the cm value.\n";
+            }
+
+            //prompt += "\nExisting Bullet Points (preserve meaning/translate if needed, and complete the list to reach 5):\n";
             prompt += existingStr;
         }
 
+        prompt += "\nWrite bullet points that increase perceived value while respecting Amazon policies. Do not invent information; only state verifiable facts that highlight the product. Also, ensure the bullets answer, when possible, the most important buyer questions that could block a purchase (e.g., compatibility/fit, dimensions, materials, what’s included, use cases, care instructions, limitations).";
         prompt += "\nInstruction: Output a valid JSON object with a single key \"bullet_points\" containing an array of exactly 5 strings. Example: {\"bullet_points\": [\"Point 1\", \"Point 2\", \"Point 3\", \"Point 4\", \"Point 5\"]}.";
         return prompt;
     };

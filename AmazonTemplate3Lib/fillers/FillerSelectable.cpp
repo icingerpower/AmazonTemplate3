@@ -4,7 +4,9 @@
 #include <QSet>
 #include <QJsonDocument>
 #include <QJsonObject>
+
 #include "../../common/openai/OpenAi2.h"
+
 #include "Attribute.h"
 #include "TemplateFiller.h"
 #include "AttributeEquivalentTable.h"
@@ -125,6 +127,28 @@ QCoro::Task<void> FillerSelectable::fill(
     co_return;
 }
 
+void FillerSelectable::fillVariationsParents(
+        const QHash<QString, QHash<QString, QSet<QString>>> &parentSku_variation_skus
+        , QHash<QString, QString> &sku_parentSku
+        , QHash<QString, QString> &sku_variation)
+{
+    for (auto itParent = parentSku_variation_skus.begin();
+         itParent != parentSku_variation_skus.end(); ++itParent)
+    {
+        const auto &skuParent = itParent.key();
+        for (auto itVar = itParent.value().begin();
+             itVar != itParent.value().end(); ++itVar)
+        {
+            const auto &variation = itVar.key();
+            for (const auto &sku : itVar.value())
+            {
+                sku_parentSku[sku] = skuParent;
+                sku_variation[sku] = variation;
+            }
+        }
+    }
+}
+
 static QSharedPointer<OpenAi2::StepMultipleAsk> createSelectStep(
         const QString &id
         , const QString &marketplace
@@ -233,21 +257,7 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
                 marketplaceTo, countryCodeTo, langCodeTo, productTypeTo);
     QHash<QString, QString> sku_parentSku;
     QHash<QString, QString> sku_variation;
-    for (auto itParent = parentSku_variation_skus.begin();
-         itParent != parentSku_variation_skus.end(); ++itParent)
-    {
-        const auto &skuParent = itParent.key();
-        for (auto itVar = itParent.value().begin();
-             itVar != itParent.value().end(); ++itVar)
-        {
-            const auto &variation = itVar.key();
-            for (const auto &sku : itVar.value())
-            {
-                sku_parentSku[sku] = skuParent;
-                sku_variation[sku] = variation;
-            }
-        }
-    }
+    fillVariationsParents(parentSku_variation_skus, sku_parentSku, sku_variation);
     const QString settingsFileName{"selectedValues.ini"};
 
     for (auto it = sku_fieldId_fromValues.cbegin();
@@ -258,7 +268,7 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
         if (!fieldId_toValues.contains(fieldIdTo) || fieldId_toValues[fieldIdTo].isEmpty())
         {
             const QMap<QString, QString> &valuesForAi = sku_attribute_valuesForAi[sku];
-            QString valueId = "all_" + marketplaceTo + "_" + countryCodeTo + "_" + countryCodeFrom;
+            QString valueId = "all_" + marketplaceTo + "_" + countryCodeTo + "_" + langCodeTo;
             if (!allSameValue && childSameValue)
             {
                 valueId += "_" + sku_parentSku[sku];
