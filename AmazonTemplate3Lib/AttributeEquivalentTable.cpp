@@ -9,6 +9,11 @@
 #include "AttributeEquivalentTable.h"
 #include "Attribute.h"
 
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
+
+
 const QStringList AttributeEquivalentTable::HEADERS{
     QObject::tr("Attribute")
     , QObject::tr("Equivalent values")
@@ -23,8 +28,7 @@ AttributeEquivalentTable::AttributeEquivalentTable(
     _buildHash();
 }
 
-bool AttributeEquivalentTable::hasEquivalent(
-        const QString &fieldIdAmzV02, const QString &value) const
+bool AttributeEquivalentTable::hasEquivalent(const QString &fieldIdAmzV02, const QString &value) const
 {
     auto it = m_fieldIdAmzV02_listOfEquivalents.constFind(fieldIdAmzV02);
     if (it != m_fieldIdAmzV02_listOfEquivalents.constEnd())
@@ -34,6 +38,31 @@ bool AttributeEquivalentTable::hasEquivalent(
             if (equivalents.contains(value))
             {
                 return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool AttributeEquivalentTable::hasEquivalent(
+        const QString &fieldIdAmzV02
+        , const QString &value
+        , const QSet<QString> &possibleValues) const
+{
+    auto it = m_fieldIdAmzV02_listOfEquivalents.constFind(fieldIdAmzV02);
+    if (it != m_fieldIdAmzV02_listOfEquivalents.constEnd())
+    {
+        for (const auto &equivalents : it.value())
+        {
+            if (equivalents.contains(value))
+            {
+                for (const auto &equivalent : equivalents)
+                {
+                    if (possibleValues.contains(equivalent))
+                    {
+                        return true;
+                    }
+                }
             }
         }
     }
@@ -145,6 +174,32 @@ const QSet<QString> &AttributeEquivalentTable::getEquivalentValues(
     return empty;
 }
 
+const QString &AttributeEquivalentTable::getEquivalentValue(
+        const QString &fieldIdAmzV02
+        , const QString &value
+        , const QSet<QString> &possibleValues) const
+{
+    auto it = m_fieldIdAmzV02_listOfEquivalents.constFind(fieldIdAmzV02);
+    if (it != m_fieldIdAmzV02_listOfEquivalents.constEnd())
+    {
+        for (const auto &equivalents : it.value())
+        {
+            if (equivalents.contains(value))
+            {
+                for (const auto &equivalent : equivalents)
+                {
+                    if (possibleValues.contains(equivalent))
+                    {
+                        return equivalent;
+                    }
+                }
+            }
+        }
+    }
+    static QString empty;
+    return empty;
+}
+
 QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
         const QString &fieldIdAmzV02, const QString &value, const Attribute *attribute)
 {
@@ -185,7 +240,9 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
                       // The previous code example iterated over "countryLang".
                       // Here we iterate all.
                       QSet<QString> allValues;
-                      for(const auto &cat : catMap.keys()) {
+                      const auto &categories = catMap.keys();
+                      for(const auto &cat : categories)
+                      {
                           allValues.unite(catMap[cat]);
                       }
                       
@@ -318,6 +375,95 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
         co_await OpenAi2::instance()->askGptMultipleTimeAiCoro(phase2, "gpt-5.2");
     }
 }
+
+QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
+        const QString &fieldIdAmzV02
+        , const QString &value
+        , const QString &langCodeFrom
+        , const QString &langCodeTo
+        , const QSet<QString> &possibleValues)
+{
+    if (possibleValues.isEmpty())
+    {
+        qDebug() << "AttributeEquivalentTable::askAiEquivalentValues FAILED as possibleValues is empty for " << fieldIdAmzV02;
+        co_return;
+    }
+
+    auto buildPrompt = [fieldIdAmzV02, value, langCodeFrom, langCodeTo, possibleValues](int) -> QString {
+        QStringList lines;
+        lines << "You are an expert in Amazon attribute translation."
+              << QString("I have a value \"%1\" in language \"%2\" for the attribute \"%3\".")
+                     .arg(value, langCodeFrom, fieldIdAmzV02)
+              << QString("Please select the best equivalent value from the following list of allowed values in language \"%1\":")
+                     .arg(langCodeTo);
+        
+        QStringList sortedPossible = possibleValues.values();
+        std::sort(sortedPossible.begin(), sortedPossible.end());
+        
+        if (sortedPossible.size() > 500) {
+             // Safety cap, though unlikely to be hit for typical strict attributes
+             lines << "(List truncated to first 500)";
+             for(int i=0; i<500; ++i) lines << "- " + sortedPossible[i];
+        } else {
+             for(const auto &v : sortedPossible) lines << "- " + v;
+        }
+
+        lines << ""
+              << "Reply ONLY with a valid JSON object containing the exact selected value in the key 'value'."
+              << "Example: {\"value\": \"SelectedValue\"}";
+        return lines.join("\n");
+    };
+
+    auto validateReply = [possibleValues](const QString &reply, const QString &) -> bool {
+        QJsonParseError error;
+        QJsonDocument doc = QJsonDocument::fromJson(reply.toUtf8(), &error);
+        if (error.error != QJsonParseError::NoError || !doc.isObject()) return false;
+        
+        QString v = doc.object().value("value").toString();
+        // Check if the value is in possibleValues (case insensitive? usually strict)
+        // Attribute values are usually case sensitive or strictly defined. 
+        // We can do a check.
+        if (possibleValues.contains(v)) return true;
+        
+        // Try case insensitive match?
+        // For now, strict match as we requested exact value.
+        return false;
+    };
+
+    auto parseReply = [](const QString &reply) -> QString {
+        QJsonDocument doc = QJsonDocument::fromJson(reply.toUtf8());
+        return doc.object().value("value").toString();
+    };
+
+    auto step = QSharedPointer<OpenAi2::StepMultipleAsk>::create();
+    step->id = QString("AttEquiv_v2_%1_%2_%3_%4").arg(fieldIdAmzV02, value, langCodeFrom, langCodeTo);
+    step->name = "Attribute equivalence selection";
+    step->cachingKey = step->id;
+    step->neededReplies = 3;
+    step->gptModel = "gpt-5.2";
+    step->getPrompt = buildPrompt;
+    step->validate = validateReply;
+    step->chooseBest = OpenAi2::CHOOSE_MOST_FREQUENT;
+    
+    // Application
+    // We need to capture 'this' safely? Coroutine should be fine if 'this' is alive. 
+    // Usually 'templateFiller' or 'parent' keeps 'this' alive.
+    step->apply = [this, fieldIdAmzV02, value, parseReply](const QString &best) {
+        if (!best.isEmpty()) {
+            QString chosen = parseReply(best);
+            if (!chosen.isEmpty()) {
+                // We add BOTH the original value and the chosen equivalent value to the record
+                // so they become linked in the same set.
+                recordAttribute(fieldIdAmzV02, {value, chosen});
+            }
+        }
+    };
+
+    QList<QSharedPointer<OpenAi2::StepMultipleAsk>> steps;
+    steps << step;
+    co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
+}
+
 
 QSet<QString> AttributeEquivalentTable::getEquivalentGenderWomen() const
 {

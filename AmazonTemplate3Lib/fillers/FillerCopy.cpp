@@ -6,6 +6,7 @@
 
 bool FillerCopy::canFill(
         const TemplateFiller *templateFiller
+        , const Attribute *attribute
         , const QString &marketplace
         , const QString &fieldId) const
 {
@@ -18,14 +19,15 @@ bool FillerCopy::canFill(
 }
 
 QCoro::Task<void> FillerCopy::fill(
-        TemplateFiller *templateFiller // TODO handle working space for reply saving / reloading
+        TemplateFiller *templateFiller
         , const QHash<QString, QHash<QString, QSet<QString>>> &parentSku_variation_skus
         , const QString &marketplaceFrom
         , const QString &marketplaceTo
         , const QString &fieldIdFrom
         , const QString &fieldIdTo
         , const Attribute *attribute
-        , const QString &productType
+        , const QString &productTypeFrom
+        , const QString &productTypeTo
         , const QString &countryCodeFrom
         , const QString &langCodeFrom
         , const QString &countryCodeTo
@@ -43,7 +45,8 @@ QCoro::Task<void> FillerCopy::fill(
          it != sku_fieldId_fromValues.cend(); ++it)
     {
         const auto &sku = it.key();
-        if (it.value().contains(fieldIdFrom))
+        const auto &fieldId_fromValues = it.value();
+        if (fieldId_fromValues.contains(fieldIdFrom) && !fieldId_fromValues[fieldIdFrom].isEmpty())
         {
             sku_fieldId_toValues[sku][fieldIdTo] = it.value()[fieldIdFrom];
         }

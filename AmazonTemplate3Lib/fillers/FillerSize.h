@@ -12,6 +12,7 @@ public:
     static const QString KEY_CLOTHE_WORDS;
     static const QString KEY_CAT_NO_CONV_WORDS;
     bool canFill(const TemplateFiller *templateFiller
+                 , const Attribute *attribute
                  , const QString &marketplace
                  , const QString &fieldId) const override;
     QCoro::Task<void> fill(
@@ -22,7 +23,8 @@ public:
             , const QString &fieldIdFrom
             , const QString &fieldIdTo
             , const Attribute *attribute
-            , const QString &productType
+            , const QString &productTypeFrom
+            , const QString &productTypeTo
             , const QString &countryCodeFrom
             , const QString &langCodeFrom
             , const QString &countryCodeTo

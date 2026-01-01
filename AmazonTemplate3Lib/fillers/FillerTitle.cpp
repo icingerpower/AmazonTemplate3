@@ -9,8 +9,7 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 
-bool FillerTitle::canFill(
-        const TemplateFiller *templateFiller, const QString &marketplace, const QString &fieldId) const
+bool FillerTitle::canFill(const TemplateFiller *templateFiller, const Attribute *attribute, const QString &marketplace, const QString &fieldId) const
 {
     return fieldId.startsWith("item_name");
 }
@@ -91,7 +90,8 @@ QCoro::Task<void> FillerTitle::fill(
         , const QString &fieldIdFrom
         , const QString &fieldIdTo
         , const Attribute *attribute
-        , const QString &productType
+        , const QString &productTypeFrom
+        , const QString &productTypeTo
         , const QString &countryCodeFrom
         , const QString &langCodeFrom
         , const QString &countryCodeTo
@@ -244,7 +244,7 @@ QCoro::Task<void> FillerTitle::fill(
                     }
                     if (labelSize != size)
                     {
-                        newTitle += labelSize + "=" + _get_sizeCountry(templateFiller, countryCodeTo, productType, gender, age) + "-" + size;
+                        newTitle += labelSize + "=" + _get_sizeCountry(templateFiller, countryCodeTo, productTypeFrom, gender, age) + "-" + size;
                     }
                     else
                     {

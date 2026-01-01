@@ -1,7 +1,6 @@
 #include "FillerPrice.h"
 
-bool FillerPrice::canFill(
-        const TemplateFiller *, const QString &, const QString &fieldId) const
+bool FillerPrice::canFill(const TemplateFiller *, const Attribute *attribute, const QString &, const QString &fieldId) const
 {
     return fieldId.contains("price");
 }
@@ -14,7 +13,8 @@ QCoro::Task<void> FillerPrice::fill(
         , const QString &fieldIdFrom
         , const QString &fieldIdTo
         , const Attribute *attribute
-        , const QString &productType
+        , const QString &productTypeFrom
+        , const QString &productTypeTo
         , const QString &countryCodeFrom
         , const QString &langCodeFrom
         , const QString &countryCodeTo

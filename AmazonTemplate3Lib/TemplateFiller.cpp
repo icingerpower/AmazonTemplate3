@@ -704,12 +704,12 @@ QCoro::Task<void> TemplateFiller::fillValues()
     QXlsx::Document document(m_templateFromPath);
     const auto &parentSku_variation_skus = _get_parentSku_variation_skus(document);
     const auto &marketplaceFrom = _get_marketplace(document);
-    const auto &productType = _get_productType(document);
+    const auto &productTypeFrom = _get_productType(document);
     const auto &langCodeFrom = _get_langCode(m_templateFromPath);
     const auto &countryCodeFrom = _get_countryCode(m_templateFromPath);
 
     co_await AbstractFiller::fillValuesForAi(this,
-                                             productType,
+                                             productTypeFrom,
                                              countryCodeFrom,
                                              langCodeFrom,
                                              m_gender,
@@ -723,13 +723,15 @@ QCoro::Task<void> TemplateFiller::fillValues()
         const auto &countryCodeTo = _get_countryCode(targetPath);
         const auto &langCodeTo = _get_langCode(targetPath);
         const auto &marketplaceTo = _get_marketplace(docTo);
+        const auto &productTypeTo = _get_productType(document);
         QString keywords; // TODO
 
         for (const auto &filler : AbstractFiller::ALL_FILLERS_SORTED)
         {
             for (const auto &fieldIdFrom : sortedFieldIds)
             {
-                if (filler->canFill(this, marketplaceFrom, fieldIdFrom))
+                const auto &attribute =  m_marketplace_attributeId_attributeInfos[marketplaceFrom][fieldIdFrom].data();
+                if (filler->canFill(this, attribute, marketplaceFrom, fieldIdFrom))
                 {
                     const auto &fieldIdTo = m_attributeFlagsTable->getFieldId(
                                 marketplaceFrom, fieldIdFrom, marketplaceTo);
@@ -740,8 +742,9 @@ QCoro::Task<void> TemplateFiller::fillValues()
                                 , marketplaceTo
                                 , fieldIdFrom
                                 , fieldIdTo
-                                , m_marketplace_attributeId_attributeInfos[marketplaceFrom][fieldIdFrom].data()
-                                , productType
+                                , attribute
+                                , productTypeFrom
+                                , productTypeTo
                                 , countryCodeFrom
                                 , langCodeFrom
                                 , countryCodeTo

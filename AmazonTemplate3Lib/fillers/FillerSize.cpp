@@ -165,8 +165,7 @@ const QList<QHash<QString, double>> FillerSize::SHOE_MALE_ADULT_SIZES = []() {
     return _list_countryCode_size;
 }();
 
-bool FillerSize::canFill(
-        const TemplateFiller *templateFiller, const QString &marketplace, const QString &fieldId) const
+bool FillerSize::canFill(const TemplateFiller *templateFiller, const Attribute *attribute, const QString &marketplace, const QString &fieldId) const
 {
     if (templateFiller->attributeFlagsTable()
             ->hasFlag(marketplace, fieldId, Attribute::Size))
@@ -184,7 +183,8 @@ QCoro::Task<void> FillerSize::fill(
         , const QString &fieldIdFrom
         , const QString &fieldIdTo
         , const Attribute *attribute
-        , const QString &productType
+        , const QString &productTypeFrom
+        , const QString &productTypeTo
         , const QString &countryCodeFrom
         , const QString &langCodeFrom
         , const QString &countryCodeTo
@@ -237,13 +237,13 @@ QCoro::Task<void> FillerSize::fill(
     bool isShoes = false;
     bool isClothe = false;
     bool isNoSizeConv = false;
-    initCatBools(settings.data(), productType, isShoes, isClothe, isNoSizeConv);
+    initCatBools(settings.data(), productTypeFrom, isShoes, isClothe, isNoSizeConv);
     if (!isShoes && !isClothe && !isNoSizeConv)
     {
         // We ask AI to classify and update settings
         co_await askAiToUpdateSettingsForProductType(
-                    productType, settings.data());
-        initCatBools(settings.data(), productType, isShoes, isClothe, isNoSizeConv);
+                    productTypeFrom, settings.data());
+        initCatBools(settings.data(), productTypeFrom, isShoes, isClothe, isNoSizeConv);
     }
 
 
@@ -262,12 +262,12 @@ QCoro::Task<void> FillerSize::fill(
             if (isShoes)
             {
                     convertedValue = convertShoeSize(
-                                countryCodeFrom, countryCodeTo, gender, age, productType, origValueString);
+                                countryCodeFrom, countryCodeTo, gender, age, productTypeFrom, origValueString);
             }
             else if (isClothe)
             {
                     convertedValue = convertClothingSize(
-                                countryCodeFrom, countryCodeTo, langCodeTo, gender, age, productType, origValueString);
+                                countryCodeFrom, countryCodeTo, langCodeTo, gender, age, productTypeFrom, origValueString);
             }
             else
             {

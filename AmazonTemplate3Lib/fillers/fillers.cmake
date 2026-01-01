@@ -7,6 +7,8 @@ SET(FILLER_FILES
     ${CMAKE_CURRENT_LIST_DIR}/FillerPrice.h
     ${CMAKE_CURRENT_LIST_DIR}/FillerSize.cpp
     ${CMAKE_CURRENT_LIST_DIR}/FillerSize.h
+    ${CMAKE_CURRENT_LIST_DIR}/FillerSelectable.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/FillerSelectable.h
     ${CMAKE_CURRENT_LIST_DIR}/FillerTitle.cpp
     ${CMAKE_CURRENT_LIST_DIR}/FillerTitle.h
 )

@@ -17,13 +17,26 @@ public:
 
     int getPosAttr(const QString &fieldIdAmzV02, const QString &value) const;
     int getPosAttr(const QString &fieldIdAmzV02, const QSet<QString> &equivalentValues) const;
-    bool hasEquivalent(const QString &fieldIdAmzV02, const QString &value) const;
+    bool hasEquivalent(const QString &fieldIdAmzV02
+                       , const QString &value
+                       ) const;
+    bool hasEquivalent(const QString &fieldIdAmzV02
+                       , const QString &value
+                       , const QSet<QString> &possibleValues) const;
     void recordAttribute(const QString &fieldIdAmzV02,
                          const QSet<QString> &equivalentValues);
     const QSet<QString> &getEquivalentValues(
             const QString &fieldIdAmzV02, const QString &value) const;
+    const QString &getEquivalentValue(
+            const QString &fieldIdAmzV02, const QString &value, const QSet<QString> &possibleValues) const;
     QCoro::Task<void> askAiEquivalentValues(
             const QString &fieldIdAmzV02, const QString &value, const Attribute *attribute);
+    QCoro::Task<void> askAiEquivalentValues(
+            const QString &fieldIdAmzV02
+            , const QString &value
+            , const QString &langCodeFrom
+            , const QString &langCodeTo
+            , const QSet<QString> &possibleValues);
 
     QSet<QString> getEquivalentGenderWomen() const;
     QSet<QString> getEquivalentGenderMen() const;
