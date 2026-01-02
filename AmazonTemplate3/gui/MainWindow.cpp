@@ -38,6 +38,7 @@ MainWindow::MainWindow(QWidget *parent)
         {
             ui->lineEditOpenAiKey->setText(key);
             OpenAi2::instance()->init(key);
+            OpenAi2::instance()->setMaxQueriesSameTime(10);
         }
     }
     _connectSlots();
@@ -79,6 +80,30 @@ void MainWindow::_connectSlots()
             &QPushButton::clicked,
             this,
             &MainWindow::generate);
+    connect(ui->buttonViewFormatExtraInfos,
+            &QPushButton::clicked,
+            this,
+            &MainWindow::viewFormatCustomInstructions);
+    connect(ui->textEditExtraInfos,
+            &QTextEdit::textChanged,
+            this,
+            [this](){
+        if (!ui->lineEditTo->text().isEmpty())
+        {
+            static QDateTime nextDateTime = QDateTime::currentDateTime().addSecs(-1);
+            const QDateTime &currentDateTime = QDateTime::currentDateTime();
+            if (nextDateTime.secsTo(currentDateTime) > 0)
+            {
+                int nSecs = 3;
+                nextDateTime = currentDateTime.addSecs(nSecs);
+                QTimer::singleShot(nSecs * 1000 + 20, this, [this]{
+                    auto settingsDir = settingsFolder();
+                    settingsDir->setValue(m_settingsKeyExtraInfos,
+                                          ui->textEditExtraInfos->toPlainText());
+                });
+            }
+        }
+    });
 }
 
 void MainWindow::onApiKeyChanged(const QString &key)
@@ -196,6 +221,7 @@ void MainWindow::browseSourceMain()
                     , filePath
                     , fileModelToFill->getFilePaths()
                     , fileModelSources->getFilePaths()
+                    , get_skuPattern_customInstructions()
             };
             ui->treeViewToFill->setModel(fileModelToFill);
             ui->treeViewToFill->setRootIndex(fileModelToFill->index(workingDirPath));
@@ -220,6 +246,61 @@ void MainWindow::browseSourceMain()
 QSharedPointer<QSettings> MainWindow::settingsFolder() const
 {
     return QSharedPointer<QSettings>{new QSettings{m_settingsFilePath, QSettings::IniFormat}};
+}
+
+QMap<QString, QString> MainWindow::get_skuPattern_customInstructions() const
+{
+    QMap<QString, QString> skuPattern_customInstructions;
+    auto customInstructions = ui->textEditExtraInfos->toPlainText().trimmed();
+    if (!customInstructions.isEmpty())
+    {
+        const QStringList &lines = customInstructions.split("\n");
+        skuPattern_customInstructions[QString{}] = lines[0].trimmed();
+        if (!skuPattern_customInstructions[QString{}].endsWith("."))
+        {
+            skuPattern_customInstructions[QString{}] += ".";
+        }
+        QStringList lastSkus;
+        QStringList lastInstructions;
+        for (int i=1; i<lines.size(); ++i)
+        {
+            const auto &line = lines[i];
+            if (line.startsWith("["))
+            {
+                if (!lastSkus.isEmpty() && !lastInstructions.isEmpty())
+                {
+                    for (const auto &sku : lastSkus)
+                    {
+                        skuPattern_customInstructions[sku] = lastInstructions.join(" ");
+                    }
+                }
+                lastSkus.clear();
+                lastInstructions.clear();
+                const auto &lineSkus = lines[i].mid(1, line.size()-2);
+                const auto &skus = lineSkus.split(",");
+                for (const auto &sku : skus)
+                {
+                    lastSkus << sku.trimmed();
+                }
+            }
+            else if (!lastSkus.isEmpty())
+            {
+                lastInstructions << line.trimmed();
+                if (!lastInstructions.last().endsWith("."))
+                {
+                    lastInstructions.last() += ".";
+                }
+            }
+        }
+        if (!lastSkus.isEmpty() && !lastInstructions.isEmpty())
+        {
+            for (const auto &sku : lastSkus)
+            {
+                skuPattern_customInstructions[sku] = lastInstructions.join(" ");
+            }
+        }
+    }
+    return skuPattern_customInstructions;
 }
 
 void MainWindow::_enableGenerateButtonIfValid()
@@ -327,6 +408,16 @@ void MainWindow::findValidateMandatoryFieldIds()
                     exception.title(),
                     exception.error());
     }
+}
+
+void MainWindow::viewFormatCustomInstructions()
+{
+    QMessageBox::information(
+        this,
+        tr("Format"),
+        tr("Custom instructions for every products\n"
+           "[SKUSTART1,SKUSTART2]\nCustom instructions for products that include the skus\n"
+           "[SKUSTART3,SKUSTART4]\nCustom instructions for products that include the skus"));
 }
 
 void MainWindow::viewAttributes()

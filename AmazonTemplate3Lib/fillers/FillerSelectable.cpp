@@ -335,9 +335,7 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
                 step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
                 {
                     QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
-                            .arg(networkError)
-                            .arg(reply)
-                            .arg(lastWhy);
+                            .arg(QString::number(networkError), reply, lastWhy);
                     templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, errorMsg);
                     return true;
                 };
@@ -380,9 +378,7 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
                      step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
                      {
                          QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
-                                 .arg(networkError)
-                                 .arg(reply)
-                                 .arg(lastWhy);
+                                 .arg(QString::number(networkError), reply, lastWhy);
                          templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, errorMsg);
                          return true;
                      };

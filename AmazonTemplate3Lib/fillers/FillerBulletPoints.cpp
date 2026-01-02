@@ -265,9 +265,7 @@ QCoro::Task<void> FillerBulletPoints::fill(
                 step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
                 {
                     QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
-                            .arg(networkError)
-                            .arg(reply)
-                            .arg(lastWhy);
+                            .arg(QString::number(networkError), reply, lastWhy);
                     for (int i=1; i<=5; ++i)
                     {
                         for (const auto &pattern : FillerBulletPoints::BULLET_POINT_PATTERNS)

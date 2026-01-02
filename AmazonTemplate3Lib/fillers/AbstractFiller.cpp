@@ -33,7 +33,7 @@ const QList<const AbstractFiller *> AbstractFiller::ALL_FILLERS_SORTED
         static const FillerBulletPoints fillerBulletPoints;
         allFillers << &fillerBulletPoints;
         static const FillerSelectable fillerSelectable;
-        allFillers << &fillerBulletPoints;
+        allFillers << &fillerSelectable;
         static const FillerKeywords fillerKeywords;
         allFillers << &fillerKeywords;
         static const FillerText fillerText;
@@ -50,6 +50,7 @@ QCoro::Task<void> AbstractFiller::fillValuesForAi(
         , const QString &langCodeFrom
         , Gender gender
         , Age age
+        , const QMap<QString, QString> &skuPattern_customInstructions
         , const QHash<QString, QHash<QString, QString>> &sku_fieldId_fromValues
         , QHash<QString, QMap<QString, QString>> sku_attribute_valuesForAi)
 {
@@ -72,6 +73,15 @@ QCoro::Task<void> AbstractFiller::fillValuesForAi(
                     if (!value.isEmpty())
                     {
                         sku_attribute_valuesForAi[sku][fieldId] = value;
+                    }
+                }
+                for (auto itPattern = skuPattern_customInstructions.begin();
+                     itPattern != skuPattern_customInstructions.end(); ++itPattern)
+                {
+                    const auto &pattern = itPattern.key();
+                    if (sku.contains(pattern))
+                    {
+                        sku_attribute_valuesForAi[sku]["Note"] += itPattern.value();
                     }
                 }
             }

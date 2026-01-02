@@ -45,7 +45,8 @@ TemplateFiller::TemplateFiller(
         const QString &workingDirCommon
         , const QString &templateFromPath
         , const QStringList &templateToPaths
-        , const QStringList &templateSourcePaths)
+        , const QStringList &templateSourcePaths
+        , const QMap<QString, QString> &skuPattern_customInstruction)
 {
     m_age = AbstractFiller::Adult;
     m_gender = AbstractFiller::UndefinedGender;
@@ -59,7 +60,8 @@ TemplateFiller::TemplateFiller(
     setTemplates(workingDirCommon
                  , templateFromPath
                  , templateToPaths
-                 , templateSourcePaths);
+                 , templateSourcePaths
+                 , skuPattern_customInstruction);
 }
 
 TemplateFiller::~TemplateFiller()
@@ -72,8 +74,10 @@ void TemplateFiller::setTemplates(
         const QString &commonSettingsDir
         , const QString &templateFromPath
         , const QStringList &templateToPaths
-        , const QStringList &templateSourcePaths)
+        , const QStringList &templateSourcePaths
+        , const QMap<QString, QString> &skuPattern_customInstructions)
 {
+    m_skuPattern_customInstructions = skuPattern_customInstructions;
     QXlsx::Document doc(templateFromPath);
     const auto &productType = _get_productType(doc); // TODO Exception empty file + ma
     if (productType.isEmpty())
@@ -735,6 +739,7 @@ QCoro::Task<void> TemplateFiller::fillValues()
                                              langCodeFrom,
                                              m_gender,
                                              m_age,
+                                             m_skuPattern_customInstructions,
                                              m_sku_fieldId_fromValues,
                                              m_sku_attribute_valuesForAi);
 

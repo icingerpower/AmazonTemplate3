@@ -26,8 +26,11 @@ class TemplateFiller
 public:
     static const QSet<QString> VALUES_MANDATORY;
     static const QHash<QString, QSet<QString>> SHEETS_MANDATORY;
-    TemplateFiller(const QString &workingDirCommon, const QString &templateFromPath
-                      , const QStringList &templateToPaths, const QStringList &templateSourcePaths);
+    TemplateFiller(const QString &workingDirCommon
+                   , const QString &templateFromPath
+                   , const QStringList &templateToPaths
+                   , const QStringList &templateSourcePaths
+                   , const QMap<QString, QString> &skuPattern_customInstruction);
     ~TemplateFiller();
     struct AttributesToValidate{
         QSet<QString> addedAi;
@@ -40,7 +43,8 @@ public:
     void setTemplates(const QString &commonSettingsDir
                       , const QString &templateFromPath
                       , const QStringList &templateToPaths
-                      , const QStringList &templateSourcePaths);
+                      , const QStringList &templateSourcePaths
+                      , const QMap<QString, QString> &skuPattern_customInstructions);
     void checkParentSkus();
     void checkKeywords();
     QHash<QString, QString> checkPreviewImages();
@@ -154,6 +158,7 @@ private:
     void _fillValuesSources();
     void _saveTemplates();
     QHash<QString, QString> m_sku_imagePreviewFilePath;
+    QMap<QString, QString> m_skuPattern_customInstructions;
 };
 
 #endif // TEMPLATEFILLER_H

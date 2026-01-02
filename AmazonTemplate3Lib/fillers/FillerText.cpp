@@ -36,7 +36,7 @@ bool FillerText::canFill(
     const FillerSelectable fillerSelectable;
     otherFillers << &fillerSelectable;
     const FillerTitle fillerTitle;
-    otherFillers << &fillerSelectable;
+    otherFillers << &fillerTitle;
     const FillerKeywords fillerKeywords;
     otherFillers << &fillerKeywords;
     for (const auto &filler : otherFillers)
@@ -203,12 +203,11 @@ QCoro::Task<void> FillerText::fill(
                     apply(reply, valFormatted);
                 }
             };
-            step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
+            step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](
+                    const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
             {
                 QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
-                        .arg(networkError)
-                        .arg(reply)
-                        .arg(lastWhy);
+                        .arg(QString::number(networkError), reply, lastWhy);
                 templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, errorMsg);
                 return true; 
             };
@@ -309,9 +308,7 @@ QCoro::Task<void> FillerText::fill(
             step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
             {
                 QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
-                        .arg(networkError)
-                        .arg(reply)
-                        .arg(lastWhy);
+                        .arg(QString::number(networkError), reply, lastWhy);
                 templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, errorMsg);
                 return true; 
             };

@@ -21,12 +21,14 @@ public:
     ~MainWindow();
 
     QSharedPointer<QSettings> settingsFolder() const;
+    QMap<QString, QString> get_skuPattern_customInstructions() const;
 
 public slots:
     void browseSourceMain();
     void baseControls();
     bool baseControlsWithoutPopup();
     void findValidateMandatoryFieldIds();
+    void viewFormatCustomInstructions();
     void viewAttributes();
     void extractProductInfos();
     void onApiKeyChanged(const QString &key);

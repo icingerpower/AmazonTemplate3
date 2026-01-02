@@ -32,6 +32,7 @@ public:
             , const QString &langCodeFrom
             , Gender gender
             , Age age
+            , const QMap<QString, QString> &skuPattern_customInstructions
             , const QHash<QString, QHash<QString, QString>> &sku_fieldId_fromValues
             , QHash<QString, QMap<QString, QString>> sku_attribute_valuesForAi
             );
