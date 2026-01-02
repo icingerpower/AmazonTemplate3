@@ -305,7 +305,20 @@ void TemplateFiller::checkKeywords()
     }
 }
 
-QHash<QString, QSet<QString>> TemplateFiller::_readKeywords(const QStringList &filePaths)
+QHash<QString, QSet<QString>> TemplateFiller::_readKeywords()
+{
+    const auto &keywordsFileInfos = m_workingDir.entryInfoList(
+                QStringList{"keywor*.txt", "Keywor*.txt"}, QDir::Files, QDir::Name);
+    QStringList keywordFilePaths;
+    for (const auto &fileInfo : keywordsFileInfos)
+    {
+        keywordFilePaths << fileInfo.absoluteFilePath();
+    }
+    return _readKeywords(keywordFilePaths);
+}
+
+QHash<QString, QSet<QString>> TemplateFiller::_readKeywords(
+        const QStringList &filePaths)
 {
     QHash<QString, QSet<QString>> countryCode_langCodes;
     for (const auto &filePath : filePaths)
@@ -732,7 +745,7 @@ QCoro::Task<void> TemplateFiller::fillValues()
         const auto &langCodeTo = _get_langCode(targetPath);
         const auto &marketplaceTo = _get_marketplace(docTo);
         const auto &productTypeTo = _get_productType(document);
-        QString keywords; // TODO
+
 
         for (const auto &filler : AbstractFiller::ALL_FILLERS_SORTED)
         {
@@ -757,7 +770,8 @@ QCoro::Task<void> TemplateFiller::fillValues()
                                 , langCodeFrom
                                 , countryCodeTo
                                 , langCodeTo
-                                , keywords
+                                , m_countryCode_langCode_keywords
+                                , m_skuPattern_countryCode_langCode_keywords
                                 , m_gender
                                 , m_age
                                 , m_sku_fieldId_fromValues

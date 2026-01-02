@@ -16,12 +16,13 @@
 #include "FillerSelectable.h"
 #include "FillerBulletPoints.h"
 #include "FillerTitle.h"
+#include "FillerKeywords.h"
 
 bool FillerText::canFill(
         const TemplateFiller *templateFiller
         , const Attribute *attribute
-        , const QString &marketplace
-        , const QString &fieldId) const
+        , const QString &marketplaceFrom
+        , const QString &fieldIdFrom) const
 {
     QList<const AbstractFiller *> otherFillers;
     const FillerCopy fillerCopy;
@@ -36,12 +37,14 @@ bool FillerText::canFill(
     otherFillers << &fillerSelectable;
     const FillerTitle fillerTitle;
     otherFillers << &fillerSelectable;
+    const FillerKeywords fillerKeywords;
+    otherFillers << &fillerKeywords;
     for (const auto &filler : otherFillers)
     {
         if (filler->canFill(templateFiller,
                             attribute,
-                            marketplace,
-                            fieldId))
+                            marketplaceFrom,
+                            fieldIdFrom))
         {
             return false;
         }
@@ -70,7 +73,8 @@ QCoro::Task<void> FillerText::fill(
         , const QString &langCodeFrom
         , const QString &countryCodeTo
         , const QString &langCodeTo
-        , const QString &keywords
+        , const QHash<QString, QHash<QString, QString>> &countryCode_langCode_keywords
+        , const QHash<QString, QHash<QString, QHash<QString, QString>>> &skuPattern_countryCode_langCode_keywords
         , Gender gender
         , Age age
         , const QHash<QString, QHash<QString, QString>> &sku_fieldId_fromValues

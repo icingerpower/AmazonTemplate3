@@ -116,6 +116,7 @@ private:
     void _selectTemplateSheet(QXlsx::Document &doc) const;
     void _selectValidValuesSheet(QXlsx::Document &doc) const;
     void _selectMandatorySheet(QXlsx::Document &doc) const;
+    QHash<QString, QSet<QString> > _readKeywords();
     QHash<QString, QSet<QString> > _readKeywords(const QStringList &filePaths);
     TemplateFiller::VersionAmz _getDocumentVersion(QXlsx::Document &document) const;
     int _getRowFieldId(VersionAmz version) const;

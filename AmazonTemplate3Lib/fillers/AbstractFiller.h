@@ -44,8 +44,8 @@ public:
 
     virtual bool canFill(const TemplateFiller *templateFiller
                          , const Attribute *attribute
-                         , const QString &marketplace
-                         , const QString &fieldId) const = 0;
+                         , const QString &marketplaceFrom
+                         , const QString &fieldIdFrom) const = 0;
     virtual QCoro::Task<void> fill(
             TemplateFiller *templateFiller
             , const QHash<QString, QHash<QString, QSet<QString>>> &parentSku_variation_skus
@@ -60,7 +60,8 @@ public:
             , const QString &langCodeFrom
             , const QString &countryCodeTo
             , const QString &langCodeTo
-            , const QString &keywords
+            , const QHash<QString, QHash<QString, QString>> &countryCode_langCode_keywords
+            , const QHash<QString, QHash<QString, QHash<QString, QString>>> &skuPattern_countryCode_langCode_keywords
             , Gender gender
             , Age age
             , const QHash<QString, QHash<QString, QString>> &sku_fieldId_fromValues

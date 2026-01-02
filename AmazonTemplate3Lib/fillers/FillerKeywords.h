@@ -1,9 +1,9 @@
-#ifndef FILLERCOPY_H
-#define FILLERCOPY_H
+#ifndef FILLERKEYWORDS_H
+#define FILLERKEYWORDS_H
 
 #include "AbstractFiller.h"
 
-class FillerCopy : public AbstractFiller
+class FillerKeywords : public AbstractFiller
 {
 public:
     bool canFill(const TemplateFiller *templateFiller
@@ -36,4 +36,4 @@ public:
             ) const override;
 };
 
-#endif // FILLERCOPY_H
+#endif // FILLERKEYWORDS_H

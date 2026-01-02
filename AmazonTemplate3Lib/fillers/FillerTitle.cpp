@@ -10,9 +10,9 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 
-bool FillerTitle::canFill(const TemplateFiller *templateFiller, const Attribute *attribute, const QString &marketplace, const QString &fieldId) const
+bool FillerTitle::canFill(const TemplateFiller *templateFiller, const Attribute *attribute, const QString &marketplaceFrom, const QString &fieldIdFrom) const
 {
-    return fieldId.startsWith("item_name");
+    return fieldIdFrom.startsWith("item_name");
 }
 
 // Static helper to avoid ICE in coroutine
@@ -97,7 +97,8 @@ QCoro::Task<void> FillerTitle::fill(
         , const QString &langCodeFrom
         , const QString &countryCodeTo
         , const QString &langCodeTo
-        , const QString &keywords
+        , const QHash<QString, QHash<QString, QString>> &countryCode_langCode_keywords
+        , const QHash<QString, QHash<QString, QHash<QString, QString>>> &skuPattern_countryCode_langCode_keywords
         , Gender gender
         , Age age
         , const QHash<QString, QHash<QString, QString>> &sku_fieldId_fromValues

@@ -7,11 +7,11 @@
 bool FillerCopy::canFill(
         const TemplateFiller *templateFiller
         , const Attribute *attribute
-        , const QString &marketplace
-        , const QString &fieldId) const
+        , const QString &marketplaceFrom
+        , const QString &fieldIdFrom) const
 {
     if (templateFiller->attributeFlagsTable()
-            ->hasFlag(marketplace, fieldId, Attribute::Copy))
+            ->hasFlag(marketplaceFrom, fieldIdFrom, Attribute::Copy))
     {
         return true;
     }
@@ -32,7 +32,8 @@ QCoro::Task<void> FillerCopy::fill(
         , const QString &langCodeFrom
         , const QString &countryCodeTo
         , const QString &langCodeTo
-        , const QString &keywords
+        , const QHash<QString, QHash<QString, QString>> &countryCode_langCode_keywords
+        , const QHash<QString, QHash<QString, QHash<QString, QString>>> &skuPattern_countryCode_langCode_keywords
         , Gender gender
         , Age age
         , const QHash<QString, QHash<QString, QString>> &sku_fieldId_fromValues

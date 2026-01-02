@@ -12,6 +12,7 @@
 #include "FillerSize.h"
 #include "FillerSelectable.h"
 #include "FillerBulletPoints.h"
+#include "FillerKeywords.h"
 #include "FillerText.h"
 #include "FillerTitle.h"
 #include "ExceptionTemplate.h"
@@ -33,6 +34,8 @@ const QList<const AbstractFiller *> AbstractFiller::ALL_FILLERS_SORTED
         allFillers << &fillerBulletPoints;
         static const FillerSelectable fillerSelectable;
         allFillers << &fillerBulletPoints;
+        static const FillerKeywords fillerKeywords;
+        allFillers << &fillerKeywords;
         static const FillerText fillerText;
         allFillers << &fillerText;
         static const FillerTitle fillerTitle;

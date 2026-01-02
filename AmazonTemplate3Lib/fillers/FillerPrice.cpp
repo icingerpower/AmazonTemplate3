@@ -1,8 +1,9 @@
 #include "FillerPrice.h"
 
-bool FillerPrice::canFill(const TemplateFiller *, const Attribute *attribute, const QString &, const QString &fieldId) const
+bool FillerPrice::canFill(const TemplateFiller *, const Attribute *attribute, const QString &marketplaceFrom, const QString &fieldIdFrom) const
 {
-    return fieldId.contains("price");
+    Q_UNUSED(marketplaceFrom)
+    return fieldIdFrom.contains("price");
 }
 
 QCoro::Task<void> FillerPrice::fill(
@@ -19,7 +20,8 @@ QCoro::Task<void> FillerPrice::fill(
         , const QString &langCodeFrom
         , const QString &countryCodeTo
         , const QString &langCodeTo
-        , const QString &keywords
+        , const QHash<QString, QHash<QString, QString>> &countryCode_langCode_keywords
+        , const QHash<QString, QHash<QString, QHash<QString, QString>>> &skuPattern_countryCode_langCode_keywords
         , Gender gender
         , Age age
         , const QHash<QString, QHash<QString, QString>> &sku_fieldId_fromValues

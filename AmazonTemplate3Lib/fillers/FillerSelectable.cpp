@@ -20,10 +20,10 @@
 bool FillerSelectable::canFill(
         const TemplateFiller *templateFiller
         , const Attribute *attribute
-        , const QString &marketplace
-        , const QString &fieldId) const
+        , const QString &marketplaceFrom
+        , const QString &fieldIdFrom) const
 {
-    return attribute->isChoice(marketplace);
+    return attribute->isChoice(marketplaceFrom);
 }
 
 QCoro::Task<void> FillerSelectable::fill(
@@ -40,7 +40,8 @@ QCoro::Task<void> FillerSelectable::fill(
         , const QString &langCodeFrom
         , const QString &countryCodeTo
         , const QString &langCodeTo
-        , const QString &keywords
+        , const QHash<QString, QHash<QString, QString>> &countryCode_langCode_keywords
+        , const QHash<QString, QHash<QString, QHash<QString, QString>>> &skuPattern_countryCode_langCode_keywords
         , Gender gender
         , Age age
         , const QHash<QString, QHash<QString, QString>> &sku_fieldId_fromValues
@@ -79,7 +80,8 @@ QCoro::Task<void> FillerSelectable::fill(
                         , langCodeFrom
                         , countryCodeTo
                         , langCodeTo
-                        , keywords
+                        , countryCode_langCode_keywords
+                        , skuPattern_countryCode_langCode_keywords
                         , gender
                         , age
                         , sku_fieldId_fromValues
@@ -105,7 +107,8 @@ QCoro::Task<void> FillerSelectable::fill(
                         , langCodeFrom
                         , countryCodeTo
                         , langCodeTo
-                        , keywords
+                        , countryCode_langCode_keywords
+                        , skuPattern_countryCode_langCode_keywords
                         , gender
                         , age
                         , sku_fieldId_fromValues
@@ -229,7 +232,8 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
         , const QString &langCodeFrom
         , const QString &countryCodeTo
         , const QString &langCodeTo
-        , const QString &keywords
+        , const QHash<QString, QHash<QString, QString>> &countryCode_langCode_keywords
+        , const QHash<QString, QHash<QString, QHash<QString, QString>>> &skuPattern_countryCode_langCode_keywords
         , Gender gender
         , Age age
         , const QHash<QString, QHash<QString, QString>> &sku_fieldId_fromValues
@@ -426,7 +430,8 @@ QCoro::Task<void> FillerSelectable::_fillDifferentLangCountry(
         , const QString &langCodeFrom
         , const QString &countryCodeTo
         , const QString &langCodeTo
-        , const QString &keywords
+        , const QHash<QString, QHash<QString, QString>> &countryCode_langCode_keywords
+        , const QHash<QString, QHash<QString, QHash<QString, QString>>> &skuPattern_countryCode_langCode_keywords
         , Gender gender
         , Age age
         , const QHash<QString, QHash<QString, QString>> &sku_fieldId_fromValues

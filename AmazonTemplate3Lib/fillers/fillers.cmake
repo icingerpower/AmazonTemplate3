@@ -13,6 +13,8 @@ SET(FILLER_FILES
     ${CMAKE_CURRENT_LIST_DIR}/FillerTitle.h
     ${CMAKE_CURRENT_LIST_DIR}/FillerBulletPoints.cpp
     ${CMAKE_CURRENT_LIST_DIR}/FillerBulletPoints.h
+    ${CMAKE_CURRENT_LIST_DIR}/FillerKeywords.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/FillerKeywords.h
     ${CMAKE_CURRENT_LIST_DIR}/FillerText.cpp
     ${CMAKE_CURRENT_LIST_DIR}/FillerText.h
 )
