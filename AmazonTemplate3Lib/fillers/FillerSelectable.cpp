@@ -14,6 +14,7 @@
 #include "ExceptionTemplate.h"
 
 #include "FillerSelectable.h"
+#include "AiFailureTable.h"
 
 
 bool FillerSelectable::canFill(
@@ -327,7 +328,20 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
                 step->apply = [&](const QString &reply) {
                     phase1Result = reply;
                 };
+                step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
+                {
+                    QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
+                            .arg(networkError)
+                            .arg(reply)
+                            .arg(lastWhy);
+                    templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, errorMsg);
+                    return true;
+                };
 
+                for (const auto &step : steps)
+                {
+                    qDebug() << "--\nFillerSelectable::fill PHASE 1:" << step->getPrompt(0);
+                }
                 co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
                  
                  // phase1Result is the JSON string if successful/agreed
@@ -359,7 +373,20 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
                      step->apply = [&](const QString &reply) {
                         phase2Result = reply;
                      };
+                     step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
+                     {
+                         QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
+                                 .arg(networkError)
+                                 .arg(reply)
+                                 .arg(lastWhy);
+                         templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, errorMsg);
+                         return true;
+                     };
                      
+                     for (const auto &step : steps)
+                     {
+                         qDebug() << "--\nFillerSelectable::fill PHASE 2:" << step->getPrompt(0);
+                     }
                      co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
                      
                      if (!phase2Result.isEmpty())

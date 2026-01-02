@@ -19,6 +19,7 @@ class AttributeEquivalentTable;
 class AttributeFlagsTable;
 class AttributePossibleMissingTable;
 class AttributeValueReplacedTable;
+class AiFailureTable;
 
 class TemplateFiller
 {
@@ -81,6 +82,8 @@ public:
     QSharedPointer<QSettings> settingsCommon() const; // Settings of current working directory
     QSharedPointer<QSettings> settingsProducts() const; // Settings of current working directory
 
+    AiFailureTable *aiFailureTable() const;
+
 private:
     QHash<QString, QHash<QString, QString>> m_countryCode_langCode_keywords;
     QHash<QString, QHash<QString, QHash<QString, QString>>> m_skuPattern_countryCode_langCode_keywords;
@@ -91,6 +94,7 @@ private:
     QMetaObject::Connection m_connectionFlagsTable;
     AttributePossibleMissingTable *m_attributePossibleMissingTable;
     AttributeValueReplacedTable *m_attributeValueReplacedTable;
+    AiFailureTable *m_aiFailureTable;
     void _clearAttributeManagers();
     QString m_productType;
     AbstractFiller::Age m_age;

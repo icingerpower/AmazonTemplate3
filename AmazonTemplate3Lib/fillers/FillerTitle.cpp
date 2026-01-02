@@ -5,6 +5,7 @@
 #include "FillerSize.h"
 
 #include "FillerTitle.h"
+#include "AiFailureTable.h"
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
@@ -125,18 +126,36 @@ QCoro::Task<void> FillerTitle::fill(
             {
                 if (sku_fieldId_toValueslangCommon[sku].contains(fieldIdFrom))
                 {
-                    sku_fieldId_toValueslangCommon[sku][fieldIdTo]
-                            = sku_fieldId_toValueslangCommon[sku][fieldIdFrom];
+                    recordAllMarketplace(
+                                templateFiller
+                                , marketplaceTo
+                                , fieldIdTo
+                                , sku_fieldId_toValueslangCommon[sku]
+                                , sku_fieldId_toValueslangCommon[sku][fieldIdFrom]);
                 }
                 else if (langCodeFrom == langCodeTo)
                 {
-                    sku_fieldId_toValueslangCommon[sku][fieldIdTo] = titleFrom;
+                    recordAllMarketplace(
+                                templateFiller
+                                , marketplaceTo
+                                , fieldIdTo
+                                , sku_fieldId_toValueslangCommon[sku]
+                                , titleFrom);
                 }
             }
             if (!sku_fieldId_toValueslangCommon[sku].contains(fieldIdTo))
             {
                 const QString settingsFileName = "aiTitleTranslations.ini";
                 auto stepTranslation = createTranslationStep(titleFrom, langCodeTo);
+                stepTranslation->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
+                {
+                    QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
+                            .arg(networkError)
+                            .arg(reply)
+                            .arg(lastWhy);
+                    templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, errorMsg);
+                    return true; 
+                };
                 QString titleTranslated;
                 
                 auto parseAndSetTitle = [&](const QString &jsonReply) -> bool {
@@ -170,6 +189,7 @@ QCoro::Task<void> FillerTitle::fill(
                     
                     QList<QSharedPointer<OpenAi2::StepMultipleAskAi>> steps;
                     steps.append(stepTranslation);
+                    qDebug() << "--\nFillerTitle::fill translating - " + titleFrom + ":" << stepTranslation->getPrompt(0);
                     co_await OpenAi2::instance()->askGptMultipleTimeAiCoro(steps, "gpt-5.2");
                 }
                 
@@ -179,7 +199,12 @@ QCoro::Task<void> FillerTitle::fill(
                     const auto &skusSameTitle = titleFrom_skus[titleFrom];
                     for (const auto &curSku : skusSameTitle)
                     {
-                        sku_fieldId_toValueslangCommon[curSku][fieldIdTo] = titleTranslated;
+                        recordAllMarketplace(
+                                    templateFiller
+                                    , marketplaceTo
+                                    , fieldIdTo
+                                    , sku_fieldId_toValueslangCommon[sku]
+                                    , titleTranslated);
                     }
                 }
             }

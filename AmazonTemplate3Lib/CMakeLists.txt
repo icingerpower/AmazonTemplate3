@@ -79,6 +79,8 @@ add_library(AmazonTemplate3Lib STATIC
   AttributePossibleMissingTable.cpp
   AttributeEquivalentTable.h
   AttributeEquivalentTable.cpp
+  AiFailureTable.h
+  AiFailureTable.cpp
   ${FILLER_FILES}
 )
 
@@ -123,6 +125,8 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   AttributePossibleMissingTable.cpp
   AttributeValueReplacedTable.h
   AttributeValueReplacedTable.cpp
+  AiFailureTable.h
+  AiFailureTable.cpp
   ${FILLER_FILES}
 )
 

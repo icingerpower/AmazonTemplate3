@@ -352,6 +352,17 @@ static QSharedPointer<OpenAi2::StepMultipleAskAi> createClassificationStep(
         }
         return false;
     };
+    stepClassification->onLastError = [](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
+    {
+        ExceptionTemplate exception;
+        QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
+                .arg(QString::number(networkError)
+                     , reply
+                     , lastWhy);
+        exception.setInfos(QObject::tr("AI Product Type Classification Failed"), errorMsg);
+        exception.raise();
+        return true;
+    };
     return stepClassification;
 }
 
@@ -414,6 +425,7 @@ QCoro::Task<void> FillerSize::askAiToUpdateSettingsForProductType(
     QList<QSharedPointer<OpenAi2::StepMultipleAskAi>> steps;
     steps.append(stepClassification);
 
+    qDebug() << "--\nFillerSize::askAiToUpdateSettingsForProductType:" << stepClassification->getPrompt(0);
     // Execute step
     co_await OpenAi2::instance()->askGptMultipleTimeAiCoro(steps, "gpt-5.2");
     co_return;

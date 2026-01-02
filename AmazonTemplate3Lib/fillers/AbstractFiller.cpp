@@ -14,6 +14,7 @@
 #include "FillerBulletPoints.h"
 #include "FillerText.h"
 #include "FillerTitle.h"
+#include "ExceptionTemplate.h"
 
 
 #include "AbstractFiller.h"
@@ -180,6 +181,16 @@ QCoro::Task<void> AbstractFiller::fillValuesForAi(
             step->validate = validateCallback;
             step->apply = makeApplyCallback(imagePath);
             step->chooseBest = OpenAi2::CHOOSE_ALL_SAME_OR_EMPTY; // Only 1 reply needed effectively
+            step->onLastError = [imagePath](const QString &, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool {
+                ExceptionTemplate exception;
+                exception.setInfos(QObject::tr("AI Error"),
+                                   QObject::tr("The AI failed to describe the image: ") + imagePath + "\n" +
+                                   QObject::tr("Network Error: %1").arg(networkError) + "\n" +
+                                   QObject::tr("Last Reason: ") + lastWhy + "\n" +
+                                   QObject::tr("If this error persists, it might mean we are blocked by the AI provider (too many queries). Please wait a few hours."));
+                exception.raise();
+                return true;
+            };
 
             steps << step;
         }
@@ -187,6 +198,10 @@ QCoro::Task<void> AbstractFiller::fillValuesForAi(
 
     if (!steps.isEmpty())
     {
+        for (const auto &step : steps)
+        {
+            qDebug() << "--\nAbstractFiller::fillValuesForAi:" << step->getPrompt(0);
+        }
         co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
     }
 

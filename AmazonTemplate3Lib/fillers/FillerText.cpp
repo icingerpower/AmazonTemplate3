@@ -8,6 +8,7 @@
 #include "AttributeFlagsTable.h"
 
 #include "FillerText.h"
+#include "AiFailureTable.h"
 
 #include "FillerCopy.h"
 #include "FillerPrice.h"
@@ -48,6 +49,13 @@ bool FillerText::canFill(
     return true;
 }
 
+const QHash<QString, int> FillerText::FIELD_ID_MAX_CHAR
+{
+    {"color#1.value", 40}
+    , {"item_type_name#1.value", 40}
+    , {"fabric_type#1.value", 100}
+};
+
 QCoro::Task<void> FillerText::fill(
         TemplateFiller *templateFiller
         , const QHash<QString, QHash<QString, QSet<QString>>> &parentSku_variation_skus
@@ -81,9 +89,9 @@ QCoro::Task<void> FillerText::fill(
             if (fieldId_fromValues.contains(fieldIdFrom) && !fieldId_fromValues[fieldIdFrom].isEmpty())
             {
                 const auto &curValue = it.value()[fieldIdFrom];
-                sku_fieldId_toValues[sku][fieldIdTo] = it.value()[curValue];
-                sku_fieldId_toValueslangCommon[sku][fieldIdTo] = it.value()[curValue];
-                sku_fieldId_toValueslangCommon[sku][fieldIdFrom] = it.value()[curValue];
+                sku_fieldId_toValues[sku][fieldIdTo] = curValue;
+                recordAllMarketplace(
+                            templateFiller, marketplaceTo, fieldIdTo, sku_fieldId_toValueslangCommon[sku], curValue);
             }
         }
     }
@@ -114,7 +122,7 @@ QCoro::Task<void> FillerText::fill(
             valueId += "_" + sku_parentSku[sku] + "_" + sku_variation[sku];
         }
         const QMap<QString, QString> &valuesForAi = sku_attribute_valuesForAi[sku];
-        const auto &parseAndValidate = [](const QString &reply, QString &valFormatted) -> bool
+        const auto &parseAndValidate = [&fieldIdTo](const QString &reply, QString &valFormatted) -> bool
         {
             QJsonParseError error;
             auto json = QJsonDocument::fromJson(reply.toUtf8(), &error);
@@ -132,6 +140,11 @@ QCoro::Task<void> FillerText::fill(
                 return false;
             }
             valFormatted = obj["value"].toString();
+            if (FIELD_ID_MAX_CHAR.contains(fieldIdTo)
+                    && valFormatted.size() > FIELD_ID_MAX_CHAR[fieldIdTo])
+            {
+                return false;
+            }
             return !valFormatted.isEmpty();
         };
 
@@ -141,8 +154,7 @@ QCoro::Task<void> FillerText::fill(
              sku_fieldId_toValues[sku][fieldIdTo] = valFormatted;
              recordAllMarketplace(
                          templateFiller, marketplaceTo, fieldIdTo, sku_fieldId_toValueslangCommon[sku], valFormatted);
-             recordAllMarketplace(
-                         templateFiller, marketplaceTo, fieldIdTo, sku_fieldId_toValues[sku], valFormatted);
+             sku_fieldId_toValues[sku][fieldIdTo] = valFormatted;
         };
         if (templateFiller->hasAiValue(settingsFileName, valueId))
         {
@@ -187,8 +199,18 @@ QCoro::Task<void> FillerText::fill(
                     apply(reply, valFormatted);
                 }
             };
+            step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
+            {
+                QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
+                        .arg(networkError)
+                        .arg(reply)
+                        .arg(lastWhy);
+                templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, errorMsg);
+                return true; 
+            };
             QList<QSharedPointer<OpenAi2::StepMultipleAsk>> steps;
             steps << step;
+            qDebug() << "--\nFillerText::fill no valueFrom:" << step->getPrompt(0);
             co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
         }
         else
@@ -212,7 +234,14 @@ QCoro::Task<void> FillerText::fill(
             }
             else
             {
-                prompt += "Write a short text for this field. If the field is likely limited to 30-50 characters, just write a short set of words.";
+                if (FIELD_ID_MAX_CHAR.contains(fieldIdTo))
+                {
+                    prompt += "Write a short set of words for this field. Under " + QString::number(FIELD_ID_MAX_CHAR[fieldIdTo]) + " characters.";
+                }
+                else
+                {
+                    prompt += "Write a short text for this field.";
+                }
             }
             prompt += "\nOutput a JSON object with the key \"value\" containing the generated text.";
 
@@ -273,8 +302,18 @@ QCoro::Task<void> FillerText::fill(
                     apply(reply, valFormatted);
                 }
             };
+            step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
+            {
+                QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
+                        .arg(networkError)
+                        .arg(reply)
+                        .arg(lastWhy);
+                templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, errorMsg);
+                return true; 
+            };
             QList<QSharedPointer<OpenAi2::StepMultipleAsk>> steps;
             steps << step;
+            qDebug() << "--\nFillerText::fill with valueFrom (translate):" << step->getPrompt(0);
             co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
         }
     }

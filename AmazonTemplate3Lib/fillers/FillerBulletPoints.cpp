@@ -4,6 +4,7 @@
 #include "../../common/openai/OpenAi2.h"
 #include "TemplateFiller.h"
 #include "FillerBulletPoints.h"
+#include "AiFailureTable.h"
 
 static QSharedPointer<OpenAi2::StepMultipleAsk> createBulletPointsStep(
         const QString &id
@@ -189,8 +190,12 @@ QCoro::Task<void> FillerBulletPoints::fill(
                 if (sku_fieldId_fromValues[sku].contains(curFieldId)
                         && !sku_fieldId_fromValues[sku][curFieldId].isEmpty())
                 {
-                    sku_fieldId_toValueslangCommon[sku][curFieldId] = sku_fieldId_fromValues[sku][curFieldId];
-
+                    recordAllMarketplace(
+                                templateFiller
+                                , marketplaceTo
+                                , curFieldId
+                                , sku_fieldId_toValueslangCommon[sku]
+                                , sku_fieldId_fromValues[sku][curFieldId]);
                 }
                 if (sku_fieldId_toValueslangCommon[sku].contains(curFieldId)
                         && !sku_fieldId_toValueslangCommon[sku][curFieldId].isEmpty())
@@ -256,9 +261,25 @@ QCoro::Task<void> FillerBulletPoints::fill(
                 step->apply = [&](const QString &reply) {
                     finalReply = reply;
                 };
+                step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
+                {
+                    QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
+                            .arg(networkError)
+                            .arg(reply)
+                            .arg(lastWhy);
+                    for (int i=1; i<=5; ++i)
+                    {
+                        for (const auto &pattern : FillerBulletPoints::BULLET_POINT_PATTERNS)
+                        {
+                            templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, pattern.arg(i), errorMsg);
+                        }
+                    }
+                    return true;
+                };
                 
                 QList<QSharedPointer<OpenAi2::StepMultipleAsk>> steps;
                 steps.append(step);
+                qDebug() << "--\nAbstractFiller::fillValuesForAi:" << step->getPrompt(0);
                 co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
                 
                 if (!finalReply.isEmpty() && step->validate(finalReply, ""))
@@ -290,12 +311,13 @@ QCoro::Task<void> FillerBulletPoints::fill(
                      
                      for (const auto &pattern : BULLET_POINT_PATTERNS)
                      {
-                         QString fid = pattern.arg(i);
+                         const QString &bulletFieldid = pattern.arg(i);
                          // We assign to all patterns effectively ensuring whichever is used downstream picks it up?
                          // Or we should only assign if we know which one is valid?
                          // The prompt says "for all pattern of BULLET_POINT_PATTERNS".
                          
-                         sku_fieldId_toValueslangCommon[sku][fid] = bulletPoints[i-1];
+                         recordAllMarketplace(
+                                     templateFiller, marketplaceTo, bulletFieldid, sku_fieldId_toValueslangCommon[sku], bulletPoints[i-1]);
                      }
                 }
             }

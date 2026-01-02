@@ -576,7 +576,10 @@ void AttributeEquivalentTable::_loadFromFile()
             // Skip first line (header)
             for (int i=1; i<lines.size(); ++i)
             {
-                if (lines[i].trimmed().isEmpty()) continue;
+                if (lines[i].trimmed().isEmpty())
+                {
+                    continue;
+                }
                 
                 // Assuming standard comma separation for the CSV columns themselves
                 // We need a definition for COL_SEP or use "," directly. 

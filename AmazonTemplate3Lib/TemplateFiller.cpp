@@ -5,6 +5,7 @@
 #include "AttributesMandatoryAiTable.h"
 #include "AttributesMandatoryTable.h"
 
+#include "AiFailureTable.h"
 #include "AttributeEquivalentTable.h"
 #include "AttributeFlagsTable.h"
 #include "AttributePossibleMissingTable.h"
@@ -54,6 +55,7 @@ TemplateFiller::TemplateFiller(
     m_attributeFlagsTable = nullptr;
     m_attributePossibleMissingTable = nullptr;
     m_attributeValueReplacedTable = nullptr;
+    m_aiFailureTable = nullptr;
     setTemplates(workingDirCommon
                  , templateFromPath
                  , templateToPaths
@@ -122,6 +124,7 @@ void TemplateFiller::setTemplates(
             commonSettingsDir, productType, fieldIdMandatory, previousFieldIdMandatory, all_fieldId_index};
     m_attributeEquivalentTable = new AttributeEquivalentTable{commonSettingsDir};
     m_attributeFlagsTable = new AttributeFlagsTable{commonSettingsDir};
+    m_aiFailureTable = new AiFailureTable{};
     m_marketplaceFrom = _get_marketplaceFrom();
     m_attributeFlagsTable->recordAttributeNotRecordedYet(m_marketplaceFrom, fieldIdMandatory);
     m_attributeFlagsTable->recordAttributeNotRecordedYet(m_marketplaceFrom, m_mandatoryAttributesTable->getMandatoryIds());
@@ -167,6 +170,11 @@ void TemplateFiller::_clearAttributeManagers()
         m_attributeValueReplacedTable->deleteLater();
     }
     m_attributeValueReplacedTable = nullptr;
+    if (m_aiFailureTable != nullptr)
+    {
+        m_aiFailureTable->deleteLater();
+    }
+    m_aiFailureTable = nullptr;
 }
 
 const QString &TemplateFiller::marketplaceFrom() const
@@ -991,6 +999,11 @@ QSharedPointer<QSettings> TemplateFiller::settingsProducts() const
 {
     const auto &settingsPath = m_workingDir.absoluteFilePath("settings.ini");
     return QSharedPointer<QSettings>::create(settingsPath, QSettings::IniFormat);
+}
+
+AiFailureTable *TemplateFiller::aiFailureTable() const
+{
+    return m_aiFailureTable;
 }
 
 QSharedPointer<QSettings> TemplateFiller::settingsCommon() const
