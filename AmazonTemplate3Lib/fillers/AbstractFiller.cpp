@@ -45,6 +45,7 @@ const QList<const AbstractFiller *> AbstractFiller::ALL_FILLERS_SORTED
 
 QCoro::Task<void> AbstractFiller::fillValuesForAi(
         TemplateFiller *templateFiller
+        , const QHash<QString, QHash<QString, QSet<QString>>> &parentSku_variation_skus
         , const QString &productType
         , const QString &countryCodeFrom
         , const QString &langCodeFrom
@@ -52,16 +53,15 @@ QCoro::Task<void> AbstractFiller::fillValuesForAi(
         , Age age
         , const QMap<QString, QString> &skuPattern_customInstructions
         , const QHash<QString, QHash<QString, QString>> &sku_fieldId_fromValues
-        , QHash<QString, QMap<QString, QString>> sku_attribute_valuesForAi)
+        , QHash<QString, QMap<QString, QString>> &sku_attribute_valuesForAi)
 {
     const QString settingsFileName{"aiImageDescriptions.ini"};
     auto attributeFlagsTable = templateFiller->attributeFlagsTable();
     const auto &fieldIds = templateFiller->mandatoryAttributesTable()->getMandatoryIds();
-    const auto &marketplaceFrom = templateFiller->marketplaceFrom();
     for (const auto &fieldId : fieldIds)
     {
         if (attributeFlagsTable->hasFlag(
-                    marketplaceFrom, fieldId, Attribute::ForCustomInstructions))
+                    Attribute::AMAZON_V02, fieldId, Attribute::ForCustomInstructions))
         {
             for (auto itSku = sku_fieldId_fromValues.begin();
                  itSku != sku_fieldId_fromValues.end(); ++itSku)
@@ -87,7 +87,33 @@ QCoro::Task<void> AbstractFiller::fillValuesForAi(
             }
         }
     }
-    const auto &sku_imagePreviewFilePath = templateFiller->sku_imagePreviewFilePath();
+    auto sku_imagePreviewFilePath = templateFiller->sku_imagePreviewFilePath();
+    for (auto itParent = parentSku_variation_skus.begin();
+         itParent != parentSku_variation_skus.end(); ++itParent)
+    {
+        QSet<QString> skusToUpdate;
+        QString imagePreviewFilePath;
+        for (auto itVar = itParent.value().begin();
+             itVar != itParent.value().end(); ++itVar)
+        {
+            for (const auto &sku : itVar.value())
+            {
+                if (sku_imagePreviewFilePath.contains(sku))
+                {
+                    imagePreviewFilePath = sku_imagePreviewFilePath[sku];
+                }
+                else
+                {
+                    skusToUpdate.insert(sku);
+                }
+            }
+        }
+        Q_ASSERT(!imagePreviewFilePath.isEmpty());
+        for (const auto &skuToUpdate : skusToUpdate)
+        {
+            sku_imagePreviewFilePath[skuToUpdate] = imagePreviewFilePath;
+        }
+    }
     QHash<QString, QString> imagePath_attributesForAi;
     QHash<QString, QString> imagePath_aiReply;
     auto validateCallback = [](const QString &gptReply, const QString &lastWhy) -> bool{
@@ -157,7 +183,7 @@ QCoro::Task<void> AbstractFiller::fillValuesForAi(
             imagePath_attributesForAi[imagePath] += " language)";
         }
         imagePath_attributesForAi[imagePath] += ": ";
-        imagePath_attributesForAi[imagePath] += attributesForAi.join(", ");
+        imagePath_attributesForAi[imagePath] += attributesForAi.join(", "); // TODO cedric, not well retrieved / filled
     }
     QList<QSharedPointer<OpenAi2::StepMultipleAsk>> steps;
     const auto &imagePaths = imagePath_attributesForAi.keys();
@@ -227,6 +253,27 @@ QCoro::Task<void> AbstractFiller::fillValuesForAi(
         {
             sku_attribute_valuesForAi[sku]["0_ai_description"] = imagePath_aiReply[imagePath];
         }
+        else
+        {
+            Q_ASSERT(false);
+        }
+    }
+    for (auto itParent = parentSku_variation_skus.cbegin();
+         itParent != parentSku_variation_skus.cend(); ++itParent)
+    {
+        const auto &skuParent = itParent.key();
+        for (auto itVar = itParent.value().cbegin();
+             itVar != itParent.value().cend(); ++itVar)
+        {
+            for (const auto &sku : itVar.value())
+            {
+                const auto &imagePath = sku_imagePreviewFilePath[sku];
+                sku_attribute_valuesForAi[skuParent]["0_ai_description"]
+                        = imagePath_aiReply[imagePath];
+                break;
+            }
+            break;
+        }
     }
     co_return;
 }
@@ -244,4 +291,28 @@ void AbstractFiller::recordAllMarketplace(
     {
         fieldId_values[curFieldId] = value;
     }
+}
+
+QString AbstractFiller::getValueId(
+        const QString &marketplaceTo
+        , const QString &countryCodeTo
+        , const QString &langCodeTo
+        , bool allSameValue
+        , bool childSameValue
+        , const QString &parentSku
+        , const QString &variation
+        , const QString &fieldIdTo) const
+{
+    QString valueId = "all_" + marketplaceTo + "_" + countryCodeTo + "_" + langCodeTo;
+    if (!allSameValue && childSameValue)
+    {
+        valueId += "_" + parentSku;
+    }
+    if (!allSameValue && !childSameValue)
+    {
+        valueId += "_" + parentSku + "_" + variation;
+    }
+    // Add fieldIdTo to unique ID to avoid collisions between fields
+    valueId += "_" + fieldIdTo;
+    return valueId;
 }

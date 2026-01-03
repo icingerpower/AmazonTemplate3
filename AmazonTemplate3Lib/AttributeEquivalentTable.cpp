@@ -8,6 +8,7 @@
 
 #include "AttributeEquivalentTable.h"
 #include "Attribute.h"
+#include "ExceptionTemplate.h"
 
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -129,6 +130,7 @@ void AttributeEquivalentTable::recordAttribute(
         }
         equivalentsList.sort();
         newRow << equivalentsList.join(CELL_SEP);
+        Q_ASSERT(!newRow.last().contains("Amazon V02"));
         beginInsertRows(QModelIndex{}, 0, 0);
         m_listOfStringList.insert(0, newRow);
         _saveInFile();
@@ -203,6 +205,7 @@ const QString &AttributeEquivalentTable::getEquivalentValue(
 QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
         const QString &fieldIdAmzV02, const QString &value, const Attribute *attribute)
 {
+    qDebug() << "parseAndValidated::askAiEquivalentValues..." << fieldIdAmzV02 << value;
     const auto &marketplace_countryCode_langCode_category_possibleValues
             = attribute->marketplace_countryCode_langCode_category_possibleValues();
    if (marketplace_countryCode_langCode_category_possibleValues.size() == 0)
@@ -211,8 +214,42 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
        co_return;
    }
     
+    struct ValidationGroup {
+        QString label;
+        QSet<QString> allowedValues;
+    };
+    QList<ValidationGroup> choiceGroups;
+
+    QStringList marketplaces = marketplace_countryCode_langCode_category_possibleValues.keys();
+    std::sort(marketplaces.begin(), marketplaces.end());
+    for (const auto &marketplace : marketplaces)
+    {
+        const auto &countryMap = marketplace_countryCode_langCode_category_possibleValues[marketplace];
+        QStringList countries = countryMap.keys();
+        std::sort(countries.begin(), countries.end());
+        for (const auto &country : countries)
+        {
+             const auto &langMap = countryMap[country];
+             QStringList langs = langMap.keys();
+             std::sort(langs.begin(), langs.end());
+             for (const auto &lang : langs)
+             {
+                  const auto &catMap = langMap[lang];
+                  QSet<QString> allValues;
+                  const auto &categories = catMap.keys();
+                  for(const auto &cat : categories)
+                  {
+                      allValues.unite(catMap[cat]);
+                  }
+                  
+                  QString label = QString(" - %1-%2-%3: ").arg(marketplace, country, lang);
+                  choiceGroups.append({label, allValues});
+             }
+        }
+    }
+
     // Prepare AI prompts
-    auto buildPrompt = [fieldIdAmzV02, value, marketplace_countryCode_langCode_category_possibleValues](int) -> QString {
+    auto buildPrompt = [fieldIdAmzV02, value, choiceGroups](int) -> QString {
         QStringList lines;
         lines << "You are helping translate/map Amazon attribute values."
               << "- For fieldId \"" + fieldIdAmzV02 + "\" with value \"" + value + "\", tell me, for each marketplace-country-lang below, the exact value to select."
@@ -221,39 +258,14 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
               << ""
               << "Allowed values per country-lang:";
 
-        QStringList marketplaces = marketplace_countryCode_langCode_category_possibleValues.keys();
-        std::sort(marketplaces.begin(), marketplaces.end());
-        for (const auto &marketplace : marketplaces)
+        for (const auto &group : choiceGroups)
         {
-            const auto &countryMap = marketplace_countryCode_langCode_category_possibleValues[marketplace];
-            QStringList countries = countryMap.keys();
-            std::sort(countries.begin(), countries.end());
-            for (const auto &country : countries)
-            {
-                 const auto &langMap = countryMap[country];
-                 QStringList langs = langMap.keys();
-                 std::sort(langs.begin(), langs.end());
-                 for (const auto &lang : langs)
-                 {
-                      const auto &catMap = langMap[lang];
-                      // Assuming we merge all categories or just take first? 
-                      // The previous code example iterated over "countryLang".
-                      // Here we iterate all.
-                      QSet<QString> allValues;
-                      const auto &categories = catMap.keys();
-                      for(const auto &cat : categories)
-                      {
-                          allValues.unite(catMap[cat]);
-                      }
-                      
-                      QStringList valuesList = allValues.values();
-                      std::sort(valuesList.begin(), valuesList.end());
-                      
-                      QString line = QString(" - %1-%2-%3: ").arg(marketplace, country, lang);
-                      line += valuesList.isEmpty() ? "(none)" : valuesList.join(", ");
-                      lines << line;
-                 }
-            }
+             QStringList valuesList = group.allowedValues.values();
+             std::sort(valuesList.begin(), valuesList.end());
+             
+             QString line = group.label;
+             line += valuesList.isEmpty() ? "(none)" : valuesList.join(", ");
+             lines << line;
         }
 
         lines << ""
@@ -297,10 +309,50 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
         return result;
     };
     
-    auto validateReply = [parseReply](const QString &r, const QString &) -> bool {
-        // Must contain at least one value if input value is not empty?
-        // Or at least look like the format
-        return r.contains("{") && r.contains("}");
+    auto validateReply = [parseReply, choiceGroups](const QString &r, const QString &) -> bool {
+        // Must check that in the list, there is at least one value of each QStringList valuesList = allValues.values(); that is created
+        if (r.contains("Amazon V")) return false;
+        if (r.contains(": ")) return false;
+        if (!r.contains("{") || !r.contains("}")) return false;
+        
+        QSet<QString> repliedValues = parseReply(r);
+        
+        // We need to check case-insensitive? The prompt assumes exact string return but mentions "case-insensitive match".
+        // The user said: "This will allow to avoid the AI that forget to pick one value in the list or don't reply exactly with one of the choices, may be changing the case"
+        // So we should probably check if we can match one value for EACH group.
+        
+        for (const auto &group : choiceGroups)
+        {
+            if (group.allowedValues.isEmpty()) continue; // If no allowed values, we can't really enforce selection? Or we expect (none)?
+            
+            bool found = false;
+            for (const auto &val : repliedValues)
+            {
+                 // Check exact match first
+                 if (group.allowedValues.contains(val))
+                 {
+                     found = true;
+                     break;
+                 }
+                 // Check case insensitive
+                 for (const auto &allowed : group.allowedValues)
+                 {
+                     if (allowed.compare(val, Qt::CaseInsensitive) == 0)
+                     {
+                         found = true;
+                         break;
+                     }
+                 }
+                 if (found) break;
+            }
+            
+            if (!found) {
+                // qWarning() << "Validation failed: No valid value found for group" << group.label;
+                return false;
+            }
+        }
+        
+        return true;
     };
     
     auto success = QSharedPointer<bool>::create(false);
@@ -314,7 +366,7 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
         step->name = "Attribute equivalence Phase 1 (2x unanimous)";
         step->neededReplies = 2;
         step->cachingKey = step->id + "_v1";
-        step->maxRetries = 3;
+        step->maxRetries = 10;
         step->gptModel = "gpt-5.2";
         step->getPrompt = buildPrompt;
         step->validate = validateReply;
@@ -342,7 +394,7 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
         step->name = "Attribute equivalence Phase 2 (3x AI choose)";
         step->neededReplies = 3;
         step->cachingKey = step->id + "_v1";
-        step->maxRetries = 3;
+        step->maxRetries = 10;
         step->gptModel = "gpt-5.2";
         step->getPrompt = buildPrompt;
         step->validate = validateReply;
@@ -369,6 +421,14 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
                 recordAttribute(fieldIdAmzV02, *resultingValues);
              }
         };
+        step->onLastError = [fieldIdAmzV02](const QString &reply, QNetworkReply::NetworkError networkError, const QString &err) -> bool {
+             QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
+                     .arg(QString::number(networkError), reply, err);
+             ExceptionTemplate exception;
+             exception.setInfos("Attribute Equivalence Error", "Failed to get equivalent values for " + fieldIdAmzV02 + ": " + errorMsg);
+             exception.raise();
+             return true;
+        };
         
         QList<QSharedPointer<OpenAi2::StepMultipleAskAi>> phase2;
         phase2 << step;
@@ -383,6 +443,7 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
         , const QString &langCodeTo
         , const QSet<QString> &possibleValues)
 {
+    qDebug() << "parseAndValidated::askAiEquivalentValues..." << fieldIdAmzV02 << langCodeFrom << langCodeTo << value << possibleValues;
     if (possibleValues.isEmpty())
     {
         qDebug() << "AttributeEquivalentTable::askAiEquivalentValues FAILED as possibleValues is empty for " << fieldIdAmzV02;
@@ -440,6 +501,7 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
     step->name = "Attribute equivalence selection";
     step->cachingKey = step->id;
     step->neededReplies = 3;
+    step->maxRetries = 12;
     step->gptModel = "gpt-5.2";
     step->getPrompt = buildPrompt;
     step->validate = validateReply;
@@ -457,6 +519,14 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
                 recordAttribute(fieldIdAmzV02, {value, chosen});
             }
         }
+    };
+    step->onLastError = [fieldIdAmzV02](const QString &reply, QNetworkReply::NetworkError networkError, const QString &err) -> bool {
+         QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
+                 .arg(QString::number(networkError), reply, err);
+         ExceptionTemplate exception;
+         exception.setInfos("Attribute Equivalence Error", "Failed to get equivalent values for " + fieldIdAmzV02 + ": " + errorMsg);
+         exception.raise();
+         return true;
     };
 
     QList<QSharedPointer<OpenAi2::StepMultipleAsk>> steps;
@@ -541,6 +611,7 @@ bool AttributeEquivalentTable::setData(
         {
             m_listOfStringList[index.row()][index.column()] = value.toString();
             _saveInFile();
+            _buildHash();
             emit dataChanged(index, index, {role});
             return true;
         }

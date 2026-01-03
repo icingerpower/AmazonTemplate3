@@ -27,6 +27,7 @@ public:
     static const QList<const AbstractFiller *> ALL_FILLERS_SORTED;
     static QCoro::Task<void> fillValuesForAi(
             TemplateFiller *templateFiller
+            , const QHash<QString, QHash<QString, QSet<QString> > > &parentSku_variation_skus
             , const QString &productType
             , const QString &countryCodeFrom
             , const QString &langCodeFrom
@@ -34,7 +35,7 @@ public:
             , Age age
             , const QMap<QString, QString> &skuPattern_customInstructions
             , const QHash<QString, QHash<QString, QString>> &sku_fieldId_fromValues
-            , QHash<QString, QMap<QString, QString>> sku_attribute_valuesForAi
+            , QHash<QString, QMap<QString, QString>> &sku_attribute_valuesForAi
             );
     static void recordAllMarketplace(
             const TemplateFiller *templateFiller
@@ -71,6 +72,16 @@ public:
             , QHash<QString, QHash<QString, QString>> &sku_fieldId_toValueslangCommon
             , QHash<QString, QHash<QString, QString>> &sku_fieldId_toValues
             ) const = 0;
+protected:
+    QString getValueId(
+            const QString &marketplaceTo
+            , const QString &countryCodeTo
+            , const QString &langCodeTo
+            , bool allSameValue
+            , bool childSameValue
+            , const QString &parentSku
+            , const QString &variation
+            , const QString &fieldIdTo) const;
 };
 
 #endif // ABSTRACTFILLER_H

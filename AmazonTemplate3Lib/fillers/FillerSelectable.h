@@ -42,6 +42,17 @@ public:
             , QHash<QString, QString> &sku_variation
             );
 private:
+    QString _getValueId(
+            const QString &marketplaceTo
+            , const QString &countryCodeTo
+            , const QString &langCodeTo
+            , bool allSameValue
+            , bool childSameValue
+            , const QString &parentSku
+            , const QString &variation
+            , const QString &fieldIdTo
+            ) const;
+
     QCoro::Task<void> _fillSameLangCountry(
             TemplateFiller *templateFiller
             , const QHash<QString, QHash<QString, QSet<QString>>> &parentSku_variation_skus

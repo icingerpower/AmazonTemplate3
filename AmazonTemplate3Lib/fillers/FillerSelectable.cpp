@@ -23,7 +23,8 @@ bool FillerSelectable::canFill(
         , const QString &marketplaceFrom
         , const QString &fieldIdFrom) const
 {
-    return attribute->isChoice(marketplaceFrom);
+    bool can = attribute->isChoice(marketplaceFrom) && !fieldIdFrom.contains("price");
+    return can;
 }
 
 QCoro::Task<void> FillerSelectable::fill(
@@ -50,10 +51,13 @@ QCoro::Task<void> FillerSelectable::fill(
         , QHash<QString, QHash<QString, QString>> &sku_fieldId_toValueslangCommon
         , QHash<QString, QHash<QString, QString>> &sku_fieldId_toValues) const
 {
+    qDebug() << "FillerSelectable::fill...BEGIN";
     const auto &possibleValues = attribute->possibleValues(
                 marketplaceTo, countryCodeTo, langCodeTo, productTypeTo);
+    qDebug() << "FillerSelectable::fill Possible Values Size:" << possibleValues.size();
     if (possibleValues.size() == 1)
     {
+        qDebug() << "FillerSelectable::fill Single Value Path. Value:" << *possibleValues.cbegin();
         const auto &uniquePossibleValue = *possibleValues.cbegin();
         for (auto it = sku_fieldId_fromValues.cbegin();
              it != sku_fieldId_fromValues.cend(); ++it)
@@ -61,6 +65,7 @@ QCoro::Task<void> FillerSelectable::fill(
             const auto &sku = it.key();
             sku_fieldId_toValues[sku][fieldIdTo] = uniquePossibleValue;
         }
+        qDebug() << "FillerSelectable::fill Single Value Path DONE.";
     }
     else if (possibleValues.size() > 0)
     {
@@ -122,12 +127,15 @@ QCoro::Task<void> FillerSelectable::fill(
     }
     else
     {
+        qDebug() << "FillerSelectable::fill No Possible Values. Raising Exception.";
         ExceptionTemplate exception;
         exception.setInfos(
                     QObject::tr("No possible values")
-                    , QObject::tr("No possible value for the field %1 / %2").arg(marketplaceTo, fieldIdTo));
-        exception.raise();
+                    , QObject::tr("No possible value for the field %1 / %2 / %3 / %4").arg(
+                        marketplaceTo, countryCodeTo, langCodeTo, fieldIdTo));
+        throw exception;
     }
+    qDebug() << "FillerSelectable::fill...END CO_RETURN";
     co_return;
 }
 
@@ -160,6 +168,7 @@ static QSharedPointer<OpenAi2::StepMultipleAsk> createSelectStep(
         , const QMap<QString, QString> &valuesForAi
         , const QSet<QString> &possibleValues)
 {
+    Q_ASSERT(valuesForAi.size() > 0);
     QSharedPointer<OpenAi2::StepMultipleAsk> step(new OpenAi2::StepMultipleAsk);
     step->id = id;
     step->name = "Select value for " + fieldId;
@@ -172,12 +181,15 @@ static QSharedPointer<OpenAi2::StepMultipleAsk> createSelectStep(
         Q_UNUSED(nAttempts)
         QString prompt = QString("Marketplace: %1\n").arg(marketplace);
         prompt += QString("Field: %1\n").arg(fieldId);
-        prompt += "Product Attributes:\n";
-        for (auto it = valuesForAi.begin(); it != valuesForAi.end(); ++it)
+        if (valuesForAi.size() > 0)
         {
-            if (!it.value().isEmpty())
+            prompt += "Product Attributes:\n";
+            for (auto it = valuesForAi.begin(); it != valuesForAi.end(); ++it)
             {
-                prompt += QString("- %1: %2\n").arg(it.key(), it.value());
+                if (!it.value().isEmpty())
+                {
+                    prompt += QString("- %1: %2\n").arg(it.key(), it.value());
+                }
             }
         }
         prompt += "\nPossible Values:\n";
@@ -188,7 +200,7 @@ static QSharedPointer<OpenAi2::StepMultipleAsk> createSelectStep(
         {
             prompt += QString("- %1\n").arg(val);
         }
-        prompt += "\nInstruction: Select the most appropriate value from the 'Possible Values' list that matches the product attributes. Reply ONLY with a valid JSON object with key \"value\" containing the exact selected value. Example: {\"value\": \"Selected Value\"}. If no value matches, use \"value\": \"UNKNOWN\".";
+        prompt += "\nInstruction: Select the most appropriate value from the 'Possible Values' list that matches the product attributes. Reply ONLY with a valid JSON object with key \"value\" containing the exact selected value. Example: {\"value\": \"Selected Value\"}. If no value matches, suggest the closest one.";
         return prompt;
     };
 
@@ -218,6 +230,30 @@ static QSharedPointer<OpenAi2::StepMultipleAsk> createSelectStep(
     return step;
 }
 
+QString FillerSelectable::_getValueId(
+        const QString &marketplaceTo
+        , const QString &countryCodeTo
+        , const QString &langCodeTo
+        , bool allSameValue
+        , bool childSameValue
+        , const QString &parentSku
+        , const QString &variation
+        , const QString &fieldIdTo) const
+{
+    QString valueId = "all_" + marketplaceTo + "_" + countryCodeTo + "_" + langCodeTo;
+    if (!allSameValue && childSameValue)
+    {
+        valueId += "_" + parentSku;
+    }
+    if (!allSameValue && !childSameValue)
+    {
+        valueId += "_" + parentSku + "_" + variation;
+    }
+    // Add fieldIdTo to unique ID to avoid collisions between fields
+    valueId += "_" + fieldIdTo;
+    return valueId;
+}
+
 QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
         TemplateFiller *templateFiller
         , const QHash<QString, QHash<QString, QSet<QString>>> &parentSku_variation_skus
@@ -245,6 +281,7 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
     auto attributeFlagsTable = templateFiller->attributeFlagsTable();
     bool childSameValue = attributeFlagsTable->hasFlag(marketplaceFrom, fieldIdFrom, Attribute::ChildSameValue);
     bool allSameValue = attributeFlagsTable->hasFlag(marketplaceFrom, fieldIdFrom, Attribute::SameValue);
+    bool childOnly = attributeFlagsTable->hasFlag(marketplaceFrom, fieldIdFrom, Attribute::ChildOnly);
     for (auto it = sku_fieldId_fromValues.cbegin();
          it != sku_fieldId_fromValues.cend(); ++it)
     {
@@ -265,147 +302,209 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
     fillVariationsParents(parentSku_variation_skus, sku_parentSku, sku_variation);
     const QString settingsFileName{"selectedValues.ini"};
 
+    QList<QSharedPointer<QCoro::Task<void>>> tasks;
+    QSet<QString> scheduledValueIds;
+
+    auto parseValue = [](const QString &json) -> QString {
+        QJsonParseError error;
+        QJsonDocument doc = QJsonDocument::fromJson(json.toUtf8(), &error);
+        if (error.error == QJsonParseError::NoError && doc.isObject())
+        {
+            return doc.object().value("value").toString();
+        }
+        return QString();
+    };
+
     for (auto it = sku_fieldId_fromValues.cbegin();
          it != sku_fieldId_fromValues.cend(); ++it)
     {
         const auto &sku = it.key();
-        const auto &fieldId_toValues = sku_fieldId_toValues[sku];
-        if (!fieldId_toValues.contains(fieldIdTo) || fieldId_toValues[fieldIdTo].isEmpty())
+        bool isParent = parentSku_variation_skus.contains(sku);
+        if (!isParent || !childOnly)
         {
-            const QMap<QString, QString> &valuesForAi = sku_attribute_valuesForAi[sku];
-            QString valueId = "all_" + marketplaceTo + "_" + countryCodeTo + "_" + langCodeTo;
-            if (!allSameValue && childSameValue)
+            const auto &fieldId_toValues = sku_fieldId_toValues[sku];
+            if (!fieldId_toValues.contains(fieldIdTo) || fieldId_toValues[fieldIdTo].isEmpty())
             {
-                valueId += "_" + sku_parentSku[sku];
-            }
-            if (!allSameValue && !childSameValue)
-            {
-                valueId += "_" + sku_parentSku[sku] + "_" + sku_variation[sku];
-            }
-            // Add fieldIdTo to unique ID to avoid collisions between fields
-             valueId += "_" + fieldIdTo;
+                const QMap<QString, QString> &valuesForAi = sku_attribute_valuesForAi[sku];
+                Q_ASSERT(valuesForAi.size() > 0);
+                Q_ASSERT(valuesForAi.contains("0_ai_description"));
+                const QString &valueId = _getValueId(
+                            marketplaceTo
+                            , countryCodeTo
+                            , langCodeTo
+                            , allSameValue
+                            , childSameValue
+                            , sku_parentSku[sku]
+                            , sku_variation[sku]
+                            , fieldIdTo
+                            );
 
-            QString selectedValue;
-            bool found = false;
-            
-            // Helper to parse value from JSON
-            auto parseValue = [](const QString &json) -> QString {
-                 QJsonParseError error;
-                 QJsonDocument doc = QJsonDocument::fromJson(json.toUtf8(), &error);
-                 if (error.error == QJsonParseError::NoError && doc.isObject())
-                 {
-                     return doc.object().value("value").toString();
-                 }
-                 return QString();
-            };
-
-            // Check cache
-            if (templateFiller->hasAiValue(settingsFileName, valueId))
-            {
-                QString cachedReply = templateFiller->getAiReply(settingsFileName, valueId);
-                // Validate cached reply using the step creation logic (re-using createSelectStep for validation logic)
-                // We create a temp step just to use its validate function? Or just duplicate logic?
-                // Re-creating step is safer to ensure consistency.
-                auto step = ::createSelectStep(valueId, marketplaceTo, fieldIdTo, valuesForAi, possibleValues);
-                if (step->validate(cachedReply, ""))
+                bool cacheValid = false;
+                // Check cache
+                if (templateFiller->hasAiValue(settingsFileName, valueId))
                 {
-                    QString val = parseValue(cachedReply);
-                    if (possibleValues.contains(val))
+                    const QString &cachedReply = templateFiller->getAiReply(settingsFileName, valueId);
+                    // Validate cached reply using the step creation logic (re-using createSelectStep for validation logic)
+                    auto step = ::createSelectStep(valueId, marketplaceTo, fieldIdTo, valuesForAi, possibleValues);
+                    if (step->validate(cachedReply, ""))
                     {
-                        selectedValue = val;
-                        found = true;
+                        const QString &val = parseValue(cachedReply);
+                        if (possibleValues.contains(val))
+                        {
+                            cacheValid = true;
+                        }
                     }
                 }
-            }
 
-            if (!found)
-            {
-                // Phase 1: Ask 2 times, agreement check
-                auto step = ::createSelectStep(valueId + "_p1", marketplaceTo, fieldIdTo, valuesForAi, possibleValues);
-                step->neededReplies = 2;
-                step->chooseBest = OpenAi2::CHOOSE_ALL_SAME_OR_EMPTY; // Returns empty if not all same
-                
-                QList<QSharedPointer<OpenAi2::StepMultipleAsk>> steps;
-                steps.append(step);
-                
-                QString phase1Result;
-                step->apply = [&](const QString &reply) {
-                    phase1Result = reply;
-                };
-                step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
+                if (!cacheValid)
                 {
-                    QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
-                            .arg(QString::number(networkError), reply, lastWhy);
-                    templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, errorMsg);
-                    return true;
-                };
+                    Q_ASSERT(valuesForAi.size() > 0);
+                    Q_ASSERT(valuesForAi.contains("0_ai_description"));
+                    if (scheduledValueIds.contains(valueId))
+                    {
+                        continue;
+                    }
+                    scheduledValueIds.insert(valueId);
 
-                for (const auto &step : steps)
-                {
-                    qDebug() << "--\nFillerSelectable::fill PHASE 1:" << step->getPrompt(0);
+
+                    auto task = [=]() -> QCoro::Task<void> {
+
+                        QString selectedValue;
+                        bool found = false;
+
+                        // Phase 1: Ask 2 times, agreement check
+                        auto step = ::createSelectStep(valueId + "_p1", marketplaceTo, fieldIdTo, valuesForAi, possibleValues);
+                        step->neededReplies = 2;
+                        step->chooseBest = OpenAi2::CHOOSE_ALL_SAME_OR_EMPTY; // Returns empty if not all same
+
+                        QList<QSharedPointer<OpenAi2::StepMultipleAsk>> steps;
+                        steps.append(step);
+
+                        QString phase1Result;
+                        step->apply = [&](const QString &reply) {
+                            phase1Result = reply;
+                        };
+                        step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
+                        {
+                            QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
+                                    .arg(QString::number(networkError), reply, lastWhy);
+                            templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, errorMsg);
+                            return true;
+                        };
+
+                        for (const auto &step : steps)
+                        {
+                        }
+
+                        co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
+
+
+                        // phase1Result is the JSON string if successful/agreed
+                        if (!phase1Result.isEmpty())
+                        {
+                            QString val = parseValue(phase1Result);
+                            if (possibleValues.contains(val))
+                            {
+                                selectedValue = val;
+                                found = true;
+                                // Save valid JSON reply to cache
+                                templateFiller->saveAiValue(settingsFileName, valueId, phase1Result);
+                            }
+                        }
+
+                        if (!found)
+                        {
+                            // Phase 2: Ask 5 times, frequent
+                            step->id = valueId + "_p2"; // Change ID to avoid cache collision
+                            step->cachingKey = step->id;
+                            step->neededReplies = 5;
+                            step->chooseBest = OpenAi2::CHOOSE_MOST_FREQUENT;
+                            step->maxRetries = 10;
+
+                            steps.clear();
+                            steps.append(step);
+
+                            QString phase2Result;
+                            step->apply = [&](const QString &reply) {
+                                phase2Result = reply;
+                            };
+                            step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
+                            {
+                                QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
+                                        .arg(QString::number(networkError), reply, lastWhy);
+                                templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, errorMsg);
+                                return true;
+                            };
+
+                            for (const auto &step : steps)
+                            {
+                            }
+                            co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
+
+                            if (!phase2Result.isEmpty())
+                            {
+                                QString val = parseValue(phase2Result);
+                                if (possibleValues.contains(val))
+                                {
+                                    selectedValue = val;
+                                    found = true;
+                                    // Save valid JSON reply to cache
+                                    templateFiller->saveAiValue(settingsFileName, valueId, phase2Result);
+                                }
+                            }
+                        }
+                        co_return;
+                    };
+                    tasks << QSharedPointer<QCoro::Task<void>>::create(task());
                 }
-                co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
-                 
-                 // phase1Result is the JSON string if successful/agreed
-                 if (!phase1Result.isEmpty())
-                 {
-                     QString val = parseValue(phase1Result);
-                     if (possibleValues.contains(val))
-                     {
-                         selectedValue = val;
-                         found = true;
-                         // Save valid JSON reply to cache
-                         templateFiller->saveAiValue(settingsFileName, valueId, phase1Result);
-                     }
-                 }
-                 
-                 if (!found)
-                 {
-                     // Phase 2: Ask 5 times, frequent
-                     step->id = valueId + "_p2"; // Change ID to avoid cache collision
-                     step->cachingKey = step->id;
-                     step->neededReplies = 5;
-                     step->chooseBest = OpenAi2::CHOOSE_MOST_FREQUENT;
-                     step->maxRetries = 10;
-                     
-                     steps.clear();
-                     steps.append(step);
-                     
-                     QString phase2Result;
-                     step->apply = [&](const QString &reply) {
-                        phase2Result = reply;
-                     };
-                     step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
-                     {
-                         QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
-                                 .arg(QString::number(networkError), reply, lastWhy);
-                         templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, errorMsg);
-                         return true;
-                     };
-                     
-                     for (const auto &step : steps)
-                     {
-                         qDebug() << "--\nFillerSelectable::fill PHASE 2:" << step->getPrompt(0);
-                     }
-                     co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
-                     
-                     if (!phase2Result.isEmpty())
-                     {
-                         QString val = parseValue(phase2Result);
-                         if (possibleValues.contains(val))
-                         {
-                             selectedValue = val;
-                             found = true;
-                             // Save valid JSON reply to cache
-                             templateFiller->saveAiValue(settingsFileName, valueId, phase2Result);
-                         }
-                     }
-                 }
             }
+        }
+    }
 
-            if (found && !selectedValue.isEmpty())
+    int taskIdx = 0;
+    for (auto &task : tasks)
+    {
+        co_await *task;
+        taskIdx++;
+    }
+
+    for (auto it = sku_fieldId_fromValues.cbegin();
+         it != sku_fieldId_fromValues.cend(); ++it)
+    {
+        const auto &sku = it.key();
+        bool isParent = parentSku_variation_skus.contains(sku);
+        if (!isParent || !childOnly)
+        {
+            const auto &fieldId_toValues = sku_fieldId_toValues[sku];
+            if (!fieldId_toValues.contains(fieldIdTo) || fieldId_toValues[fieldIdTo].isEmpty())
             {
-                 sku_fieldId_toValues[sku][fieldIdTo] = selectedValue;
+                const QMap<QString, QString> &valuesForAi = sku_attribute_valuesForAi[sku];
+                Q_ASSERT(valuesForAi.size() > 0);
+                const QString &valueId = _getValueId(
+                            marketplaceTo
+                            , countryCodeTo
+                            , langCodeTo
+                            , allSameValue
+                            , childSameValue
+                            , sku_parentSku[sku]
+                            , sku_variation[sku]
+                            , fieldIdTo
+                            );
+
+                if (templateFiller->hasAiValue(settingsFileName, valueId))
+                {
+                    QString cachedReply = templateFiller->getAiReply(settingsFileName, valueId);
+                    // Validate cached reply using the step creation logic (re-using createSelectStep for validation logic)
+                    auto step = ::createSelectStep(valueId, marketplaceTo, fieldIdTo, valuesForAi, possibleValues);
+                    if (step->validate(cachedReply, ""))
+                    {
+                        QString val = parseValue(cachedReply);
+                        if (possibleValues.contains(val))
+                        {
+                            sku_fieldId_toValues[sku][fieldIdTo] = val;
+                        }
+                    }
+                }
             }
         }
     }
@@ -436,6 +535,13 @@ QCoro::Task<void> FillerSelectable::_fillDifferentLangCountry(
         , QHash<QString, QHash<QString, QString>> &sku_fieldId_toValueslangCommon
         , QHash<QString, QHash<QString, QString>> &sku_fieldId_toValues) const
 {
+    qDebug() << "FillerSelectable::_fillDifferentLangCountry START. TemplateFiller:" << templateFiller << "Thread:" << QThread::currentThreadId();
+    if (!templateFiller)
+    {
+        qDebug() << "CRITICAL: templateFiller is null!";
+        co_return;
+    }
+    
     const QString &fieldIdToV02 = templateFiller->attributeFlagsTable()->getFieldId(
                 marketplaceTo, fieldIdTo, Attribute::AMAZON_V02);
     AttributeEquivalentTable *equivalentTable
@@ -443,6 +549,8 @@ QCoro::Task<void> FillerSelectable::_fillDifferentLangCountry(
     const auto &possibleValues = attribute->possibleValues(
                 marketplaceTo, countryCodeTo, langCodeTo, productTypeTo);
     QList<QSharedPointer<QCoro::Task<void>>> tasks;
+    QSet<QString> processedValues;
+
     for (auto it = sku_fieldId_fromValues.cbegin();
          it != sku_fieldId_fromValues.cend(); ++it)
     {
@@ -451,8 +559,15 @@ QCoro::Task<void> FillerSelectable::_fillDifferentLangCountry(
         if (fieldId_toValuesFrom.contains(fieldIdFrom) && !fieldId_toValuesFrom[fieldIdFrom].isEmpty())
         {
             const auto &fromValue = fieldId_toValuesFrom[fieldIdFrom];
+            if (processedValues.contains(fromValue))
+            {
+                continue;
+            }
+
             if (!equivalentTable->hasEquivalent(fieldIdToV02, fromValue, possibleValues))
             {
+                processedValues.insert(fromValue);
+                qDebug() << "FillerSelectable::_fillDifferentLangCountry launching task for" << fieldIdToV02 << fromValue;
                 if (equivalentTable->hasEquivalent(fieldIdToV02, fromValue)) // One value is missing
                 {
                     auto task =  equivalentTable->askAiEquivalentValues(
@@ -472,6 +587,7 @@ QCoro::Task<void> FillerSelectable::_fillDifferentLangCountry(
     {
         co_await *task;
     }
+
     for (auto it = sku_fieldId_fromValues.cbegin();
          it != sku_fieldId_fromValues.cend(); ++it)
     {

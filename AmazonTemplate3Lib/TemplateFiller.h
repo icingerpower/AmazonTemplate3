@@ -81,6 +81,7 @@ public:
 
     const QHash<QString, QString> &sku_imagePreviewFilePath() const;
     void saveAiValue(const QString &settingsFileName, const QString &id, const QString &value) const;
+    void saveAiValue(const QString &settingsFileName, const QHash<QString, QString> &id_values) const;
     bool hasAiValue(const QString &settingsFileName, const QString &id) const;
     QString getAiReply(const QString &settingsFileName, const QString &id) const;
     QSharedPointer<QSettings> settingsCommon() const; // Settings of current working directory

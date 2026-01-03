@@ -41,7 +41,10 @@ static QSharedPointer<OpenAi2::StepMultipleAskAi> createTranslationStep(
             const QString &gptReply, const QString &lastWhy) -> bool
     {
         Q_UNUSED(lastWhy)
-        return !gptReply.trimmed().isEmpty();
+        const auto &trimmedReply = gptReply.trimmed();
+        return !trimmedReply.isEmpty()
+                && !trimmedReply.contains("(")
+                && !trimmedReply.contains(")");
     };
 
     // Second prompt: Choose the best translation
@@ -276,6 +279,7 @@ QCoro::Task<void> FillerTitle::fill(
                     }
                 }
                 newTitle += ")";
+                sku_fieldId_toValues[sku][fieldIdTo] = newTitle;
             }
             else
             {

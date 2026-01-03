@@ -1,6 +1,8 @@
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QDirIterator>
+#include <QHash>
+#include <QMutex>
 
 #include "AttributesMandatoryAiTable.h"
 #include "AttributesMandatoryTable.h"
@@ -717,6 +719,7 @@ void TemplateFiller::checkColumnsFilled()
 
 QCoro::Task<void> TemplateFiller::fillValues()
 {
+    m_aiFailureTable->clear();
     buildAttributes();
     m_sku_imagePreviewFilePath = checkPreviewImages();
     _fillValuesSources();
@@ -733,15 +736,17 @@ QCoro::Task<void> TemplateFiller::fillValues()
     const auto &langCodeFrom = _get_langCode(m_templateFromPath);
     const auto &countryCodeFrom = _get_countryCode(m_templateFromPath);
 
-    co_await AbstractFiller::fillValuesForAi(this,
-                                             productTypeFrom,
-                                             countryCodeFrom,
-                                             langCodeFrom,
-                                             m_gender,
-                                             m_age,
-                                             m_skuPattern_customInstructions,
-                                             m_sku_fieldId_fromValues,
-                                             m_sku_attribute_valuesForAi);
+    co_await AbstractFiller::fillValuesForAi(this
+                                             , parentSku_variation_skus
+                                             , productTypeFrom
+                                             , countryCodeFrom
+                                             , langCodeFrom
+                                             , m_gender
+                                             , m_age
+                                             , m_skuPattern_customInstructions
+                                             , m_sku_fieldId_fromValues
+                                             , m_sku_attribute_valuesForAi);
+    Q_ASSERT(m_sku_attribute_valuesForAi.begin().value().size() > 0);
 
     for (const auto &targetPath : m_templateToPaths) // TODO check order and make sure from is made first for possible values
     {
@@ -750,6 +755,7 @@ QCoro::Task<void> TemplateFiller::fillValues()
         const auto &langCodeTo = _get_langCode(targetPath);
         const auto &marketplaceTo = _get_marketplace(docTo);
         const auto &productTypeTo = _get_productType(document);
+        const auto &fieldId_index = _get_fieldId_index(docTo);
 
 
         for (const auto &filler : AbstractFiller::ALL_FILLERS_SORTED)
@@ -757,34 +763,51 @@ QCoro::Task<void> TemplateFiller::fillValues()
             for (const auto &fieldIdFrom : sortedFieldIds)
             {
                 const auto &attribute =  m_marketplace_attributeId_attributeInfos[marketplaceFrom][fieldIdFrom].data();
-                if (filler->canFill(this, attribute, marketplaceFrom, fieldIdFrom))
+                if (fieldId_index.contains(fieldIdFrom) && filler->canFill(this, attribute, marketplaceFrom, fieldIdFrom))
                 {
                     const auto &fieldIdTo = m_attributeFlagsTable->getFieldId(
                                 marketplaceFrom, fieldIdFrom, marketplaceTo);
-                    co_await filler->fill(
-                                this
-                                , parentSku_variation_skus
-                                , marketplaceFrom
-                                , marketplaceTo
-                                , fieldIdFrom
-                                , fieldIdTo
-                                , attribute
-                                , productTypeFrom
-                                , productTypeTo
-                                , countryCodeFrom
-                                , langCodeFrom
-                                , countryCodeTo
-                                , langCodeTo
-                                , m_countryCode_langCode_keywords
-                                , m_skuPattern_countryCode_langCode_keywords
-                                , m_gender
-                                , m_age
-                                , m_sku_fieldId_fromValues
-                                , m_sku_attribute_valuesForAi
-                                , m_countryCode_langCode_sku_fieldId_toValues[countryCodeFrom][langCodeFrom]
-                                , m_langCode_sku_fieldId_toValues[langCodeTo]
-                                , m_countryCode_langCode_sku_fieldId_toValues[countryCodeTo][langCodeTo]
-                                );
+                    qDebug() << "TemplateFiller Loop. Filler:" << filler << countryCodeTo << langCodeTo << "Field:" << fieldIdFrom << "START";
+                    try
+                    {
+                        co_await filler->fill(
+                                    this
+                                    , parentSku_variation_skus
+                                    , marketplaceFrom
+                                    , marketplaceTo
+                                    , fieldIdFrom
+                                    , fieldIdTo
+                                    , attribute
+                                    , productTypeFrom
+                                    , productTypeTo
+                                    , countryCodeFrom
+                                    , langCodeFrom
+                                    , countryCodeTo
+                                    , langCodeTo
+                                    , m_countryCode_langCode_keywords
+                                    , m_skuPattern_countryCode_langCode_keywords
+                                    , m_gender
+                                    , m_age
+                                    , m_sku_fieldId_fromValues
+                                    , m_sku_attribute_valuesForAi
+                                    , m_countryCode_langCode_sku_fieldId_toValues[countryCodeFrom][langCodeFrom]
+                                    , m_langCode_sku_fieldId_toValues[langCodeTo]
+                                    , m_countryCode_langCode_sku_fieldId_toValues[countryCodeTo][langCodeTo]
+                                    );
+                    }
+                    catch (const ExceptionTemplate &e)
+                    {
+                        qDebug() << "TemplateFiller Loop. Filler:" << filler << "Field:" << fieldIdFrom << "EXCEPTION CAUGHT:" << e.error(); // Log it!
+                        if (e.title() == "No possible values")
+                        {
+                            e.raise();
+                             // Critical error for this field, but maybe we can continue?
+                             // Re-throwing to stop process as implied by current logic.
+                             throw;
+                        }
+                        throw;
+                    }
+                    qDebug() << "TemplateFiller Loop. Filler:" << filler << "Field:" << fieldIdFrom << "END";
                 }
             }
         }
@@ -902,12 +925,28 @@ const QHash<QString, QString> &TemplateFiller::sku_imagePreviewFilePath() const
 }
 
 void TemplateFiller::saveAiValue(
-        const QString &settingsFileName, const QString &id, const QString &value) const
+        const QString &settingsFileName, const QHash<QString, QString> &id_values) const
+{
+    const QString &settingsFilePath = m_workingDir.absoluteFilePath(settingsFileName);
+    QSettings settings{settingsFilePath, QSettings::IniFormat};
+    for (auto it = id_values.begin();
+         it != id_values.end(); ++it)
+    {
+        settings.setValue(it.key(), it.value());
+    }
+    settings.sync();
+}
+
+void TemplateFiller::saveAiValue(const QString &settingsFileName, const QString &id, const QString &value) const
 {
     Q_ASSERT(settingsFileName.endsWith(".ini"));
     const QString &settingsFilePath = m_workingDir.absoluteFilePath(settingsFileName);
+
+    static QMutex settingsWriteMutex;
+    QMutexLocker locker(&settingsWriteMutex);
     QSettings settings{settingsFilePath, QSettings::IniFormat};
     settings.setValue(id, value);
+    settings.sync();
 }
 
 bool TemplateFiller::hasAiValue(const QString &settingsFileName, const QString &id) const
@@ -1515,7 +1554,7 @@ QHash<QString, QSet<QString>> TemplateFiller::_get_fieldId_possibleValues(
         QXlsx::Document &doc) const
 {
     QHash<QString, QSet<QString>> fieldId_possibleValues;
-    QHash<QString, QString> fieldName_fieldId;
+    QHash<QString, QSet<QString>> fieldName_fieldId;
     _selectTemplateSheet(doc);
     auto version = _getDocumentVersion(doc);
     int rowFieldId = _getRowFieldId(version);
@@ -1532,7 +1571,7 @@ QHash<QString, QSet<QString>> TemplateFiller::_get_fieldId_possibleValues(
             QString fieldName{cellFieldName->value().toString()};
             if (!fieldName.isEmpty() && !fieldId.isEmpty())
             {
-                fieldName_fieldId[fieldName] = fieldId;
+                fieldName_fieldId[fieldName].insert(fieldId);
             }
         }
     }
@@ -1553,22 +1592,25 @@ QHash<QString, QSet<QString>> TemplateFiller::_get_fieldId_possibleValues(
                 Q_ASSERT(fieldName_fieldId.contains(fieldName));
                 if (fieldName_fieldId.contains(fieldName))
                 {
-                    const auto &fieldId = fieldName_fieldId[fieldName];
-                    for (int j=2; i<dimValidValues.lastColumn(); ++j)
+                    const auto &fieldIds = fieldName_fieldId[fieldName];
+                    for (const auto &fieldId : fieldIds)
                     {
-                        auto cellValue = doc.cellAt(i+1, j+1);
-                        QString value;
-                        if (cellValue)
+                        for (int j=2; i<dimValidValues.lastColumn(); ++j)
                         {
-                            value = cellValue->value().toString();
-                            if (!value.isEmpty())
+                            auto cellValue = doc.cellAt(i+1, j+1);
+                            QString value;
+                            if (cellValue)
                             {
-                                fieldId_possibleValues[fieldId] << value;
+                                value = cellValue->value().toString();
+                                if (!value.isEmpty())
+                                {
+                                    fieldId_possibleValues[fieldId] << value;
+                                }
                             }
-                        }
-                        if (value.isEmpty())
-                        {
-                            break;
+                            if (value.isEmpty())
+                            {
+                                break;
+                            }
                         }
                     }
                 }

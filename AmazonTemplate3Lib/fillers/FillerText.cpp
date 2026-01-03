@@ -59,6 +59,138 @@ const QHash<QString, int> FillerText::FIELD_ID_MAX_CHAR
     , {"fabric_type#1.value", 100}
 };
 
+std::function<bool (const QString &, QString &)> FillerText::_makeParseAndValidate(const QString &fieldIdTo) const
+{
+    auto parseAndValidate = [fieldIdTo](const QString &reply, QString &valFormatted) -> bool
+    {
+        QJsonParseError error;
+        auto json = QJsonDocument::fromJson(reply.toUtf8(), &error);
+        if (error.error != QJsonParseError::NoError)
+        {
+            return false;
+        }
+        if (!json.isObject())
+        {
+            return false;
+        }
+        auto obj = json.object();
+        if (!obj.contains("value"))
+        {
+            return false;
+        }
+        valFormatted = obj["value"].toString().trimmed();
+        if (FIELD_ID_MAX_CHAR.contains(fieldIdTo)
+                && valFormatted.size() > FIELD_ID_MAX_CHAR[fieldIdTo])
+        {
+            return false;
+        }
+        if (valFormatted.isEmpty())
+        {
+            return false;
+        }
+        valFormatted[0] = valFormatted[0].toUpper();
+        if (fieldIdTo.contains("description", Qt::CaseInsensitive))
+        {
+            static const QSet<QString> allowedTags = {
+                "p", "/p",
+                "br", "br/",
+                "b", "/b",
+                "ul", "/ul",
+                "li", "/li"
+            };
+
+            // Find all tags like <...>
+            static const QRegularExpression tagRe(R"(<\s*([^>]+)\s*>)");
+            auto it = tagRe.globalMatch(valFormatted);
+            while (it.hasNext())
+            {
+                const auto m = it.next();
+                QString inside = m.captured(1).trimmed();
+
+                if (inside.isEmpty())
+                {
+                    return false;
+                }
+
+                // Reject comments/doctype/etc.
+                if (inside.startsWith("!--") || inside.startsWith("!") || inside.startsWith("?"))
+                {
+                    return false;
+                }
+
+                // Normalize: lowercase, collapse whitespace
+                inside = inside.toLower();
+                static const QRegularExpression reg(R"(\s+)");
+                inside.replace(reg, " ");
+
+                // Reject attributes: anything beyond the bare tag token (except self-closing br/)
+                // Example: "p class=x" -> reject, "br /" -> normalize to "br/"
+                const QString firstToken = inside.section(' ', 0, 0);
+                QString tagToken = firstToken;
+
+                // Handle "<br />" variants:
+                // inside could be "br /" (after whitespace collapse), or "br/" already
+                if (firstToken == "br" && inside.contains(" /"))
+                {
+                    // only allow exactly "br /" (no other tokens)
+                    if (inside != "br /")
+                    {
+                        return false;
+                    }
+                    tagToken = "br/";
+                }
+                else if (firstToken == "br/" )
+                {
+                    // ok
+                }
+                else
+                {
+                    // If there is any space, it indicates attributes or extra tokens -> reject
+                    if (inside.contains(' '))
+                    {
+                        return false;
+                    }
+                }
+
+                if (!allowedTags.contains(tagToken))
+                {
+                    return false;
+                }
+            }
+        }
+        else if (fieldIdTo.contains("color", Qt::CaseInsensitive))
+        {
+            if (valFormatted.contains("("))
+            {
+                return false;
+            }
+            else if (valFormatted.contains(")"))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            if (valFormatted.contains("<"))
+            {
+                return false;
+            }
+            if (valFormatted.contains(">"))
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+    return parseAndValidate;
+}
+
+void FillerText::_saveGptReplies(
+        TemplateFiller *templateFiller, const QString &settingsFileName, const QHash<QString, QString> &fieldId_gptReplies) const
+{
+    templateFiller->saveAiValue(settingsFileName, fieldId_gptReplies);
+}
+
 QCoro::Task<void> FillerText::fill(
         TemplateFiller *templateFiller
         , const QHash<QString, QHash<QString, QSet<QString>>> &parentSku_variation_skus
@@ -104,219 +236,307 @@ QCoro::Task<void> FillerText::fill(
     auto attributeFlagsTable = templateFiller->attributeFlagsTable();
     bool childSameValue = attributeFlagsTable->hasFlag(marketplaceFrom, fieldIdFrom, Attribute::ChildSameValue);
     bool allSameValue = attributeFlagsTable->hasFlag(marketplaceFrom, fieldIdFrom, Attribute::SameValue);
+    bool childOnly = attributeFlagsTable->hasFlag(marketplaceFrom, fieldIdFrom, Attribute::ChildOnly);
     QHash<QString, QString> sku_parentSku;
     QHash<QString, QString> sku_variation;
     FillerSelectable::fillVariationsParents(parentSku_variation_skus, sku_parentSku, sku_variation);
+
+    QList<QSharedPointer<QCoro::Task<void>>> tasks;
+    
+    // Group SKUs by valueId
+    QHash<QString, QList<QString>> valueId_skus;
+    QHash<QString, QMap<QString, QString>> valueId_valuesForAi;
+    QHash<QString, QString> valueId_valueFrom;
+    
+    auto parseAndValidate = _makeParseAndValidate(fieldIdTo);
+    QHash<QString, QString> fieldId_gptReplies;
+
+    //QHash<QString, QString> loaded_valid_values;
+    //static QSet<QString> allValueIds;
+    QSet<QString> launchedValueIds;
+
+    auto getVariationForValueId = [&](const QString &sku, bool isParent) -> QString
+    {
+        if (isParent)
+        {
+            if (allSameValue)
+            {
+                return *parentSku_variation_skus[sku].begin().value().begin(); // We take the first child sku
+            }
+        }
+        else
+        {
+            return sku_variation[sku];
+        }
+        return QString();
+    };
+
     for (auto it = sku_fieldId_fromValues.cbegin();
          it != sku_fieldId_fromValues.cend(); ++it)
     {
         const auto &sku = it.key();
-        if (sku_fieldId_toValueslangCommon.contains(fieldIdTo))
-        {
-            sku_fieldId_toValues[fieldIdTo] = sku_fieldId_toValueslangCommon[fieldIdTo];
-        }
-        const auto &fieldId_fromValues = it.value();
-        QString valueId = "all_" + langCodeTo + "_" + fieldIdTo;
-        if (!allSameValue && childSameValue)
-        {
-            valueId += "_" + sku_parentSku[sku];
-        }
-        if (!allSameValue && !childSameValue)
-        {
-            valueId += "_" + sku_parentSku[sku] + "_" + sku_variation[sku];
-        }
-        const QMap<QString, QString> &valuesForAi = sku_attribute_valuesForAi[sku];
-        const auto &parseAndValidate = [&fieldIdTo](const QString &reply, QString &valFormatted) -> bool
-        {
-            QJsonParseError error;
-            auto json = QJsonDocument::fromJson(reply.toUtf8(), &error);
-            if (error.error != QJsonParseError::NoError)
-            {
-                return false;
-            }
-            if (!json.isObject())
-            {
-                return false;
-            }
-            auto obj = json.object();
-            if (!obj.contains("value"))
-            {
-                return false;
-            }
-            valFormatted = obj["value"].toString();
-            if (FIELD_ID_MAX_CHAR.contains(fieldIdTo)
-                    && valFormatted.size() > FIELD_ID_MAX_CHAR[fieldIdTo])
-            {
-                return false;
-            }
-            return !valFormatted.isEmpty();
-        };
 
-        const auto &apply = [&](const QString &reply, const QString &valFormatted)
+        bool isParent = parentSku_variation_skus.contains(sku);
+        if (!isParent || !childOnly)
         {
-             templateFiller->saveAiValue(settingsFileName, valueId, reply);
-             sku_fieldId_toValues[sku][fieldIdTo] = valFormatted;
-             recordAllMarketplace(
-                         templateFiller, marketplaceTo, fieldIdTo, sku_fieldId_toValueslangCommon[sku], valFormatted);
-             sku_fieldId_toValues[sku][fieldIdTo] = valFormatted;
-        };
-        if (templateFiller->hasAiValue(settingsFileName, valueId))
-        {
-            QString valFormatted;
-            QString reply = templateFiller->getAiReply(settingsFileName, valueId);
-            if (parseAndValidate(reply, valFormatted))
+            if (sku_fieldId_toValueslangCommon.contains(sku)
+                    && sku_fieldId_toValueslangCommon[sku].contains(fieldIdTo)
+                    && !sku_fieldId_toValueslangCommon[sku].isEmpty())
             {
-                apply(reply, valFormatted);
-                continue;
-            }
-        }
-        QString valueFrom;
-        if (sku_fieldId_toValuesFrom.contains(sku) && sku_fieldId_toValuesFrom[sku].contains(fieldIdFrom) && !sku_fieldId_toValuesFrom[sku][fieldIdFrom].isEmpty())
-        {
-            valueFrom = sku_fieldId_toValuesFrom[sku][fieldIdFrom]; //If valueFrom we only translate
-        }
-        if (!valueFrom.isEmpty())
-        {
-            QString prompt = "Translate the following text from " + langCodeFrom + " to " + langCodeTo + ".\n"
-                    "Product Type: " + productTypeTo + "\n"
-                    "Field ID: " + fieldIdTo + "\n"
-                    "Text to translate: \"" + valueFrom + "\"\n"
-                    "Output a JSON object with the key \"value\" containing the translated text.";
-            auto step = QSharedPointer<OpenAi2::StepMultipleAsk>::create();
-            step->getPrompt = [prompt](int){ return prompt; };
-            step->maxRetries = 5;
-            step->neededReplies = 1;
-            step->validate = [&](const QString &reply, const QString &)
-            {
-                QString val;
-                return parseAndValidate(reply, val);
-            };
-            step->chooseBest = [](const QList<QString> &replies) -> QString
-            {
-                return replies.isEmpty() ? QString() : replies.first();
-            };
-            step->apply = [&](const QString &reply)
-            {
-                QString valFormatted;
-                if (parseAndValidate(reply, valFormatted))
-                {
-                    apply(reply, valFormatted);
-                }
-            };
-            step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](
-                    const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
-            {
-                QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
-                        .arg(QString::number(networkError), reply, lastWhy);
-                templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, errorMsg);
-                return true; 
-            };
-            QList<QSharedPointer<OpenAi2::StepMultipleAsk>> steps;
-            steps << step;
-            qDebug() << "--\nFillerText::fill no valueFrom:" << step->getPrompt(0);
-            co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
-        }
-        else
-        {
-            auto step = QSharedPointer<OpenAi2::StepMultipleAsk>::create();
-            QString prompt;
-            bool isDescription = fieldIdTo.contains("product_description", Qt::CaseInsensitive);
-            prompt += "Lang: " + langCodeTo + ". Product Type: " + productTypeTo + ". Field: " + fieldIdTo + "\n";
-            prompt += "Attributes: ";
-            for (auto it = valuesForAi.begin(); it != valuesForAi.end(); ++it)
-            {
-                prompt += it.key() + ": " + it.value() + ", ";
-            }
-            prompt += "\n";
-
-            if (isDescription)
-            {
-                prompt += "Write a description that increases perceived value while respecting Amazon policies, strictly under 2000 characters. "
-                          "Do not invent information; only state verifiable facts. Simple HTML allowed. "
-                          "Answer important buyer questions (compatibility, dimensions, materials, etc).";
+                sku_fieldId_toValues[sku][fieldIdTo] = sku_fieldId_toValueslangCommon[sku][fieldIdTo];
             }
             else
             {
-                if (FIELD_ID_MAX_CHAR.contains(fieldIdTo))
+
+                QString variationForValueId = getVariationForValueId(sku, isParent);
+
+                const QString &valueId = getValueId(
+                            marketplaceTo
+                            , countryCodeTo
+                            , langCodeTo
+                            , allSameValue
+                            , childSameValue
+                            , isParent ? sku : sku_parentSku[sku]
+                                         , variationForValueId
+                            , fieldIdTo
+                            );
+                if (launchedValueIds.contains(valueId))
                 {
-                    prompt += "Write a short set of words for this field. Under " + QString::number(FIELD_ID_MAX_CHAR[fieldIdTo]) + " characters.";
+                    continue;
+                }
+
+                bool hasAiValue = templateFiller->hasAiValue(settingsFileName, valueId);
+                bool validAiValue = false;
+                if (hasAiValue)
+                {
+                    QString val;
+                    validAiValue = parseAndValidate(templateFiller->getAiReply(settingsFileName, valueId), val);
+                }
+
+                if (!validAiValue)
+                {
+                    launchedValueIds.insert(valueId);
+                    QString valueFrom;
+                    if (sku_fieldId_fromValues.contains(sku)
+                            && sku_fieldId_fromValues[sku].contains(fieldIdFrom)
+                            && !sku_fieldId_fromValues[sku][fieldIdFrom].isEmpty())
+                    {
+                        valueFrom = sku_fieldId_fromValues[sku][fieldIdFrom];
+                    }
+
+                    QMap<QString, QString> valuesForAi = sku_attribute_valuesForAi[sku];
+
+                    auto task = [=, &fieldId_gptReplies]() -> QCoro::Task<void>
+                    {
+                        const auto &apply = [valueId, &fieldId_gptReplies](const QString &reply, const QString &valFormatted)
+                        {
+                            fieldId_gptReplies[valueId] = reply;
+                        };
+
+                        QList<QSharedPointer<OpenAi2::StepMultipleAsk>> steps;
+
+                        if (!valueFrom.isEmpty())
+                        {
+                            QString prompt = "Translate the following text from " + langCodeFrom + " to "
+                                    + langCodeTo + ".\n"
+                                    "Product Type: "
+                                    + productTypeTo + "\n"
+                                    "Field ID: "
+                                    + fieldIdTo + "\n"
+                                    "Text to translate: \""
+                                    + valueFrom + "\"\n"
+                                    "Output a JSON object with the key \"value\" containing the translated text.";
+                            auto step = QSharedPointer<OpenAi2::StepMultipleAsk>::create();
+                            step->getPrompt = [prompt](int){ return prompt; };
+                            step->maxRetries = 5;
+                            step->neededReplies = 1;
+                            step->validate = [parseAndValidate](const QString &reply, const QString &)
+                            {
+                                QString val;
+                                return parseAndValidate(reply, val);
+                            };
+                            step->chooseBest = [](const QList<QString> &replies) -> QString
+                            {
+                                return replies.isEmpty() ? QString() : replies.first();
+                            };
+                            step->apply = [parseAndValidate, apply](const QString &reply)
+                            {
+                                QString valFormatted;
+                                if (parseAndValidate(reply, valFormatted))
+                                {
+                                    apply(reply, valFormatted);
+                                }
+                            };
+                            step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](
+                                    const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
+                            {
+                                QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
+                                        .arg(QString::number(networkError), reply, lastWhy);
+                                templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, errorMsg);
+                                return true;
+                            };
+                            steps << step;
+                        }
+                        else
+                        {
+                            auto step = QSharedPointer<OpenAi2::StepMultipleAsk>::create();
+                            QString prompt;
+                            bool isDescription = fieldIdTo.contains("product_description", Qt::CaseInsensitive);
+                            prompt += "Lang: " + langCodeTo + ". Product Type: " + productTypeTo + ". Field: " + fieldIdTo + "\n";
+                            prompt += "Attributes: ";
+                            for (auto it = valuesForAi.begin(); it != valuesForAi.end(); ++it)
+                            {
+                                prompt += it.key() + ": " + it.value() + ", ";
+                            }
+                            prompt += "\n";
+
+                            if (isDescription)
+                            {
+                                prompt += "Write a description that increases perceived value while respecting Amazon policies, strictly under 1800 characters. "
+                                        "Do not invent information; only state verifiable facts. Simple HTML allowed ONLY with these tags: "
+                                        "<p>, <br>, <b>, <ul>, <li>. "
+                                        "Do NOT use any other tags or any HTML attributes (no class/style/id, no inline CSS). "
+                                        "Answer important buyer questions (compatibility, dimensions, materials, what’s included, usage/care, warranty if provided).";
+                            }
+                            else
+                            {
+                                if (FIELD_ID_MAX_CHAR.contains(fieldIdTo))
+                                {
+                                    prompt += "Write a short set of words for this field. Under " + QString::number(FIELD_ID_MAX_CHAR[fieldIdTo]) + " characters.";
+                                }
+                                else
+                                {
+                                    prompt += "Write a short text for this field.";
+                                }
+                                prompt += "No parenthesis.";
+                            }
+                            prompt += "\nOutput a JSON object with the key \"value\" containing the generated text.";
+
+                            step->getPrompt = [prompt](int){ return prompt; };
+                            step->maxRetries = isDescription ? 8 : 5;
+                            step->neededReplies = 2; // Ask for 2 replies
+                            step->validate = [parseAndValidate](const QString &reply, const QString &)
+                            {
+                                QString val;
+                                return parseAndValidate(reply, val);
+                            };
+                            step->chooseBest = [isDescription](const QStringList &replies) -> QString
+                            {
+                                QString bestReply;
+                                if (replies.isEmpty())
+                                {
+                                    return bestReply;
+                                }
+                                int bestLen = -1;
+                                for (const auto &reply : replies)
+                                {
+                                    QJsonParseError error;
+                                    auto doc = QJsonDocument::fromJson(reply.toUtf8(), &error);
+                                    if (error.error == QJsonParseError::NoError && doc.isObject())
+                                    {
+                                        QString val = doc.object()["value"].toString();
+                                        int len = val.length();
+                                        if (isDescription)
+                                        {
+                                            if (len < 1900 && len > bestLen)
+                                            {
+                                                bestLen = len;
+                                                bestReply = reply;
+                                            }
+                                        }
+                                        else
+                                        {
+                                            // Pick smallest
+                                            if (bestLen == -1 || len < bestLen)
+                                            {
+                                                bestLen = len;
+                                                bestReply = reply;
+                                            }
+                                        }
+                                    }
+                                }
+                                // Fallback if no specific criteria met (e.g. all > 1900), just return first valid
+                                if (bestReply.isEmpty() && !replies.isEmpty())
+                                {
+                                    return replies.first();
+                                }
+                                return bestReply;
+                            };
+                            step->apply = [parseAndValidate, apply](const QString &reply) {
+                                QString valFormatted;
+                                if (parseAndValidate(reply, valFormatted))
+                                {
+                                    apply(reply, valFormatted);
+                                }
+                            };
+                            step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
+                            {
+                                QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
+                                        .arg(QString::number(networkError), reply, lastWhy);
+                                templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, errorMsg);
+                                return true;
+                            };
+                            steps << step;
+                        }
+                        co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2"); // std::move(steps) not needed as it is passed by const reference
+                        // co_return is not needed for void coroutine that falls off end
+                    };
+                    tasks << QSharedPointer<QCoro::Task<void>>::create(task());
+                }
+
+            }
+
+        }
+    }
+    for (const auto &task : tasks)
+    {
+        co_await *task;
+    }
+    _saveGptReplies(templateFiller, settingsFileName, fieldId_gptReplies);
+    for (auto it = sku_fieldId_fromValues.cbegin();
+         it != sku_fieldId_fromValues.cend(); ++it)
+    {
+        const auto &sku = it.key();
+
+        bool isParent = parentSku_variation_skus.contains(sku);
+        if (!isParent || !childOnly)
+        {
+            if (!sku_fieldId_toValues.contains(sku)
+                    || !sku_fieldId_toValues[sku].contains(fieldIdTo)
+                    || sku_fieldId_toValues[sku][fieldIdTo].isEmpty())
+            {
+                QString variationForValueId = getVariationForValueId(sku, isParent);
+                const QString &valueId = getValueId(
+                            marketplaceTo
+                            , countryCodeTo
+                            , langCodeTo
+                            , allSameValue
+                            , childSameValue
+                            , isParent ? sku : sku_parentSku[sku]
+                                         , variationForValueId
+                            , fieldIdTo
+                            );
+                if (templateFiller->hasAiValue(settingsFileName, valueId))
+                {
+                    QString valFormatted;
+                    QString reply = templateFiller->getAiReply(settingsFileName, valueId);
+                    if (parseAndValidate(reply, valFormatted))
+                    {
+                        sku_fieldId_toValues[sku][fieldIdTo] = valFormatted;
+                        recordAllMarketplace(
+                                    templateFiller, marketplaceTo, fieldIdTo, sku_fieldId_toValueslangCommon[sku], valFormatted);
+                        sku_fieldId_toValues[sku][fieldIdTo] = valFormatted;
+                    }
                 }
                 else
                 {
-                    prompt += "Write a short text for this field.";
+                    qDebug() << "--\nFillerText::fill FAILURE - no templateFiller->hasAiValue :" << sku << valueId;
                 }
             }
-            prompt += "\nOutput a JSON object with the key \"value\" containing the generated text.";
-
-            step->getPrompt = [prompt](int){ return prompt; };
-            step->maxRetries = 5;
-            step->neededReplies = 2; // Ask for 2 replies
-            step->validate = [&](const QString &reply, const QString &)
-            {
-                QString val;
-                return parseAndValidate(reply, val);
-            };
-            step->chooseBest = [isDescription](const QStringList &replies) -> QString
-            {
-                 QString bestReply;
-                 if (replies.isEmpty())
-                 {
-                     return bestReply;
-                 }
-                 int bestLen = -1;
-                 for (const auto &reply : replies)
-                 {
-                     QJsonParseError error;
-                     auto doc = QJsonDocument::fromJson(reply.toUtf8(), &error);
-                     if (error.error == QJsonParseError::NoError && doc.isObject())
-                     {
-                         QString val = doc.object()["value"].toString();
-                         int len = val.length();
-                         if (isDescription)
-                         {
-                             if (len < 1900 && len > bestLen)
-                             {
-                                 bestLen = len;
-                                 bestReply = reply;
-                             }
-                         }
-                         else
-                         {
-                             // Pick smallest
-                             if (bestLen == -1 || len < bestLen)
-                             {
-                                 bestLen = len;
-                                 bestReply = reply;
-                             }
-                         }
-                     }
-                 }
-                 // Fallback if no specific criteria met (e.g. all > 1900), just return first valid
-                 if (bestReply.isEmpty() && !replies.isEmpty())
-                 {
-                     return replies.first();
-                 }
-                 return bestReply;
-            };
-            step->apply = [&](const QString &reply) {
-                QString valFormatted;
-                if (parseAndValidate(reply, valFormatted))
-                {
-                    apply(reply, valFormatted);
-                }
-            };
-            step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
-            {
-                QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
-                        .arg(QString::number(networkError), reply, lastWhy);
-                templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, errorMsg);
-                return true; 
-            };
-            QList<QSharedPointer<OpenAi2::StepMultipleAsk>> steps;
-            steps << step;
-            qDebug() << "--\nFillerText::fill with valueFrom (translate):" << step->getPrompt(0);
-            co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
         }
     }
+
+
+
     co_return;
 }

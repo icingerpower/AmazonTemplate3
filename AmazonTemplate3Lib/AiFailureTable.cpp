@@ -20,7 +20,7 @@ void AiFailureTable::recordError(
         , const QString &fieldId
         , const QString &error)
 {
-    beginInsertRows(QModelIndex{}, m_listOfStringList.size() - 1, m_listOfStringList.size() - 1);
+    beginInsertRows(QModelIndex{}, m_listOfStringList.size(), m_listOfStringList.size());
     m_listOfStringList << QStringList{marketplaceTo, countryCodeTo, countryCodeFrom, fieldId, error};
     endInsertRows();
 }
@@ -41,6 +41,10 @@ QVariant AiFailureTable::headerData(
     if (orientation == Qt::Horizontal && role == Qt::DisplayRole)
     {
         return HEADER[section];
+    }
+    else if (orientation == Qt::Vertical && role == Qt::DisplayRole)
+    {
+        return QString::number(section + 1);
     }
     return QVariant{};
 }

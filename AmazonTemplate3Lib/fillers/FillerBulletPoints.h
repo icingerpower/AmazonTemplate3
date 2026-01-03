@@ -8,6 +8,7 @@ class FillerBulletPoints : public AbstractFiller
 public:
     static const QSet<QString> BULLET_POINT_IDS;
     static const QStringList BULLET_POINT_PATTERNS;
+    static const QString BULLET_POINT_PATTERN_MAIN;
     bool canFill(const TemplateFiller *templateFiller
                  , const Attribute *attribute
                  , const QString &marketplaceFrom

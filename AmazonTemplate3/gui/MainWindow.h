@@ -5,6 +5,7 @@
 #include <QDir>
 #include <QSettings>
 #include <QSharedPointer>
+#include <QCoro/QCoroCore>
 
 class TemplateFiller;
 
@@ -32,7 +33,8 @@ public slots:
     void viewAttributes();
     void extractProductInfos();
     void onApiKeyChanged(const QString &key);
-    void generate();
+    QCoro::Task<void> generate();
+    void displayAiErrors();
 
 private:
     Ui::MainWindow *ui;
@@ -46,6 +48,7 @@ private:
     void _setControlButtonsEnabled(bool enable);
     void _setGenerateButtonsEnabled(bool enable);
     void _enableGenerateButtonIfValid();
+    QCoro::Task<void> m_taskGenerate;
 };
 
 #endif // MAINWINDOW_H

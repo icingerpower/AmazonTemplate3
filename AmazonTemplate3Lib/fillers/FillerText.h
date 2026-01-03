@@ -36,6 +36,15 @@ public:
             , QHash<QString, QHash<QString, QString>> &sku_fieldId_toValueslangCommon
             , QHash<QString, QHash<QString, QString>> &sku_fieldId_toValues
             ) const override;
+
+private:
+    std::function<bool(const QString &reply, QString &valFormatted)> _makeParseAndValidate(
+            const QString &fieldIdTo) const;
+    void _saveGptReplies(
+            TemplateFiller *templateFiller
+            , const QString &settingsFileName
+            , const QHash<QString, QString> &fieldId_gptReplies
+            ) const;
 };
 
 #endif // FILLERTEXT_H

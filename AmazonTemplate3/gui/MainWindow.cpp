@@ -1,12 +1,17 @@
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QProgressDialog>
+#include <QTableView>
+#include <QVBoxLayout>
+#include <QDialogButtonBox>
+#include <QHeaderView>
 
 #include <TemplateFiller.h>
 #include <ExceptionTemplate.h>
 #include <AttributesMandatoryAiTable.h>
 #include <FileModelToFill.h>
 #include <FileModelSources.h>
+#include <AiFailureTable.h>
 
 #include "../../common/workingdirectory/WorkingDirectoryManager.h"
 #include "OpenAi2.h"
@@ -121,7 +126,7 @@ void MainWindow::onApiKeyChanged(const QString &key)
     _enableGenerateButtonIfValid();
 }
 
-void MainWindow::generate()
+QCoro::Task<void> MainWindow::generate()
 {
     if (baseControlsWithoutPopup())
     {
@@ -140,20 +145,66 @@ void MainWindow::generate()
         QPointer<QProgressDialog> progressGuard{progress};
 
         qDebug() << "Filling templates...";
-        QCoro::connect(m_templateFiller->fillValues(),
-                       this, [this, progressGuard]()
-        {
-            if (progressGuard)
+        try {
+            co_await m_templateFiller->fillValues();
+            if (m_templateFiller->aiFailureTable()->rowCount() == 0)
             {
-                progressGuard->close();
-                progressGuard->deleteLater();
+                QMessageBox::information(
+                            this,
+                            tr("Generation done"),
+                            tr("Template filled successfully"));
             }
-
-            QMessageBox::information(
+        }
+        catch (const ExceptionTemplate &exception)
+        {
+            QMessageBox::critical(
                         this,
-                        tr("Generation done"),
-                        tr("Template filled successfully"));
-        });
+                        exception.title(),
+                        exception.error());
+        }
+        catch (const std::exception &e)
+        {
+            QMessageBox::critical(
+                        this,
+                        tr("Unknown Error"),
+                        QString("An unexpected error occurred: %1").arg(e.what()));
+        }
+        catch (...)
+        {
+            QMessageBox::critical(
+                        this,
+                        tr("Unknown Error"),
+                        tr("An unknown error occurred during template filling."));
+        }
+        if (progressGuard)
+        {
+            progressGuard->close();
+            progressGuard->deleteLater();
+        }
+        displayAiErrors();
+    }
+}
+
+void MainWindow::displayAiErrors()
+{
+    auto aiFailureTalbe = m_templateFiller->aiFailureTable();
+    if (aiFailureTalbe != nullptr && aiFailureTalbe->rowCount() > 0)
+    {
+        auto tableModel = m_templateFiller->aiFailureTable();
+        QDialog dialog(this);
+        dialog.setWindowTitle(tr("Generation done with AI Failures"));
+        dialog.resize(800, 600);
+        auto *layout = new QVBoxLayout(&dialog);
+        auto *tableView = new QTableView(&dialog);
+        tableView->setModel(tableModel);
+        tableView->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+        layout->addWidget(tableView);
+
+        auto *buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok, &dialog);
+        QObject::connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        layout->addWidget(buttonBox);
+
+        dialog.exec();
     }
 }
 
