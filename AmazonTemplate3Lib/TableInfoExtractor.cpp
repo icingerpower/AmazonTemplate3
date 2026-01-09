@@ -211,8 +211,12 @@ QString TableInfoExtractor::pasteTitles()
                                 sizeToTryConvertNum.append(sizeElements[j]);
                             }
                         }
-                        for (const auto &sizeToConvert : sizeToTryConvertNum)
+                        for (auto &sizeToConvert : sizeToTryConvertNum)
                         {
+                            if (sizeToConvert.contains("-"))
+                            {
+                                sizeToConvert = sizeToConvert.split("-").last().trimmed();
+                            }
                             bool isNum = false;
                             if (sizeToConvert.toInt(&isNum)
                                 || sizeToConvert.toDouble(&isNum))
