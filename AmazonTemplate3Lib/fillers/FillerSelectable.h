@@ -41,7 +41,10 @@ public:
             , QHash<QString, QString> &sku_parentSku
             , QHash<QString, QString> &sku_variation
             );
+    using EditCallback = std::function<QCoro::Task<bool>(TemplateFiller*)>;
+    static void recordEditCallback(EditCallback callback);
 private:
+    static EditCallback EDIT_MISSING_CALLBACK;
     QString _getValueId(
             const QString &marketplaceTo
             , const QString &countryCodeTo

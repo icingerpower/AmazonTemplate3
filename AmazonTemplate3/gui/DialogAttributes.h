@@ -3,6 +3,8 @@
 
 #include <QDialog>
 
+#include <QCoro/QCoroCore>
+
 namespace Ui {
 class DialogAttributes;
 }
@@ -16,6 +18,7 @@ class DialogAttributes : public QDialog
 public:
     explicit DialogAttributes(TemplateFiller *templateFiller, QWidget *parent = nullptr);
     ~DialogAttributes();
+    static QCoro::Task<bool> editAttributes(TemplateFiller *templateFiller, QWidget *parent = nullptr);
 
 public slots:
     void missingPossibleAdd();

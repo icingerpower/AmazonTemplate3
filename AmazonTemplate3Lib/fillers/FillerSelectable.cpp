@@ -17,6 +17,14 @@
 #include "AiFailureTable.h"
 
 
+
+FillerSelectable::EditCallback FillerSelectable::EDIT_MISSING_CALLBACK = nullptr;
+
+void FillerSelectable::recordEditCallback(EditCallback callback)
+{
+    EDIT_MISSING_CALLBACK = callback;
+}
+
 bool FillerSelectable::canFill(
         const TemplateFiller *templateFiller
         , const Attribute *attribute
@@ -593,25 +601,37 @@ QCoro::Task<void> FillerSelectable::_fillDifferentLangCountry(
     {
         const auto &sku = it.key();
         const auto &fieldId_toValuesFrom = sku_fieldId_toValuesFrom[sku];
-        if (fieldId_toValuesFrom.contains(fieldIdFrom)
-                && !fieldId_toValuesFrom[fieldIdFrom].isEmpty())
+        bool rejectedIfHelpAsked = false; // In case we ask help from the callback that will usually trigger the UI
+        while (!rejectedIfHelpAsked)
         {
-            const auto &fromValue = fieldId_toValuesFrom[fieldIdFrom];
-            if (equivalentTable->hasEquivalent(fieldIdToV02, fromValue, possibleValues))
+            if (fieldId_toValuesFrom.contains(fieldIdFrom)
+                    && !fieldId_toValuesFrom[fieldIdFrom].isEmpty())
             {
-                const QString &toValue = equivalentTable->getEquivalentValue(fieldIdToV02, fromValue, possibleValues);
-                sku_fieldId_toValues[sku][fieldIdTo] = toValue;
-            }
-            else
-            {
-                auto possibleValuesList = possibleValues.values();
-                possibleValuesList.sort();
-                ExceptionTemplate exception;
-                exception.setInfos(
-                            QObject::tr("No equivalent value")
-                            , QObject::tr("For field id %1 with value %2, we don't have an equivalent value to %3 / %4 / %5 in following possible values: %6")
-                            .arg(fieldIdFrom, fromValue, fieldIdTo, countryCodeTo, langCodeTo, possibleValuesList.join(", ")));
-                exception.raise();
+                const auto &fromValue = fieldId_toValuesFrom[fieldIdFrom];
+                if (equivalentTable->hasEquivalent(fieldIdToV02, fromValue, possibleValues))
+                {
+                    const QString &toValue = equivalentTable->getEquivalentValue(fieldIdToV02, fromValue, possibleValues);
+                    sku_fieldId_toValues[sku][fieldIdTo] = toValue;
+                    break;
+                }
+                else
+                {
+                    if (!rejectedIfHelpAsked && EDIT_MISSING_CALLBACK)
+                    {
+                        rejectedIfHelpAsked = ! co_await EDIT_MISSING_CALLBACK(templateFiller);
+                    }
+                    else
+                    {
+                        auto possibleValuesList = possibleValues.values();
+                        possibleValuesList.sort();
+                        ExceptionTemplate exception;
+                        exception.setInfos(
+                                    QObject::tr("No equivalent value")
+                                    , QObject::tr("For field id %1 with value %2, we don't have an equivalent value to %3 / %4 / %5 in following possible values: %6")
+                                    .arg(fieldIdFrom, fromValue, fieldIdTo, countryCodeTo, langCodeTo, possibleValuesList.join(", ")));
+                        exception.raise();
+                    }
+                }
             }
         }
     }

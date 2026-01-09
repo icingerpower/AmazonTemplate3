@@ -32,6 +32,13 @@ DialogAttributes::~DialogAttributes()
     delete ui;
 }
 
+QCoro::Task<bool> DialogAttributes::editAttributes(TemplateFiller *templateFiller, QWidget *parent)
+{
+    DialogAttributes dialog(templateFiller, parent);
+    auto ret = dialog.exec();
+    co_return ret == QDialog::Accepted;
+}
+
 void DialogAttributes::_connectSlots()
 {
     connect(ui->buttonMissingPossibleAdd,
