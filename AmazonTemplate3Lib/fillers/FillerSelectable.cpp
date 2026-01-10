@@ -633,6 +633,10 @@ QCoro::Task<void> FillerSelectable::_fillDifferentLangCountry(
                     }
                 }
             }
+            else
+            {
+                rejectedIfHelpAsked = true;
+            }
         }
     }
     co_return;

@@ -654,8 +654,8 @@ void TemplateFiller::checkColumnsFilled()
     const auto &fieldId_index = _get_fieldId_index(doc);
     const auto &parentSku_skus = _get_parentSku_skus(doc);
     int indColSku = _getIndColSku(fieldId_index);
-    QSet<QString> fieldIdsWithMissingValue;
-    QSet<QString> fieldIdsShouldNotHaveValue;
+    QHash<QString, QSet<QString>> fieldIdsWithMissingValue;
+    QHash<QString, QSet<QString>> fieldIdsShouldNotHaveValue;
     for (int i=row; i<lastRow; ++i)
     {
         const auto &sku = _get_cellVal(doc, i, indColSku);
@@ -677,7 +677,7 @@ void TemplateFiller::checkColumnsFilled()
                 const auto &celVal = _get_cellVal(doc, i, colIndex);
                 if (celVal.isEmpty())
                 {
-                    fieldIdsWithMissingValue.insert(fieldId);
+                    fieldIdsWithMissingValue[fieldId].insert(sku);
                 }
             }
         }
@@ -691,7 +691,7 @@ void TemplateFiller::checkColumnsFilled()
                     const auto &celVal = _get_cellVal(doc, i, colIndex);
                     if (!celVal.isEmpty())
                     {
-                        fieldIdsShouldNotHaveValue.insert(fieldId);
+                        fieldIdsShouldNotHaveValue[fieldId].insert(sku);
                     }
                 }
             }
@@ -699,7 +699,12 @@ void TemplateFiller::checkColumnsFilled()
     }
     if (fieldIdsWithMissingValue.size() > 0)
     {
-        QStringList fieldIdsWithMissingValueList{fieldIdsWithMissingValue.begin(), fieldIdsWithMissingValue.end()};
+        QStringList fieldIdsWithMissingValueList;
+        for (auto it = fieldIdsWithMissingValue.begin();
+             it != fieldIdsWithMissingValue.end(); ++it)
+        {
+            fieldIdsWithMissingValueList << it.key() + "(" + *it.value().begin() + ")";
+        }
         fieldIdsWithMissingValueList.sort();
         ExceptionTemplate exception;
         exception.setInfos(QObject::tr("Values missing")
@@ -708,7 +713,12 @@ void TemplateFiller::checkColumnsFilled()
     }
     if (fieldIdsShouldNotHaveValue.size() > 0)
     {
-        QStringList fieldIdsShouldNotHaveValueList{fieldIdsShouldNotHaveValue.begin(), fieldIdsShouldNotHaveValue.end()};
+        QStringList fieldIdsShouldNotHaveValueList;
+        for (auto it = fieldIdsShouldNotHaveValue.begin();
+             it != fieldIdsShouldNotHaveValue.end(); ++it)
+        {
+            fieldIdsShouldNotHaveValueList << it.key() + "(" + *it.value().begin() + ")";
+        }
         fieldIdsShouldNotHaveValueList.sort();
         ExceptionTemplate exception;
         exception.setInfos(QObject::tr("Wrong values for parent")

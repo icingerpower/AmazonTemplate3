@@ -269,7 +269,7 @@ QCoro::Task<void> FillerTitle::fill(
                             size = sku_fieldId_toValues[sku][sizeFieldId];
                         }
                     }
-                    if (labelSize != size)
+                    if (labelSize != size && !size.isEmpty())
                     {
                         newTitle += labelSize + "=" + _get_sizeCountry(templateFiller, countryCodeTo, productTypeFrom, gender, age) + "-" + size;
                     }

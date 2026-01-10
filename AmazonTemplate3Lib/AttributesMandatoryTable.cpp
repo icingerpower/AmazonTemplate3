@@ -150,12 +150,7 @@ QVariant AttributesMandatoryTable::headerData(int section, Qt::Orientation orien
 
 Qt::ItemFlags AttributesMandatoryTable::flags(const QModelIndex &index) const
 {
-    Qt::ItemFlags f = QAbstractTableModel::flags(index);
-    if (index.column() == 1)
-    {
-        f |= Qt::ItemIsUserCheckable | Qt::ItemIsEditable;
-    }
-    return f;
+    return Qt::ItemIsEnabled | Qt::ItemIsEditable;
 }
 
 bool AttributesMandatoryTable::needAiReview() const
