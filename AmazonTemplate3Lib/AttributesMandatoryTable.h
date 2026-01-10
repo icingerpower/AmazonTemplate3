@@ -44,20 +44,14 @@ public:
 
 private:
     static const QString KEY_MANDATORY;
-    
+    static const QString KEY_MANDATORY_ALWAYS;
+    static const QStringList HEADER;
+
+    const QString &_getFieldId(int row) const;
+    QSet<QString> m_idsMandatoryAlways;
     QMap<QString, bool> m_idsMandatory;
     QMap<QString, bool> m_idsNotMandatory;
     bool m_needAiReview;
-    //QSet<QString> m_mandatoryIdsCurTemplates; // Initial mandatory from file
-    //QSet<QString> m_idsAddedManually;
-    //QSet<QString> m_idsRemovedManually;
-    
-    //QList<QString> m_orderedFieldIds;
-    
-    // Previous "history" or fallback set
-    //QSet<QString> m_mandatoryIdsPreviousTemplates;
-    
-    // Internal helper for manual overrides persistence
     QString m_settingsPath;
     QString m_productType;
 
