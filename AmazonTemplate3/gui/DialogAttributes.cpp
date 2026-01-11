@@ -1,3 +1,6 @@
+#include <QMessageBox>
+#include <QInputDialog>
+
 #include <AttributeValueReplacedTable.h>
 #include <AttributePossibleMissingTable.h>
 #include <AttributeEquivalentTable.h>
@@ -32,9 +35,14 @@ DialogAttributes::~DialogAttributes()
     delete ui;
 }
 
-QCoro::Task<bool> DialogAttributes::editAttributes(TemplateFiller *templateFiller, QWidget *parent)
+QCoro::Task<bool> DialogAttributes::editAttributes(
+        TemplateFiller *templateFiller, const QString &title, const QString &message)
 {
-    DialogAttributes dialog(templateFiller, parent);
+    QMessageBox::information(
+                nullptr,
+                title,
+                tr("You will be asked to fix the following error") + ". " + message);
+    DialogAttributes dialog(templateFiller);
     auto ret = dialog.exec();
     co_return ret == QDialog::Accepted;
 }
@@ -57,6 +65,14 @@ void DialogAttributes::_connectSlots()
             &QPushButton::clicked,
             this,
             &DialogAttributes::replaceRemove);
+    connect(ui->buttonAddFlag,
+            &QPushButton::clicked,
+            this,
+            &DialogAttributes::flagsAdd);
+    connect(ui->buttonRemoveEquivalence,
+            &QPushButton::clicked,
+            this,
+            &DialogAttributes::equivalentRemove);
 }
 
 void DialogAttributes::missingPossibleAdd()
@@ -111,5 +127,41 @@ void DialogAttributes::replaceRemove()
     if (selIndexes.size() > 0)
     {
         m_templateFiller->attributeValueReplacedTable()->remove(selIndexes[0]);
+    }
+}
+
+void DialogAttributes::equivalentRemove()
+{
+    const auto &selIndexes
+            = ui->tableViewEquivalences
+            ->selectionModel()->selectedIndexes();
+    if (selIndexes.size() > 0)
+    {
+        m_templateFiller->attributeEquivalentTable()->remove(selIndexes[0]);
+    }
+}
+
+void DialogAttributes::flagsAdd()
+{
+    const auto &fieldIds = m_templateFiller->getAllFieldIds();
+    const auto &marketplace = m_templateFiller->marketplaceFrom();
+    const auto &unrecordedFieldIds = m_templateFiller->attributeFlagsTable()->getUnrecordedFieldIds(
+                marketplace, fieldIds);
+    if (unrecordedFieldIds.isEmpty())
+    {
+        QMessageBox::information(
+                    this,
+                    tr("No more flags"),
+                    tr("There is no more flags to add."));
+        return;
+    }
+    QStringList items{unrecordedFieldIds.begin(), unrecordedFieldIds.end()};
+    items.sort();
+    bool ok;
+    QString item = QInputDialog::getItem(this, tr("Select attribute"),
+                                         tr("Attribute:"), items, 0, false, &ok);
+    if (ok && !item.isEmpty())
+    {
+        m_templateFiller->attributeFlagsTable()->recordAttribute({{marketplace, item}});
     }
 }

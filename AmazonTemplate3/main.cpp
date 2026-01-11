@@ -1,6 +1,8 @@
 #include "../../common/workingdirectory/WorkingDirectoryManager.h"
 #include "../../common/workingdirectory/DialogOpenConfig.h"
 #include "../../common/types/types.h"
+#include "gui/DialogAttributes.h"
+#include "fillers/FillerSelectable.h"
 
 #include "gui/MainWindow.h"
 
@@ -25,6 +27,7 @@ int main(int argc, char *argv[])
     {
         return 0;
     }
+    FillerSelectable::recordEditCallback(&DialogAttributes::editAttributes);
 
     MainWindow w;
     w.show();

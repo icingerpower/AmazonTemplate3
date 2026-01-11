@@ -347,6 +347,7 @@ QCoro::Task<void> FillerText::fill(
                                     + valueFrom + "\"\n"
                                     "Output a JSON object with the key \"value\" containing the translated text.";
                             auto step = QSharedPointer<OpenAi2::StepMultipleAsk>::create();
+                            qDebug() << "\n--\nFillerText getPrompt NO value FROM:" << prompt;
                             step->getPrompt = [prompt](int){ return prompt; };
                             step->maxRetries = 5;
                             step->neededReplies = 1;
@@ -412,6 +413,7 @@ QCoro::Task<void> FillerText::fill(
                             }
                             prompt += "\nOutput a JSON object with the key \"value\" containing the generated text.";
 
+                            qDebug() << "\n--\nFillerText getPrompt VALUE FROM:" << prompt;
                             step->getPrompt = [prompt](int){ return prompt; };
                             step->maxRetries = isDescription ? 8 : 5;
                             step->neededReplies = 2; // Ask for 2 replies

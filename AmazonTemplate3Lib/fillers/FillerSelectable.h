@@ -41,7 +41,7 @@ public:
             , QHash<QString, QString> &sku_parentSku
             , QHash<QString, QString> &sku_variation
             );
-    using EditCallback = std::function<QCoro::Task<bool>(TemplateFiller*)>;
+    using EditCallback = std::function<QCoro::Task<bool>(TemplateFiller*, const QString &error, const QString &message)>;
     static void recordEditCallback(EditCallback callback);
 private:
     static EditCallback EDIT_MISSING_CALLBACK;

@@ -18,13 +18,15 @@ class DialogAttributes : public QDialog
 public:
     explicit DialogAttributes(TemplateFiller *templateFiller, QWidget *parent = nullptr);
     ~DialogAttributes();
-    static QCoro::Task<bool> editAttributes(TemplateFiller *templateFiller, QWidget *parent = nullptr);
+    static QCoro::Task<bool> editAttributes(TemplateFiller *templateFiller, const QString &title, const QString &message);
 
 public slots:
     void missingPossibleAdd();
     void missingPossibleRemove();
     void replaceAdd();
     void replaceRemove();
+    void equivalentRemove();
+    void flagsAdd();
 
 private:
     Ui::DialogAttributes *ui;

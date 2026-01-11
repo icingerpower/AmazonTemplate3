@@ -79,9 +79,12 @@ void TemplateFiller::setTemplates(
         , const QStringList &templateSourcePaths
         , const QMap<QString, QString> &skuPattern_customInstructions)
 {
+    qDebug() << "setTemplates start";
     m_skuPattern_customInstructions = skuPattern_customInstructions;
     QXlsx::Document doc(templateFromPath);
+    qDebug() << "Doc loaded";
     const auto &productType = _get_productType(doc); // TODO Exception empty file + ma
+    qDebug() << "Product type:" << productType;
     if (productType.isEmpty())
     {
         ExceptionTemplate exception;
@@ -120,20 +123,30 @@ void TemplateFiller::setTemplates(
             }
         }
     }
+    qDebug() << "Getting/resolving mandatory fields...";
     const auto &fieldIdMandatory = _get_fieldIdMandatoryAll();
         // 2. Resolve "Previous" mandatory fields
     const auto &previousFieldIdMandatory = _get_fieldIdMandatoryPrevious();
+    qDebug() << "Got mandatory fields.";
 
+    qDebug() << "Allocating AttributePossibleMissingTable...";
     m_attributePossibleMissingTable = new AttributePossibleMissingTable{commonSettingsDir};
+    qDebug() << "Allocating AttributeValueReplacedTable...";
     m_attributeValueReplacedTable = new AttributeValueReplacedTable{commonSettingsDir};
+    qDebug() << "Allocating AttributesMandatoryTable...";
     m_mandatoryAttributesTable = new AttributesMandatoryTable{
             commonSettingsDir, productType, fieldIdMandatory, previousFieldIdMandatory, all_fieldId_index};
+    qDebug() << "Allocating AttributeEquivalentTable...";
     m_attributeEquivalentTable = new AttributeEquivalentTable{commonSettingsDir};
+    qDebug() << "Allocating AttributeFlagsTable...";
     m_attributeFlagsTable = new AttributeFlagsTable{commonSettingsDir};
+    qDebug() << "Allocating AiFailureTable...";
     m_aiFailureTable = new AiFailureTable{};
     m_marketplaceFrom = _get_marketplaceFrom();
+    qDebug() << "Recording attributes not recorded yet...";
     m_attributeFlagsTable->recordAttributeNotRecordedYet(m_marketplaceFrom, fieldIdMandatory);
     m_attributeFlagsTable->recordAttributeNotRecordedYet(m_marketplaceFrom, m_mandatoryAttributesTable->getMandatoryIds());
+    qDebug() << "Connecting mandatory attributes table...";
     m_connectionFlagsTable = m_mandatoryAttributesTable->connect(m_mandatoryAttributesTable,
                               &AttributesMandatoryTable::dataChanged,
                               m_mandatoryAttributesTable,
@@ -141,6 +154,7 @@ void TemplateFiller::setTemplates(
     const auto &newMandatoryIds = m_mandatoryAttributesTable->getMandatoryIds();
     m_attributeFlagsTable->recordAttributeNotRecordedYet(m_marketplaceFrom, newMandatoryIds);
     });
+    qDebug() << "TemplateFiller initialization done.";
 }
 
 void TemplateFiller::_clearAttributeManagers()
@@ -191,6 +205,22 @@ const QString &TemplateFiller::marketplaceFrom() const
 QStringList TemplateFiller::_get_allTemplatePaths() const
 {
     return QStringList{m_templateFromPath} << m_templateToPaths;
+}
+
+QSet<QString> TemplateFiller::getAllFieldIds() const
+{
+    QSet<QString> allFieldIds;
+    for (const auto &templatePath : _get_allTemplatePaths())
+    {
+        QXlsx::Document doc{templatePath};
+        const auto &fieldId_index = _get_fieldId_index(doc);
+        const auto &fieldIds = fieldId_index.keys();
+        for (const auto &fieldId : fieldIds)
+        {
+            allFieldIds.insert(fieldId);
+        }
+    }
+    return allFieldIds;
 }
 
 void TemplateFiller::checkParentSkus()
@@ -1883,14 +1913,35 @@ QCoro::Task<void> TemplateFiller::_readAgeGender()
                  genderFieldIdFound, "Male", genderAttribute.data());
         }
         if (m_attributeEquivalentTable->getEquivalentGenderWomen().isEmpty()) {
-             co_await m_attributeEquivalentTable->askAiEquivalentValues(
-                 genderFieldIdFound, "Female", genderAttribute.data());
+            co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                        genderFieldIdFound, "Female", genderAttribute.data());
         }
         if (m_attributeEquivalentTable->getEquivalentGenderUnisex().isEmpty()) {
-             co_await m_attributeEquivalentTable->askAiEquivalentValues(
-                 genderFieldIdFound, "Unisex", genderAttribute.data());
+            co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                        genderFieldIdFound, "Unisex", genderAttribute.data());
         }
         if (m_attributeEquivalentTable->getEquivalentGenderMen().contains(gender))
+        {
+            m_gender = AbstractFiller::Male;
+        }
+        else if (m_attributeEquivalentTable->getEquivalentGenderWomen().contains(gender))
+        {
+            m_gender = AbstractFiller::Female;
+        }
+        else if (m_attributeEquivalentTable->getEquivalentGenderUnisex().contains(gender))
+        {
+            m_gender = AbstractFiller::Unisex;
+        }
+        if (m_gender == AbstractFiller::UndefinedGender)
+        {
+            // TODO do for mal, female and Unisex, again m_attributeEquivalentTable->askAiEquivalentValues with the second signature
+        // const QString &fieldIdAmzV02
+        // , const QString &value
+        // , const QString &langCodeFrom
+        // , const QString &langCodeTo
+        // , const QSet<QString> &possibleValues)
+        }
+        if (m_attributeEquivalentTable->getEquivalentGenderMen().contains(gender)) // TODO factorize those 3 if that are twice the same code in this function
         {
             m_gender = AbstractFiller::Male;
         }

@@ -68,6 +68,7 @@ private slots:
     void robustness_double_callback();
     void robustness_single_failure_counter();
     void test_askGptMultipleTimeCoro_Real();
+    void test_runStepCollectNThenAskBestAI_timeout();
 
 private:
     void setFakeTransport(std::function<void(const QString&, const QString&, const QList<QString>&, std::function<void(QString)>, std::function<void(QString)>)> transport);
@@ -725,6 +726,58 @@ void TestOpenAi2::caching_isolation()
     loop2.exec();
 
     QCOMPARE(res2, QString("valB"));
+}
+
+void TestOpenAi2::test_runStepCollectNThenAskBestAI_timeout()
+{
+    auto ai = OpenAi2::instance();
+    ai->resetForTests();
+    ai->init("k");
+
+    auto step = QSharedPointer<OpenAi2::Step>::create();
+    step->id = "timeout_test";
+    step->gptModel = "gpt-model";
+    step->maxRetries = 1;
+    step->getPrompt = [](int){ return "p"; };
+    step->validate = [](const QString&, const QString&){ return true; };
+    step->apply = [](const QString&){};
+
+    // Transport that succeeds for first request (collection) and hangs for second (best ai)
+    setFakeTransport([&](const QString&, const QString& p, const QList<QString>&, std::function<void(QString)> ok, std::function<void(QString)>){
+         if (p == "p") {
+             // Collection phase: succeed immediately
+             QTimer::singleShot(0, [ok](){ ok("reply_1"); });
+         } else if (p == "judge_prompt") {
+             // Ask Best phase: hang (do nothing)
+             // This forces the timeout to fire
+         }
+    });
+
+    bool onFailCalled = false;
+    QString errorMsg;
+    QElapsedTimer timer;
+    timer.start();
+
+    QEventLoop loop;
+    ai->_runStepCollectNThenAskBestAI(step, 1, 
+        [](int, const QList<QString>&){ return "judge_prompt"; },
+        [](const QString&){ return true; },
+        [&](QString){ loop.quit(); },
+        [&](QString err){ 
+            onFailCalled = true; 
+            errorMsg = err; 
+            loop.quit();
+        }
+    );
+    
+    QTimer::singleShot(5000, &loop, &QEventLoop::quit); 
+    loop.exec();
+    
+    QVERIFY(onFailCalled);
+    QCOMPARE(errorMsg, QString("timeout"));
+    
+    // Check that we didn't wait excessively (should be ~1s)
+    QVERIFY(timer.elapsed() < 4000);
 }
 
 void TestOpenAi2::caching_disabled()

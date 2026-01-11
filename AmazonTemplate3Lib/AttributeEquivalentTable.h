@@ -14,6 +14,7 @@ class AttributeEquivalentTable : public QAbstractTableModel
 public:
     explicit AttributeEquivalentTable(
             const QString &workingDirectory, QObject *parent = nullptr);
+    void remove(const QModelIndex &index);
 
     int getPosAttr(const QString &fieldIdAmzV02, const QString &value) const;
     int getPosAttr(const QString &fieldIdAmzV02, const QSet<QString> &equivalentValues) const;

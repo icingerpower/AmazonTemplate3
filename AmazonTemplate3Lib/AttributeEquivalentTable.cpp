@@ -29,6 +29,14 @@ AttributeEquivalentTable::AttributeEquivalentTable(
     _buildHash();
 }
 
+void AttributeEquivalentTable::remove(const QModelIndex &index)
+{
+    beginRemoveRows(QModelIndex{}, index.row(), index.row());
+    m_listOfStringList.removeAt(index.row());
+    _saveInFile();
+    endRemoveRows();
+}
+
 bool AttributeEquivalentTable::hasEquivalent(const QString &fieldIdAmzV02, const QString &value) const
 {
     auto it = m_fieldIdAmzV02_listOfEquivalents.constFind(fieldIdAmzV02);
@@ -131,8 +139,18 @@ void AttributeEquivalentTable::recordAttribute(
         equivalentsList.sort();
         newRow << equivalentsList.join(CELL_SEP);
         Q_ASSERT(!newRow.last().contains("Amazon V02"));
-        beginInsertRows(QModelIndex{}, 0, 0);
-        m_listOfStringList.insert(0, newRow);
+        // Find insertion point to keep alphabetical order
+        int insertPos = 0;
+        for (int i = 0; i < m_listOfStringList.size(); ++i) {
+            if (m_listOfStringList[i][0].compare(fieldIdAmzV02, Qt::CaseInsensitive) > 0) {
+                insertPos = i;
+                break;
+            }
+            insertPos = i + 1;
+        }
+
+        beginInsertRows(QModelIndex{}, insertPos, insertPos);
+        m_listOfStringList.insert(insertPos, newRow);
         _saveInFile();
         _buildHash();
         endInsertRows();

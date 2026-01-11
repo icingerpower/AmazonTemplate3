@@ -30,8 +30,8 @@ const QList<const AbstractFiller *> AbstractFiller::ALL_FILLERS_SORTED
         allFillers << &fillerPrice;
         static const FillerSize fillerSize;
         allFillers << &fillerSize;
-        static const FillerBulletPoints fillerBulletPoints;
-        allFillers << &fillerBulletPoints;
+        //static const FillerBulletPoints fillerBulletPoints;
+        //allFillers << &fillerBulletPoints;
         static const FillerSelectable fillerSelectable;
         allFillers << &fillerSelectable;
         static const FillerKeywords fillerKeywords;

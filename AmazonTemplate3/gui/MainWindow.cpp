@@ -128,24 +128,22 @@ void MainWindow::onApiKeyChanged(const QString &key)
 
 QCoro::Task<void> MainWindow::generate()
 {
-    if (baseControlsWithoutPopup())
-    {
+    auto progress = new QProgressDialog(
+                tr("Filling template..."),
+                QString{}, 0, 0, this);
+    progress->setWindowModality(Qt::ApplicationModal);
+    progress->setCancelButton(nullptr);
+    progress->setMinimumDuration(0);
+    progress->setAutoClose(false);
+    progress->setAutoReset(false);
+    progress->setValue(0);
+    progress->show();
+    QPointer<QProgressDialog> progressGuard{progress};
 
-        auto progress = new QProgressDialog(
-                    tr("Filling template..."),
-                    QString{}, 0, 0, this);
-        progress->setWindowModality(Qt::ApplicationModal);
-        progress->setCancelButton(nullptr);
-        progress->setMinimumDuration(0);
-        progress->setAutoClose(false);
-        progress->setAutoReset(false);
-        progress->setValue(0);
-        progress->show();
-
-        QPointer<QProgressDialog> progressGuard{progress};
-
-        qDebug() << "Filling templates...";
-        try {
+    try {
+        if (baseControlsWithoutPopup())
+        {
+            qDebug() << "Filling templates...";
             co_await m_templateFiller->fillValues();
             if (m_templateFiller->aiFailureTable()->rowCount() == 0)
             {
@@ -155,34 +153,34 @@ QCoro::Task<void> MainWindow::generate()
                             tr("Template filled successfully"));
             }
         }
-        catch (const ExceptionTemplate &exception)
-        {
-            QMessageBox::critical(
-                        this,
-                        exception.title(),
-                        exception.error());
-        }
-        catch (const std::exception &e)
-        {
-            QMessageBox::critical(
-                        this,
-                        tr("Unknown Error"),
-                        QString("An unexpected error occurred: %1").arg(e.what()));
-        }
-        catch (...)
-        {
-            QMessageBox::critical(
-                        this,
-                        tr("Unknown Error"),
-                        tr("An unknown error occurred during template filling."));
-        }
-        if (progressGuard)
-        {
-            progressGuard->close();
-            progressGuard->deleteLater();
-        }
-        displayAiErrors();
     }
+    catch (const ExceptionTemplate &exception)
+    {
+        QMessageBox::critical(
+                    this,
+                    exception.title(),
+                    exception.error());
+    }
+    catch (const std::exception &e)
+    {
+        QMessageBox::critical(
+                    this,
+                    tr("Unknown Error"),
+                    QString("An unexpected error occurred: %1").arg(e.what()));
+    }
+    catch (...)
+    {
+        QMessageBox::critical(
+                    this,
+                    tr("Unknown Error"),
+                    tr("An unknown error occurred during template filling."));
+    }
+    if (progressGuard)
+    {
+        progressGuard->close();
+        progressGuard->deleteLater();
+    }
+    displayAiErrors();
 }
 
 void MainWindow::displayAiErrors()

@@ -13,6 +13,8 @@
 #include "AttributeFlagsTable.h"
 #include "ExceptionTemplate.h"
 
+#include "FillerPrice.h"
+#include "FillerSize.h"
 #include "FillerSelectable.h"
 #include "AiFailureTable.h"
 
@@ -31,8 +33,22 @@ bool FillerSelectable::canFill(
         , const QString &marketplaceFrom
         , const QString &fieldIdFrom) const
 {
-    bool can = attribute->isChoice(marketplaceFrom) && !fieldIdFrom.contains("price");
-    return can;
+    QList<const AbstractFiller *> otherFillers;
+    const FillerPrice fillerPrice;
+    otherFillers << &fillerPrice;
+    const FillerSize fillerSize;
+    otherFillers << &fillerSize;
+    for (const auto &filler : otherFillers)
+    {
+        if (filler->canFill(templateFiller,
+                            attribute,
+                            marketplaceFrom,
+                            fieldIdFrom))
+        {
+            return false;
+        }
+    }
+    return attribute->isChoice(marketplaceFrom);
 }
 
 QCoro::Task<void> FillerSelectable::fill(
@@ -184,7 +200,7 @@ static QSharedPointer<OpenAi2::StepMultipleAsk> createSelectStep(
     step->gptModel = "gpt-5.2";
     step->maxRetries = 10;
 
-    step->getPrompt = [marketplace, fieldId, valuesForAi, possibleValues](int nAttempts) -> QString
+    step->getPrompt = [marketplace, id, fieldId, valuesForAi, possibleValues](int nAttempts) -> QString
     {
         Q_UNUSED(nAttempts)
         QString prompt = QString("Marketplace: %1\n").arg(marketplace);
@@ -201,14 +217,15 @@ static QSharedPointer<OpenAi2::StepMultipleAsk> createSelectStep(
             }
         }
         prompt += "\nPossible Values:\n";
-        Q_ASSERT(possibleValues.size() < 50); // Shold not happen
         QList<QString> sortedValues = possibleValues.values();
         std::sort(sortedValues.begin(), sortedValues.end());
+        //Q_ASSERT(possibleValues.size() < 50); // Shold not happen
         for (const auto &val : sortedValues)
         {
             prompt += QString("- %1\n").arg(val);
         }
         prompt += "\nInstruction: Select the most appropriate value from the 'Possible Values' list that matches the product attributes. Reply ONLY with a valid JSON object with key \"value\" containing the exact selected value. Example: {\"value\": \"Selected Value\"}. If no value matches, suggest the closest one.";
+        qDebug() << "\n--\nFillerSelectable getPrompt:" << prompt;
         return prompt;
     };
 
@@ -353,6 +370,17 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
                 {
                     const QString &cachedReply = templateFiller->getAiReply(settingsFileName, valueId);
                     // Validate cached reply using the step creation logic (re-using createSelectStep for validation logic)
+                    if (possibleValues.size() > 50)
+                    {
+                        QList<QString> sortedValues = possibleValues.values();
+                        std::sort(sortedValues.begin(), sortedValues.end());
+                        ExceptionTemplate exception;
+                        exception.setInfos(
+                                    QObject::tr("Too much possible values")
+                                    , QObject::tr("For field id %1 / %2 has too much possible values (%3 / %4): %5")
+                                    .arg(fieldIdFrom, fieldIdTo, valueId, sku, sortedValues.join(", ")));
+                        exception.raise();
+                    }
                     auto step = ::createSelectStep(valueId, marketplaceTo, fieldIdTo, valuesForAi, possibleValues);
                     if (step->validate(cachedReply, ""))
                     {
@@ -616,19 +644,21 @@ QCoro::Task<void> FillerSelectable::_fillDifferentLangCountry(
                 }
                 else
                 {
+                    auto possibleValuesList = possibleValues.values();
+                    possibleValuesList.sort();
+                    QString title = QObject::tr("No equivalent value");
+                    QString description = QObject::tr("For field id %1 with value %2 (%3), we don't have an equivalent value to %4 / %5 / %6 in following possible values: %7"
+                                                      ).arg(fieldIdFrom, sku, fromValue, fieldIdTo, countryCodeTo, langCodeTo, possibleValuesList.join(", "));
                     if (!rejectedIfHelpAsked && EDIT_MISSING_CALLBACK)
                     {
-                        rejectedIfHelpAsked = ! co_await EDIT_MISSING_CALLBACK(templateFiller);
+                        rejectedIfHelpAsked = ! co_await EDIT_MISSING_CALLBACK(templateFiller, title, description);
                     }
                     else
                     {
-                        auto possibleValuesList = possibleValues.values();
-                        possibleValuesList.sort();
                         ExceptionTemplate exception;
                         exception.setInfos(
-                                    QObject::tr("No equivalent value")
-                                    , QObject::tr("For field id %1 with value %2, we don't have an equivalent value to %3 / %4 / %5 in following possible values: %6")
-                                    .arg(fieldIdFrom, fromValue, fieldIdTo, countryCodeTo, langCodeTo, possibleValuesList.join(", ")));
+                                    title
+                                    , description);
                         exception.raise();
                     }
                 }

@@ -78,6 +78,7 @@ public:
     AttributeValueReplacedTable *attributeValueReplacedTable() const;
 
     const QString &marketplaceFrom() const;
+    QSet<QString> getAllFieldIds() const;
 
     const QHash<QString, QString> &sku_imagePreviewFilePath() const;
     void saveAiValue(const QString &settingsFileName, const QString &id, const QString &value) const;
