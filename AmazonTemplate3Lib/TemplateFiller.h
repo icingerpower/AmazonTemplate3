@@ -145,6 +145,8 @@ private:
     int _getIndColAge(const QHash<QString, int> &fieldId_index) const;
     int _getIndColGender(const QHash<QString, int> &fieldId_index) const;
     QCoro::Task<void> _readAgeGender();
+    void _checkGender(const QString &gender);
+    void _checkAge(const QString &age);
     QString _get_productType(QXlsx::Document &doc) const;
     QString _get_productType(const QString &filePath) const;
     QHash<QString, QHash<QString, QSharedPointer<Attribute>>> m_marketplace_attributeId_attributeInfos;

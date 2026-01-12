@@ -762,8 +762,8 @@ QCoro::Task<void> TemplateFiller::fillValues()
     m_aiFailureTable->clear();
     buildAttributes();
     m_sku_imagePreviewFilePath = checkPreviewImages();
-    _fillValuesSources();
     co_await _readAgeGender();
+    _fillValuesSources();
     m_sku_fieldId_fromValues = _get_sku_fieldId_fromValues(m_templateFromPath);
     const auto &mandatoryFieldIds = m_mandatoryAttributesTable->getMandatoryIds();
     QStringList sortedFieldIds{mandatoryFieldIds.begin(), mandatoryFieldIds.end()};
@@ -1802,6 +1802,38 @@ QString TemplateFiller::_getLangCodeFromText(const QString &langInfos) const
     return langInfos;
 }
 
+void TemplateFiller::_checkAge(const QString &age)
+{
+    if (m_attributeEquivalentTable->getEquivalentAgeAdult().contains(age))
+    {
+        m_age = AbstractFiller::Adult;
+    }
+    else if (m_attributeEquivalentTable->getEquivalentAgeKid().contains(age))
+    {
+        m_age = AbstractFiller::Kid;
+    }
+    else if (m_attributeEquivalentTable->getEquivalentAgeBaby().contains(age))
+    {
+        m_age = AbstractFiller::Baby;
+    }
+}
+
+void TemplateFiller::_checkGender(const QString &gender)
+{
+    if (m_attributeEquivalentTable->getEquivalentGenderMen().contains(gender))
+    {
+        m_gender = AbstractFiller::Male;
+    }
+    else if (m_attributeEquivalentTable->getEquivalentGenderWomen().contains(gender))
+    {
+        m_gender = AbstractFiller::Female;
+    }
+    else if (m_attributeEquivalentTable->getEquivalentGenderUnisex().contains(gender))
+    {
+        m_gender = AbstractFiller::Unisex;
+    }
+}
+
 
 QCoro::Task<void> TemplateFiller::_readAgeGender()
 {
@@ -1853,7 +1885,7 @@ QCoro::Task<void> TemplateFiller::_readAgeGender()
         {
             if (it.key().startsWith(id))
             {
-                QString realId = it.key();
+                const QString &realId = it.key();
                 if (m_marketplace_attributeId_attributeInfos.contains(marketplace) && 
                     m_marketplace_attributeId_attributeInfos[marketplace].contains(realId))
                 {
@@ -1890,17 +1922,19 @@ QCoro::Task<void> TemplateFiller::_readAgeGender()
              co_await m_attributeEquivalentTable->askAiEquivalentValues(
                  ageFieldIdFound, "Infant", ageAttribute.data());
         }
-        if (m_attributeEquivalentTable->getEquivalentAgeAdult().contains(age))
+        _checkAge(age);
+        if (m_age == AbstractFiller::UndefinedAge && !age.isEmpty())
         {
-            m_age = AbstractFiller::Adult;
-        }
-        else if (m_attributeEquivalentTable->getEquivalentAgeKid().contains(age))
-        {
-            m_age = AbstractFiller::Kid;
-        }
-        else if (m_attributeEquivalentTable->getEquivalentAgeBaby().contains(age))
-        {
-            m_age = AbstractFiller::Baby;
+            const auto &productType = _get_productType(doc);
+            const auto &possibleValues = ageAttribute->possibleValues(
+                        m_marketplaceFrom, m_countryCodeFrom, m_langCodeFrom, productType);
+            co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                        genderFieldIdFound
+                        , age
+                        , m_langCodeFrom
+                        , m_langCodeFrom
+                        , possibleValues);
+            _checkAge(age);
         }
     }
 
@@ -1920,38 +1954,20 @@ QCoro::Task<void> TemplateFiller::_readAgeGender()
             co_await m_attributeEquivalentTable->askAiEquivalentValues(
                         genderFieldIdFound, "Unisex", genderAttribute.data());
         }
-        if (m_attributeEquivalentTable->getEquivalentGenderMen().contains(gender))
+        _checkGender(gender);
+
+        if (m_gender == AbstractFiller::UndefinedGender && !gender.isEmpty())
         {
-            m_gender = AbstractFiller::Male;
-        }
-        else if (m_attributeEquivalentTable->getEquivalentGenderWomen().contains(gender))
-        {
-            m_gender = AbstractFiller::Female;
-        }
-        else if (m_attributeEquivalentTable->getEquivalentGenderUnisex().contains(gender))
-        {
-            m_gender = AbstractFiller::Unisex;
-        }
-        if (m_gender == AbstractFiller::UndefinedGender)
-        {
-            // TODO do for mal, female and Unisex, again m_attributeEquivalentTable->askAiEquivalentValues with the second signature
-        // const QString &fieldIdAmzV02
-        // , const QString &value
-        // , const QString &langCodeFrom
-        // , const QString &langCodeTo
-        // , const QSet<QString> &possibleValues)
-        }
-        if (m_attributeEquivalentTable->getEquivalentGenderMen().contains(gender)) // TODO factorize those 3 if that are twice the same code in this function
-        {
-            m_gender = AbstractFiller::Male;
-        }
-        else if (m_attributeEquivalentTable->getEquivalentGenderWomen().contains(gender))
-        {
-            m_gender = AbstractFiller::Female;
-        }
-        else if (m_attributeEquivalentTable->getEquivalentGenderUnisex().contains(gender))
-        {
-            m_gender = AbstractFiller::Unisex;
+            const auto &productType = _get_productType(doc);
+            const auto &possibleValues = genderAttribute->possibleValues(
+                        m_marketplaceFrom, m_countryCodeFrom, m_langCodeFrom, productType);
+            co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                        genderFieldIdFound
+                        , gender
+                        , m_langCodeFrom
+                        , m_langCodeFrom
+                        , possibleValues);
+            _checkGender(gender);
         }
     }
     co_return;
