@@ -38,17 +38,24 @@ find_package(QXlsxQt6 REQUIRED HINTS "${Qt_DIR_HINT}/../../../../lib/cmake/QXlsx
 # This will install QCoro into /usr/local/ prefix, change it by passing -DCMAKE_INSTALL_PREFIX=/usr
 # to the cmake command above.
 # sudo make install
+set(Qt_DIR_HINT "${Qt${QT_VERSION_MAJOR}_DIR}")
+message("Qt hints: ${Qt_DIR_HINT}")
 set(QCoro_DIR_HINT_1 "/usr/local/lib/cmake/QCoro6")
 set(QCoro_DIR_HINT_2 "/usr/lib/cmake/QCoro6")
 set(QCoro_DIR_HINT_3 "${Qt_DIR_HINT}/../../../../lib/cmake/QCoro6") # only if you installed QCoro into the same Qt prefix
-message("QCoro hints: ${QCoro_DIR_HINT_1} ; ${QCoro_DIR_HINT_2} ; ${QCoro_DIR_HINT_3}")
+set(QCoro_DIR_HINT_4 "${Qt_DIR_HINT}/../../../../lib/cmake/lib/cmake/QCoro6") # only if you installed QCoro into the same Qt prefix
+message("QCoro hints: ${QCoro_DIR_HINT_1} ; ${QCoro_DIR_HINT_2} ; ${QCoro_DIR_HINT_3} ; ${QCoro_DIR_HINT_4}")
+
+list(APPEND CMAKE_PREFIX_PATH "${Qt_DIR_HINT}/../../../../lib/cmake")
 
 find_package(QCoro6 REQUIRED COMPONENTS Network
     HINTS
         "${QCoro_DIR_HINT_1}"
         "${QCoro_DIR_HINT_2}"
         "${QCoro_DIR_HINT_3}"
+        "${QCoro_DIR_HINT_4}"
 )
+
 
 add_library(AmazonTemplate3Lib STATIC
   AmazonTemplate3Lib.cpp
