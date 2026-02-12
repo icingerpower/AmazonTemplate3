@@ -177,6 +177,7 @@ QCoro::Task<void> MainWindow::generate()
                     tr("Unknown Error"),
                     tr("An unknown error occurred during template filling."));
     }
+//*/
     if (progressGuard)
     {
         progressGuard->close();
@@ -435,6 +436,7 @@ QCoro::Task<void> MainWindow::baseControls()
                     tr("Unknown Error"),
                     tr("An unknown error occurred during base controls."));
     }
+//*/
 
     if (progressGuard)
     {

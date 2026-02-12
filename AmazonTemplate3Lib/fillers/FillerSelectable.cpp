@@ -492,16 +492,25 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
                         co_return;
                     };
                     tasks << QSharedPointer<QCoro::Task<void>>::create(task());
+
+                    // Batching check
+                    if (tasks.size() >= 50)
+                    {
+                        for (auto &task : tasks)
+                        {
+                            co_await *task;
+                        }
+                        tasks.clear();
+                    }
                 }
             }
         }
     }
 
-    int taskIdx = 0;
+    // Process remaining tasks
     for (auto &task : tasks)
     {
         co_await *task;
-        taskIdx++;
     }
 
     for (auto it = sku_fieldId_fromValues.cbegin();
@@ -615,6 +624,16 @@ QCoro::Task<void> FillerSelectable::_fillDifferentLangCountry(
                     auto task = equivalentTable->askAiEquivalentValues(
                                 fieldIdToV02, fromValue, attribute);
                     tasks << QSharedPointer<QCoro::Task<void>>::create(std::move(task));
+                }
+
+                // Batching check
+                if (tasks.size() >= 50)
+                {
+                    for (auto &task : tasks)
+                    {
+                        co_await *task;
+                    }
+                    tasks.clear();
                 }
             }
         }
