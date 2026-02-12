@@ -417,6 +417,8 @@ QHash<QString, QString> TemplateFiller::checkPreviewImages()
     _selectTemplateSheet(document);
     const auto &fieldId_index = _get_fieldId_index(document);
     const auto &parentSku_skus = _get_parentSku_skus(document);
+    const auto &partialUpdateSkus = _get_partialUpdateSkus(document);
+    const auto &removedSkus = _get_removedSkus(document);
     int indColSku = _getIndColSku(fieldId_index);
     int indColSkuParent = _getIndColSkuParent(fieldId_index);
     int indColColor = _getIndColColorName(fieldId_index);
@@ -435,6 +437,10 @@ QHash<QString, QString> TemplateFiller::checkPreviewImages()
         }
         QString sku{cellSku->value().toString()};
         if (sku.startsWith("ABC") || sku.isEmpty())
+        {
+            continue;
+        }
+        if (partialUpdateSkus.contains(sku) || removedSkus.contains(sku))
         {
             continue;
         }
@@ -683,6 +689,8 @@ void TemplateFiller::checkColumnsFilled()
     int row = _getRowFieldId(version) + 1;
     const auto &fieldId_index = _get_fieldId_index(doc);
     const auto &parentSku_skus = _get_parentSku_skus(doc);
+    const auto &partialUpdateSkus = _get_partialUpdateSkus(doc);
+    const auto &removedSkus = _get_removedSkus(doc);
     int indColSku = _getIndColSku(fieldId_index);
     QHash<QString, QSet<QString>> fieldIdsWithMissingValue;
     QHash<QString, QSet<QString>> fieldIdsShouldNotHaveValue;
@@ -697,6 +705,11 @@ void TemplateFiller::checkColumnsFilled()
         {
             break;
         }
+        if (removedSkus.contains(sku))
+        {
+            continue;
+        }
+        bool isPartialUpdate = partialUpdateSkus.contains(sku);
         bool isParent = parentSku_skus.contains(sku);
         const auto &fieldIdsToCheck = isParent ? fieldIdsNeededAll : fieldIdsNeededChildren;
         for (const auto &fieldId : fieldIdsToCheck)
@@ -707,6 +720,14 @@ void TemplateFiller::checkColumnsFilled()
                 const auto &celVal = _get_cellVal(doc, i, colIndex);
                 if (celVal.isEmpty())
                 {
+                    if (isPartialUpdate)
+                    {
+                        if (!m_attributeFlagsTable->hasFlag(
+                                    marketplace, fieldId, Attribute::MandatoryPartialUpdate))
+                        {
+                            continue;
+                        }
+                    }
                     fieldIdsWithMissingValue[fieldId].insert(sku);
                 }
             }
@@ -757,10 +778,17 @@ void TemplateFiller::checkColumnsFilled()
     }
 }
 
+QCoro::Task<void> TemplateFiller::prepareForValidation()
+{
+    buildAttributes();
+    co_await _readPartialEditValues();
+    co_await _readDeleteValues();
+}
+
 QCoro::Task<void> TemplateFiller::fillValues()
 {
     m_aiFailureTable->clear();
-    buildAttributes();
+    co_await prepareForValidation();
     m_sku_imagePreviewFilePath = checkPreviewImages();
     co_await _readAgeGender();
     _fillValuesSources();
@@ -794,7 +822,7 @@ QCoro::Task<void> TemplateFiller::fillValues()
         const auto &countryCodeTo = _get_countryCode(targetPath);
         const auto &langCodeTo = _get_langCode(targetPath);
         const auto &marketplaceTo = _get_marketplace(docTo);
-        const auto &productTypeTo = _get_productType(document);
+        const auto &productTypeTo = _get_productType(docTo);
         const auto &fieldId_index = _get_fieldId_index(docTo);
 
 
@@ -896,6 +924,11 @@ void TemplateFiller::_saveTemplates()
     const auto &dimFrom = docFrom.dimension();
     int lastRowFrom = dimFrom.lastRow();
     
+    // Get SKUs marked for Partial Update or Delete
+    const auto &partialUpdateSkus = _get_partialUpdateSkus(docFrom);
+    const auto &removedSkus = _get_removedSkus(docFrom);
+    const auto &marketplaceFrom = _get_marketplace(docFrom);
+
     QStringList orderedSkus;
     for (int i=rowDataFrom; i<lastRowFrom; ++i)
     {
@@ -917,7 +950,21 @@ void TemplateFiller::_saveTemplates()
         const auto &langCode = _get_langCode(targetPath);
         QXlsx::Document docTo{targetPath};
         _selectTemplateSheet(docTo);
-        
+        const auto &marketplaceTo = _get_marketplace(docTo);
+
+        // Map target field IDs back to source field IDs
+        QHash<QString, QString> mapFieldIdTo_FieldIdFrom;
+        const auto &mandatoryFieldIds = m_mandatoryAttributesTable->getMandatoryIds();
+        for (const auto &fieldIdFrom : mandatoryFieldIds)
+        {
+            const auto &fieldIdTo = m_attributeFlagsTable->getFieldId(
+                        marketplaceFrom, fieldIdFrom, marketplaceTo);
+            if (!fieldIdTo.isEmpty())
+            {
+                mapFieldIdTo_FieldIdFrom[fieldIdTo] = fieldIdFrom;
+            }
+        }
+
         const auto &fieldId_index = _get_fieldId_index(docTo);
         int indColSku = _getIndColSku(fieldId_index);
         
@@ -938,7 +985,33 @@ void TemplateFiller::_saveTemplates()
                 const auto &fieldId_value = m_countryCode_langCode_sku_fieldId_toValues[countryCode][langCode][sku];
                 for (auto it = fieldId_value.begin(); it != fieldId_value.end(); ++it)
                 {
-                    const auto &fieldId = it.key();
+                    const auto &fieldId = it.key(); // This is fieldIdTo
+                    // Check if we should skip this value for Partial Update / Delete
+                    if (partialUpdateSkus.contains(sku) || removedSkus.contains(sku))
+                    {
+                        QString fieldIdFrom = mapFieldIdTo_FieldIdFrom.value(fieldId);
+                        bool sourceHasValue = false;
+                        if (!fieldIdFrom.isEmpty() && m_sku_fieldId_fromValues.contains(sku) 
+                                && m_sku_fieldId_fromValues[sku].contains(fieldIdFrom)
+                                && !m_sku_fieldId_fromValues[sku][fieldIdFrom].isEmpty())
+                        {
+                            sourceHasValue = true;
+                        }
+
+                        bool isMandatoryPartialUpdate = false;
+                        if (!fieldIdFrom.isEmpty() && m_attributeFlagsTable->hasFlag(
+                                    marketplaceFrom, fieldIdFrom, Attribute::MandatoryPartialUpdate))
+                        {
+                            isMandatoryPartialUpdate = true;
+                        }
+                        
+                        // If source doesn't have value AND it's not a mandatory partial update field -> Skip
+                        if (!sourceHasValue && !isMandatoryPartialUpdate)
+                        {
+                            continue;
+                        }
+                    }
+
                     if (fieldId_index.contains(fieldId))
                     {
                         int col = fieldId_index[fieldId];
@@ -1223,7 +1296,6 @@ int TemplateFiller::_getIndCol(
             return it.value();
         }
     }
-    Q_ASSERT(false);
     return -1;
 }
 
@@ -1249,6 +1321,15 @@ int TemplateFiller::_getIndColProductType(
     const QStringList possibleValues{
         "feed_product_type", "product_type#1.value"};
     return _getIndCol(fieldId_index, possibleValues);
+}
+
+int TemplateFiller::_getIndColUpdateDelete(
+    const QHash<QString, int> &fieldId_index) const
+{
+    const QStringList possibleValues{
+        "update_delete", "::record_action"};
+    return _getIndCol(fieldId_index, possibleValues);
+
 }
 
 int TemplateFiller::_getIndColSku(
@@ -1704,6 +1785,75 @@ QHash<QString, QSet<QString>> TemplateFiller::_get_parentSku_skus(
     return parentSku_skus;
 }
 
+QSet<QString> TemplateFiller::_get_partialUpdateSkus(QXlsx::Document &doc) const
+{
+    QSet<QString> skus;
+    const auto &fieldId_index = _get_fieldId_index(doc);
+    int indColUpdateDelete = _getIndColUpdateDelete(fieldId_index);
+    if (indColUpdateDelete == -1)
+    {
+        return skus;
+    }
+    int indColSku = _getIndColSku(fieldId_index);
+    const auto &partialUpdateValues = m_attributeEquivalentTable->getEquivalentPartialUpdateValues();
+    
+    // Find update/delete field ID to check equivalence properly if needed, 
+    // but here we might just check value against the set? 
+    // AttributeEquivalentTable::getEquivalentPartialUpdateValues returns a set of strings.
+    // That should be enough.
+    
+    const auto &dim = doc.dimension();
+    int lastRow = dim.lastRow();
+    auto version = _getDocumentVersion(doc);
+    int row = _getRowFieldId(version) + 1;
+
+    for (int i=row; i<lastRow; ++i)
+    {
+         const QString &val = _get_cellVal(doc, i, indColUpdateDelete);
+         if (partialUpdateValues.contains(val))
+         {
+             const QString &sku = _get_cellVal(doc, i, indColSku);
+             if (!sku.isEmpty() && !sku.startsWith("ABC"))
+             {
+                 skus.insert(sku);
+             }
+         }
+    }
+    return skus;
+}
+
+QSet<QString> TemplateFiller::_get_removedSkus(QXlsx::Document &doc) const
+{
+    QSet<QString> skus;
+    const auto &fieldId_index = _get_fieldId_index(doc);
+    int indColUpdateDelete = _getIndColUpdateDelete(fieldId_index);
+    if (indColUpdateDelete == -1)
+    {
+        return skus;
+    }
+    int indColSku = _getIndColSku(fieldId_index);
+    const auto &deleteValues = m_attributeEquivalentTable->getEquivalentDeleteValues();
+    
+    const auto &dim = doc.dimension();
+    int lastRow = dim.lastRow();
+    auto version = _getDocumentVersion(doc);
+    int row = _getRowFieldId(version) + 1;
+
+    for (int i=row; i<lastRow; ++i)
+    {
+         const QString &val = _get_cellVal(doc, i, indColUpdateDelete);
+         if (deleteValues.contains(val))
+         {
+             const QString &sku = _get_cellVal(doc, i, indColSku);
+             if (!sku.isEmpty() && !sku.startsWith("ABC"))
+             {
+                 skus.insert(sku);
+             }
+         }
+    }
+    return skus;
+}
+
 QHash<QString, QHash<QString, QSet<QString>>> TemplateFiller::_get_parentSku_variation_skus(QXlsx::Document &doc) const
 {
     QHash<QString, QHash<QString, QSet<QString>>> parentSku_variation_skus;
@@ -1834,29 +1984,19 @@ void TemplateFiller::_checkGender(const QString &gender)
     }
 }
 
-
-QCoro::Task<void> TemplateFiller::_readAgeGender()
+QCoro::Task<void> TemplateFiller::_readPartialEditValues()
 {
     QXlsx::Document doc(m_templateFromPath);
     _selectTemplateSheet(doc);
     const auto &fieldId_index = _get_fieldId_index(doc);
-    int indColAge = _getIndColAge(fieldId_index);
-    int indColGender = _getIndColGender(fieldId_index);
+    int indColUpdateDelete = _getIndColUpdateDelete(fieldId_index);
+    const QSet<QString> updateFieldIds {"::record_action", "update_delete"};
+    QString updateFieldIdFound;
 
-    QSharedPointer<Attribute> ageAttribute;
-    QSharedPointer<Attribute> genderAttribute;
-    
-    const QSet<QString> ageFieldIds {"target_audience_keyword", "target_audience_base", "age_range_description"};
-
-    const QSet<QString> genderFieldIds{"target_gender", "department_name"};
-    
+    QSharedPointer<Attribute> updateFieldAttribute;
     const auto &marketplace = _get_marketplaceFrom();
 
-    // Find attributes
-    QString ageFieldIdFound;
-    QString genderFieldIdFound;
-    
-    for (const auto &id : ageFieldIds)
+    for (const auto &id : updateFieldIds)
     {
         bool found = false;
         for (auto it = fieldId_index.begin(); it != fieldId_index.end(); ++it)
@@ -1864,12 +2004,11 @@ QCoro::Task<void> TemplateFiller::_readAgeGender()
             if (it.key().startsWith(id))
             {
                 QString realId = it.key();
-                // Find attribute in our map
-                if (m_marketplace_attributeId_attributeInfos.contains(marketplace) && 
+                if (m_marketplace_attributeId_attributeInfos.contains(marketplace) &&
                     m_marketplace_attributeId_attributeInfos[marketplace].contains(realId))
                 {
-                    ageAttribute = m_marketplace_attributeId_attributeInfos[marketplace][realId];
-                    ageFieldIdFound = realId;
+                    updateFieldAttribute = m_marketplace_attributeId_attributeInfos[marketplace][realId];
+                    updateFieldIdFound = realId;
                     found = true;
                     break;
                 }
@@ -1877,20 +2016,63 @@ QCoro::Task<void> TemplateFiller::_readAgeGender()
         }
         if (found) break;
     }
-    
-    for (const auto &id : genderFieldIds)
+
+    if (updateFieldAttribute)
+    {
+        if (m_attributeEquivalentTable->getEquivalentPartialUpdateValues().isEmpty())
+        {
+            co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                updateFieldIdFound, "Edit (Partial Update)", updateFieldAttribute.data());
+        }
+
+        auto version = _getDocumentVersion(doc);
+        int rowData = _getRowFieldId(version) + 1;
+        const QString &val = _get_cellVal(doc, rowData + 2, indColUpdateDelete);
+
+        if (!val.isEmpty())
+        {
+             bool known = m_attributeEquivalentTable->hasEquivalent(updateFieldIdFound, val);
+             if (!known)
+             {
+                const auto &productType = _get_productType(doc);
+                const auto &possibleValues = updateFieldAttribute->possibleValues(
+                            m_marketplaceFrom, m_countryCodeFrom, m_langCodeFrom, productType);
+                 co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                            updateFieldIdFound
+                            , val
+                            , m_langCodeFrom
+                            , m_langCodeFrom
+                            , possibleValues);
+             }
+        }
+    }
+}
+
+QCoro::Task<void> TemplateFiller::_readDeleteValues()
+{
+    QXlsx::Document doc(m_templateFromPath);
+    _selectTemplateSheet(doc);
+    const auto &fieldId_index = _get_fieldId_index(doc);
+    int indColUpdateDelete = _getIndColUpdateDelete(fieldId_index);
+    const QSet<QString> updateFieldIds {"::record_action", "update_delete"};
+    QString updateFieldIdFound;
+
+    QSharedPointer<Attribute> updateFieldAttribute;
+    const auto &marketplace = _get_marketplaceFrom();
+
+    for (const auto &id : updateFieldIds)
     {
         bool found = false;
         for (auto it = fieldId_index.begin(); it != fieldId_index.end(); ++it)
         {
             if (it.key().startsWith(id))
             {
-                const QString &realId = it.key();
-                if (m_marketplace_attributeId_attributeInfos.contains(marketplace) && 
+                QString realId = it.key();
+                if (m_marketplace_attributeId_attributeInfos.contains(marketplace) &&
                     m_marketplace_attributeId_attributeInfos[marketplace].contains(realId))
                 {
-                    genderAttribute = m_marketplace_attributeId_attributeInfos[marketplace][realId];
-                    genderFieldIdFound = realId;
+                    updateFieldAttribute = m_marketplace_attributeId_attributeInfos[marketplace][realId];
+                    updateFieldIdFound = realId;
                     found = true;
                     break;
                 }
@@ -1899,75 +2081,173 @@ QCoro::Task<void> TemplateFiller::_readAgeGender()
         if (found) break;
     }
 
+    if (updateFieldAttribute)
+    {
+        if (m_attributeEquivalentTable->getEquivalentDeleteValues().isEmpty())
+        {
+            co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                updateFieldIdFound, "Delete", updateFieldAttribute.data());
+        }
+
+        auto version = _getDocumentVersion(doc);
+        int rowData = _getRowFieldId(version) + 1;
+        const QString &val = _get_cellVal(doc, rowData + 2, indColUpdateDelete);
+
+        if (!val.isEmpty())
+        {
+             bool known = m_attributeEquivalentTable->hasEquivalent(updateFieldIdFound, val);
+             if (!known)
+             {
+                const auto &productType = _get_productType(doc);
+                const auto &possibleValues = updateFieldAttribute->possibleValues(
+                            m_marketplaceFrom, m_countryCodeFrom, m_langCodeFrom, productType);
+                 co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                            updateFieldIdFound
+                            , val
+                            , m_langCodeFrom
+                            , m_langCodeFrom
+                            , possibleValues);
+             }
+        }
+    }
+}
+
+QCoro::Task<void> TemplateFiller::_readAgeGender()
+{
+    QXlsx::Document doc(m_templateFromPath);
+    _selectTemplateSheet(doc);
+    const auto &fieldId_index = _get_fieldId_index(doc);
+
+    const auto &marketplace = _get_marketplaceFrom();
     auto version = _getDocumentVersion(doc);
     int rowData = _getRowFieldId(version) + 1;
 
-
-    // Check Age - 3 conditions
-    if (ageAttribute)
+    int indColAge = _getIndColAge(fieldId_index);
+    if (indColAge > 0)
     {
-        const QString &age = _get_cellVal(doc, rowData + 2, indColAge); // +2 in case exemple row and Parent in first row
-        if (m_attributeEquivalentTable->getEquivalentAgeAdult().isEmpty())
+        QSharedPointer<Attribute> ageAttribute;
+
+        const QSet<QString> ageFieldIds{"target_audience_keyword", "target_audience_base", "age_range_description"};
+
+
+        // Find attributes
+        QString ageFieldIdFound;
+
+        for (const auto &id : ageFieldIds)
         {
-            co_await m_attributeEquivalentTable->askAiEquivalentValues(
-                 ageFieldIdFound, "Adult", ageAttribute.data());
+            bool found = false;
+            for (auto it = fieldId_index.begin(); it != fieldId_index.end(); ++it)
+            {
+                if (it.key().startsWith(id))
+                {
+                    QString realId = it.key();
+                    // Find attribute in our map
+                    if (m_marketplace_attributeId_attributeInfos.contains(marketplace) &&
+                        m_marketplace_attributeId_attributeInfos[marketplace].contains(realId))
+                    {
+                        ageAttribute = m_marketplace_attributeId_attributeInfos[marketplace][realId];
+                        ageFieldIdFound = realId;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if (found) break;
         }
-        if (m_attributeEquivalentTable->getEquivalentAgeKid().isEmpty())
+        // Check Age - 3 conditions
+        if (ageAttribute)
         {
-            co_await m_attributeEquivalentTable->askAiEquivalentValues(
-                 ageFieldIdFound, "Little Kid", ageAttribute.data());
-        }
-        if (m_attributeEquivalentTable->getEquivalentAgeBaby().isEmpty())
-        {
-             co_await m_attributeEquivalentTable->askAiEquivalentValues(
-                 ageFieldIdFound, "Infant", ageAttribute.data());
-        }
-        _checkAge(age);
-        if (m_age == AbstractFiller::UndefinedAge && !age.isEmpty())
-        {
-            const auto &productType = _get_productType(doc);
-            const auto &possibleValues = ageAttribute->possibleValues(
-                        m_marketplaceFrom, m_countryCodeFrom, m_langCodeFrom, productType);
-            co_await m_attributeEquivalentTable->askAiEquivalentValues(
-                        genderFieldIdFound
-                        , age
-                        , m_langCodeFrom
-                        , m_langCodeFrom
-                        , possibleValues);
+            const QString &age = _get_cellVal(doc, rowData + 2, indColAge); // +2 in case exemple row and Parent in first row
+            if (m_attributeEquivalentTable->getEquivalentAgeAdult().isEmpty())
+            {
+                co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                    ageFieldIdFound, "Adult", ageAttribute.data());
+            }
+            if (m_attributeEquivalentTable->getEquivalentAgeKid().isEmpty())
+            {
+                co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                    ageFieldIdFound, "Little Kid", ageAttribute.data());
+            }
+            if (m_attributeEquivalentTable->getEquivalentAgeBaby().isEmpty())
+            {
+                co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                    ageFieldIdFound, "Infant", ageAttribute.data());
+            }
             _checkAge(age);
+            if (m_age == AbstractFiller::UndefinedAge && !age.isEmpty())
+            {
+                const auto &productType = _get_productType(doc);
+                const auto &possibleValues = ageAttribute->possibleValues(
+                    m_marketplaceFrom, m_countryCodeFrom, m_langCodeFrom, productType);
+                co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                    ageFieldIdFound
+                    , age
+                    , m_langCodeFrom
+                    , m_langCodeFrom
+                    , possibleValues);
+                _checkAge(age);
+            }
         }
     }
-
-    // Check Gender - 3 conditions
-    if (genderAttribute)
+    
+    int indColGender = _getIndColGender(fieldId_index);
+    if (indColGender > 0)
     {
-        const QString &gender = _get_cellVal(doc, rowData + 2, indColGender); // +2 in case exemple row and Parent in first row
-        if (m_attributeEquivalentTable->getEquivalentGenderMen().isEmpty()) {
-             co_await m_attributeEquivalentTable->askAiEquivalentValues(
-                 genderFieldIdFound, "Male", genderAttribute.data());
-        }
-        if (m_attributeEquivalentTable->getEquivalentGenderWomen().isEmpty()) {
-            co_await m_attributeEquivalentTable->askAiEquivalentValues(
-                        genderFieldIdFound, "Female", genderAttribute.data());
-        }
-        if (m_attributeEquivalentTable->getEquivalentGenderUnisex().isEmpty()) {
-            co_await m_attributeEquivalentTable->askAiEquivalentValues(
-                        genderFieldIdFound, "Unisex", genderAttribute.data());
-        }
-        _checkGender(gender);
-
-        if (m_gender == AbstractFiller::UndefinedGender && !gender.isEmpty())
+        QSharedPointer<Attribute> genderAttribute;
+        const QSet<QString> genderFieldIds{"target_gender", "department_name"};
+        QString genderFieldIdFound;
+        for (const auto &id : genderFieldIds)
         {
-            const auto &productType = _get_productType(doc);
-            const auto &possibleValues = genderAttribute->possibleValues(
-                        m_marketplaceFrom, m_countryCodeFrom, m_langCodeFrom, productType);
-            co_await m_attributeEquivalentTable->askAiEquivalentValues(
-                        genderFieldIdFound
-                        , gender
-                        , m_langCodeFrom
-                        , m_langCodeFrom
-                        , possibleValues);
+            bool found = false;
+            for (auto it = fieldId_index.begin(); it != fieldId_index.end(); ++it)
+            {
+                if (it.key().startsWith(id))
+                {
+                    const QString &realId = it.key();
+                    if (m_marketplace_attributeId_attributeInfos.contains(marketplace) &&
+                        m_marketplace_attributeId_attributeInfos[marketplace].contains(realId))
+                    {
+                        genderAttribute = m_marketplace_attributeId_attributeInfos[marketplace][realId];
+                        genderFieldIdFound = realId;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if (found) break;
+        }
+
+        // Check Gender - 3 conditions
+        if (genderAttribute)
+        {
+            const QString &gender = _get_cellVal(doc, rowData + 2, indColGender); // +2 in case exemple row and Parent in first row
+            if (m_attributeEquivalentTable->getEquivalentGenderMen().isEmpty()) {
+                co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                    genderFieldIdFound, "Male", genderAttribute.data());
+            }
+            if (m_attributeEquivalentTable->getEquivalentGenderWomen().isEmpty()) {
+                co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                    genderFieldIdFound, "Female", genderAttribute.data());
+            }
+            if (m_attributeEquivalentTable->getEquivalentGenderUnisex().isEmpty()) {
+                co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                    genderFieldIdFound, "Unisex", genderAttribute.data());
+            }
             _checkGender(gender);
+
+            if (m_gender == AbstractFiller::UndefinedGender && !gender.isEmpty())
+            {
+                const auto &productType = _get_productType(doc);
+                const auto &possibleValues = genderAttribute->possibleValues(
+                    m_marketplaceFrom, m_countryCodeFrom, m_langCodeFrom, productType);
+                co_await m_attributeEquivalentTable->askAiEquivalentValues(
+                    genderFieldIdFound
+                    , gender
+                    , m_langCodeFrom
+                    , m_langCodeFrom
+                    , possibleValues);
+                _checkGender(gender);
+            }
         }
     }
     co_return;

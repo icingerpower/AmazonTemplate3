@@ -22,6 +22,8 @@
 #include "MainWindow.h"
 #include <QCoro/QCoroCore>
 #include <ExceptionOpenAiNotInitialized.h>
+#include <ExceptionOpenAiError.h>
+#include <ExceptionOpenAiError.h>
 #include "./ui_MainWindow.h"
 
 MainWindow::MainWindow(QWidget *parent)
@@ -141,7 +143,7 @@ QCoro::Task<void> MainWindow::generate()
     QPointer<QProgressDialog> progressGuard{progress};
 
     try {
-        if (baseControlsWithoutPopup())
+        if (co_await baseControlsWithoutPopup())
         {
             qDebug() << "Filling templates...";
             co_await m_templateFiller->fillValues();
@@ -166,7 +168,7 @@ QCoro::Task<void> MainWindow::generate()
         QMessageBox::critical(
                     this,
                     tr("Unknown Error"),
-                    QString("An unexpected error occurred: %1").arg(e.what()));
+                    QString("An unexpected generation error occurred: %1").arg(e.what()));
     }
     catch (...)
     {
@@ -374,35 +376,43 @@ void MainWindow::_setGenerateButtonsEnabled(bool enable)
     ui->buttonRunPromptsManually->setEnabled(enable);
 }
 
-void MainWindow::baseControls()
+QCoro::Task<void> MainWindow::baseControls()
 {
-    if (baseControlsWithoutPopup())
-    {
-        QMessageBox::information(
-                    this,
-                    tr("Controls done"),
-                    tr("Controls successfully done"));
-    }
-}
+    auto progress = new QProgressDialog(
+                tr("Checking basics..."),
+                QString{}, 0, 0, this);
+    progress->setWindowModality(Qt::ApplicationModal);
+    progress->setCancelButton(nullptr);
+    progress->setMinimumDuration(0);
+    progress->setAutoClose(false);
+    progress->setAutoReset(false);
+    progress->setValue(0);
+    progress->show();
+    QPointer<QProgressDialog> progressGuard{progress};
 
-bool MainWindow::baseControlsWithoutPopup()
-{
     try
     {
-        qDebug() << "m_templateFiller->checkParentSkus()...";
-        m_templateFiller->checkParentSkus();
-        qDebug() << "m_templateFiller->checkPossibleValues()...";
-        m_templateFiller->checkPossibleValues();
-        qDebug() << "m_templateFiller->checkColumnsFilled()...";
-        m_templateFiller->checkColumnsFilled();
-        //qDebug() << "m_templateFiller->buildAttributes()...";
-        //m_templateFiller->buildAttributes();
-        qDebug() << "m_templateFiller->checkPreviewImages()...";
-        m_templateFiller->checkPreviewImages();
-        qDebug() << "m_templateFiller->checkKeywords()...";
-        m_templateFiller->checkKeywords();
-        qDebug() << "m_templateFiller->checks...DONE SUCCESSFULLY";
-        return true;
+        if (co_await baseControlsWithoutPopup())
+        {
+            QMessageBox::information(
+                        this,
+                        tr("Controls done"),
+                        tr("Controls successfully done"));
+        }
+    }
+    catch (const ExceptionOpenAiNotInitialized &exception)
+    {
+        QMessageBox::warning(
+                    this,
+                    exception.title(),
+                    exception.error());
+    }
+    catch (const ExceptionOpenAiError &exception)
+    {
+        QMessageBox::warning(
+                    this,
+                    exception.title(),
+                    exception.error());
     }
     catch (const ExceptionTemplate &exception)
     {
@@ -411,7 +421,46 @@ bool MainWindow::baseControlsWithoutPopup()
                     exception.title(),
                     exception.error());
     }
-    return false;
+    catch (const std::exception &e)
+    {
+        QMessageBox::critical(
+                    this,
+                    tr("Unknown Error"),
+                    QString("An unexpected checking error occurred: %1").arg(e.what()));
+    }
+    catch (...)
+    {
+        QMessageBox::critical(
+                    this,
+                    tr("Unknown Error"),
+                    tr("An unknown error occurred during base controls."));
+    }
+
+    if (progressGuard)
+    {
+        progressGuard->close();
+        progressGuard->deleteLater();
+    }
+}
+
+QCoro::Task<bool> MainWindow::baseControlsWithoutPopup()
+{
+    qDebug() << "m_templateFiller->checkParentSkus()...";
+    m_templateFiller->checkParentSkus();
+    qDebug() << "m_templateFiller->checkPossibleValues()...";
+    m_templateFiller->checkPossibleValues();
+    qDebug() << "m_templateFiller->prepareForValidation()...";
+    co_await m_templateFiller->prepareForValidation();
+    qDebug() << "m_templateFiller->checkColumnsFilled()...";
+    m_templateFiller->checkColumnsFilled();
+    //qDebug() << "m_templateFiller->buildAttributes()...";
+    //m_templateFiller->buildAttributes();
+    qDebug() << "m_templateFiller->checkPreviewImages()...";
+    m_templateFiller->checkPreviewImages();
+    qDebug() << "m_templateFiller->checkKeywords()...";
+    m_templateFiller->checkKeywords();
+    qDebug() << "m_templateFiller->checks...DONE SUCCESSFULLY";
+    co_return true;
 }
 
 void MainWindow::findValidateMandatoryFieldIds()

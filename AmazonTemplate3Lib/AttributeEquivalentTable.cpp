@@ -384,7 +384,7 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
         step->name = "Attribute equivalence Phase 1 (2x unanimous)";
         step->neededReplies = 2;
         step->cachingKey = step->id + "_v1";
-        step->maxRetries = 10;
+        step->maxRetries = 6;
         step->gptModel = "gpt-5.2";
         step->getPrompt = buildPrompt;
         step->validate = validateReply;
@@ -519,7 +519,7 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
     step->name = "Attribute equivalence selection";
     step->cachingKey = step->id;
     step->neededReplies = 3;
-    step->maxRetries = 12;
+    step->maxRetries = 6;
     step->gptModel = "gpt-5.2";
     step->getPrompt = buildPrompt;
     step->validate = validateReply;
@@ -552,6 +552,16 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
     co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
 }
 
+QSet<QString> AttributeEquivalentTable::getEquivalentPartialUpdateValues() const
+{
+    return getEquivalentValues("::record_action", "Edit (Partial Update)");
+}
+
+QSet<QString> AttributeEquivalentTable::getEquivalentDeleteValues() const
+{
+    const QString valueDelete{"Delete"};
+    return getEquivalentValues("::record_action", valueDelete);
+}
 
 QSet<QString> AttributeEquivalentTable::getEquivalentGenderWomen() const
 {

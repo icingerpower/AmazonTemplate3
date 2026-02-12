@@ -59,6 +59,8 @@ public:
     void validateMandatory(const QSet<QString> &attributesMandatory,
                            const QSet<QString> &attributesNotMandatory);
 
+    QCoro::Task<void> prepareForValidation();
+
     QStringList suggestAttributesChildOnly(
             const QStringList &previousTemplatePaths) const;
     QStringList suggestAttributesSameValues(
@@ -134,16 +136,21 @@ private:
     QSet<QString> _get_fieldIdMandatoryPrevious() const;
     QHash<QString, QSet<QString>> _get_fieldId_possibleValues(QXlsx::Document &doc) const;
     QHash<QString, QSet<QString>> _get_parentSku_skus(QXlsx::Document &doc) const;
+    QSet<QString> _get_partialUpdateSkus(QXlsx::Document &doc) const;
+    QSet<QString> _get_removedSkus(QXlsx::Document &doc) const;
     QHash<QString, QHash<QString, QSet<QString>>> _get_parentSku_variation_skus(QXlsx::Document &doc) const;
     void _formatFieldId(QString &fieldId) const;
     int _getIndCol(const QHash<QString, int> &fieldId_index
                    , const QStringList &possibleValues) const;
+    int _getIndColUpdateDelete(const QHash<QString, int> &fieldId_index) const;
     int _getIndColSku(const QHash<QString, int> &fieldId_index) const;
     int _getIndColSkuParent(const QHash<QString, int> &fieldId_index) const;
     int _getIndColColorName(const QHash<QString, int> &fieldId_index) const;
     int _getIndColProductType(const QHash<QString, int> &fieldId_index) const;
     int _getIndColAge(const QHash<QString, int> &fieldId_index) const;
     int _getIndColGender(const QHash<QString, int> &fieldId_index) const;
+    QCoro::Task<void> _readPartialEditValues();
+    QCoro::Task<void> _readDeleteValues();
     QCoro::Task<void> _readAgeGender();
     void _checkGender(const QString &gender);
     void _checkAge(const QString &age);

@@ -26,6 +26,7 @@ const QHash<Attribute::Flag, QString> Attribute::FLAG_STRING{
     , {Copy, "Copy"}
     , {MandatoryAmazon, "MandatoryAmazon"}
     , {MandatoryTemu, "MandatoryTemu"}
+    , {MandatoryPartialUpdate, "MandatoryPartialUpdate"}
 };
 
 const QMap<QString, Attribute::Flag> Attribute::STRING_FLAG

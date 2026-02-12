@@ -39,6 +39,9 @@ public:
             , const QString &langCodeTo
             , const QSet<QString> &possibleValues);
 
+    QSet<QString> getEquivalentPartialUpdateValues() const;
+    QSet<QString> getEquivalentDeleteValues() const;
+
     QSet<QString> getEquivalentGenderWomen() const;
     QSet<QString> getEquivalentGenderMen() const;
     QSet<QString> getEquivalentGenderUnisex() const;

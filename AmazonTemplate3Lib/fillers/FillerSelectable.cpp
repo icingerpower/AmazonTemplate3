@@ -198,7 +198,7 @@ static QSharedPointer<OpenAi2::StepMultipleAsk> createSelectStep(
     step->name = "Select value for " + fieldId;
     step->cachingKey = step->id;
     step->gptModel = "gpt-5.2";
-    step->maxRetries = 10;
+    step->maxRetries = 8;
 
     step->getPrompt = [marketplace, id, fieldId, valuesForAi, possibleValues](int nAttempts) -> QString
     {

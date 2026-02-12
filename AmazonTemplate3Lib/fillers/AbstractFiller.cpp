@@ -197,7 +197,7 @@ QCoro::Task<void> AbstractFiller::fillValuesForAi(
             step->gptModel = "gpt-5.2";
             step->neededReplies = 1;
             step->imagePaths = QStringList{imagePath};
-            step->maxRetries = 5;
+            step->maxRetries = 6;
 
             step->getPrompt = [imagePath, imagePath_attributesForAi](int nAttempts) -> QString{
                 Q_UNUSED(nAttempts);

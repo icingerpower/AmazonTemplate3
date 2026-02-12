@@ -26,8 +26,8 @@ public:
 
 public slots:
     void browseSourceMain();
-    void baseControls();
-    bool baseControlsWithoutPopup();
+    QCoro::Task<void> baseControls();
+    QCoro::Task<bool> baseControlsWithoutPopup();
     void findValidateMandatoryFieldIds();
     void viewFormatCustomInstructions();
     void viewAttributes();
