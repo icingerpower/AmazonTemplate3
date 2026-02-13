@@ -384,7 +384,7 @@ void FillerSize::initCatBools(
                 ).toStringList();
     QStringList catNoSizeConvWords = settings->value(
                 KEY_CAT_NO_CONV_WORDS,
-                QStringList{"RUG"}
+                QStringList{"RUG", "BABY_PRODUCT", "BOOK_COVER", "FILE_FOLDER"}
                 ).toStringList();
     isShoes = false;
     isClothe = false;

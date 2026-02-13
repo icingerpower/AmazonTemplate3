@@ -212,7 +212,12 @@ QCoro::Task<void> FillerTitle::fill(
             }
         }
     }
-    
+    bool isShoes = false;
+    bool isClothe = false;
+    bool isNoSizeConv = false;
+    auto settings = templateFiller->settingsCommon();
+    FillerSize::initCatBools(settings.data(), productTypeTo, isShoes, isClothe, isNoSizeConv);
+
     auto attributeFlagTable = templateFiller->attributeFlagsTable();
     const auto &sizeFieldIds = attributeFlagTable->getSizeFieldIds();
     for (auto it = sku_fieldId_fromValues.cbegin();
@@ -234,16 +239,22 @@ QCoro::Task<void> FillerTitle::fill(
                 }
                 bool hasColor = false;
                 QString newTitle = sku_fieldId_toValueslangCommon[sku][fieldIdTo];
-                newTitle += " (";
+                QString titleToAdd;
                 if (sku_fieldId_toValueslangCommon[sku].contains("color#1.value"))
                 {
-                    newTitle += sku_fieldId_toValueslangCommon[sku]["color#1.value"];
-                    newTitle += ", ";
+                    titleToAdd += sku_fieldId_toValueslangCommon[sku]["color#1.value"];
+                    if (!titleToAdd.isEmpty())
+                    {
+                        titleToAdd += ", ";
+                    }
                 }
                 else if (sku_fieldId_toValueslangCommon[sku].contains("color_name"))
                 {
-                    newTitle += sku_fieldId_toValueslangCommon[sku]["color_name"];
-                    newTitle += ", ";
+                    titleToAdd += sku_fieldId_toValueslangCommon[sku]["color_name"];
+                    if (!titleToAdd.isEmpty())
+                    {
+                        titleToAdd += ", ";
+                    }
                 }
                 if (titleSizeParts.size() > 0)
                 {
@@ -261,6 +272,7 @@ QCoro::Task<void> FillerTitle::fill(
                         }
                     }
                     QString size;
+                    QString sizeOrig;
                     for (const auto &sizeFieldId : sizeFieldIds)
                     {
                         if (sku_fieldId_toValues[sku].contains(sizeFieldId)
@@ -268,17 +280,45 @@ QCoro::Task<void> FillerTitle::fill(
                         {
                             size = sku_fieldId_toValues[sku][sizeFieldId];
                         }
+                        if (sku_fieldId_fromValues[sku].contains(sizeFieldId)
+                                && !sku_fieldId_fromValues[sku][sizeFieldId].isEmpty())
+                        {
+                            sizeOrig = sku_fieldId_fromValues[sku][sizeFieldId];
+                        }
                     }
-                    if (labelSize != size && !size.isEmpty())
+                    if (isNoSizeConv)
                     {
-                        newTitle += labelSize + "=" + _get_sizeCountry(templateFiller, countryCodeTo, productTypeFrom, gender, age) + "-" + size;
+                        if (sizeOrig != size)
+                        {
+                            titleToAdd += sizeOrig + "=" + size;
+                        }
+                        else
+                        {
+                            titleToAdd += sizeOrig;
+                        }
                     }
                     else
                     {
-                        newTitle += size;
+                        if (labelSize != size && !size.isEmpty())
+                        {
+                            // label size is for instance 36
+                            // country size is converted, for instance UK
+                            // size is for instance UK size which is 4
+                            titleToAdd += labelSize + "=" + _get_sizeCountry(
+                                              templateFiller, countryCodeTo, productTypeFrom, gender, age) + "-" + size;
+                        }
+                        else
+                        {
+                            titleToAdd += size;
+                        }
                     }
                 }
-                newTitle += ")";
+                if (!titleToAdd.isEmpty())
+                {
+                    newTitle += " (";
+                    newTitle += titleToAdd;
+                    newTitle += ")";
+                }
                 sku_fieldId_toValues[sku][fieldIdTo] = newTitle;
             }
             else
