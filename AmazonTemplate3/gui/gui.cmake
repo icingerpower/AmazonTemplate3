@@ -3,6 +3,12 @@ SET(GUI_FILES
     ${CMAKE_CURRENT_LIST_DIR}/MainWindow.cpp
     ${CMAKE_CURRENT_LIST_DIR}/MainWindow.h
     ${CMAKE_CURRENT_LIST_DIR}/MainWindow.ui
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneGenTemplate.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneGenTemplate.h
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneGenTemplate.ui
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneSettings.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneSettings.h
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneSettings.ui
     ${CMAKE_CURRENT_LIST_DIR}/DialogExtractInfos.cpp
     ${CMAKE_CURRENT_LIST_DIR}/DialogExtractInfos.h
     ${CMAKE_CURRENT_LIST_DIR}/DialogExtractInfos.ui
