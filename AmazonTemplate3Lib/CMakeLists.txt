@@ -27,35 +27,7 @@ set(Qt_DIR_HINT "${Qt${QT_VERSION_MAJOR}_DIR}")
 message("Qt found in path: ${Qt_DIR_HINT}")
 find_package(QXlsxQt6 REQUIRED HINTS "${Qt_DIR_HINT}/../../../../lib/cmake/QXlsxQt6")
 
-# Compile and install QCoro
-# cd /home/cedric/code
-# git clone https://github.com/qcoro/qcoro.git
-# cd qcoro
-# mkdir build
-# cd build
-# cmake .. -DCMAKE_PREFIX_PATH=/home/cedric/Qt/6.7.3/gcc_64 -DUSE_QT_VERSION=6 -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/home/cedric/Qt/6.7.3/lib/cmake
-# make
-# This will install QCoro into /usr/local/ prefix, change it by passing -DCMAKE_INSTALL_PREFIX=/usr
-# to the cmake command above.
-# sudo make install
-set(Qt_DIR_HINT "${Qt${QT_VERSION_MAJOR}_DIR}")
-message("Qt hints: ${Qt_DIR_HINT}")
-set(QCoro_DIR_HINT_1 "/usr/local/lib/cmake/QCoro6")
-set(QCoro_DIR_HINT_2 "/usr/lib/cmake/QCoro6")
-set(QCoro_DIR_HINT_3 "${Qt_DIR_HINT}/../../../../lib/cmake/QCoro6") # only if you installed QCoro into the same Qt prefix
-set(QCoro_DIR_HINT_4 "${Qt_DIR_HINT}/../../../../lib/cmake/lib/cmake/QCoro6") # only if you installed QCoro into the same Qt prefix
-message("QCoro hints: ${QCoro_DIR_HINT_1} ; ${QCoro_DIR_HINT_2} ; ${QCoro_DIR_HINT_3} ; ${QCoro_DIR_HINT_4}")
-
-list(APPEND CMAKE_PREFIX_PATH "${Qt_DIR_HINT}/../../../../lib/cmake")
-
-find_package(QCoro6 REQUIRED COMPONENTS Network
-    HINTS
-        "${QCoro_DIR_HINT_1}"
-        "${QCoro_DIR_HINT_2}"
-        "${QCoro_DIR_HINT_3}"
-        "${QCoro_DIR_HINT_4}"
-)
-
+setup_qcoro(COMPONENTS Network)
 
 add_library(AmazonTemplate3Lib STATIC
   AmazonTemplate3Lib.cpp
@@ -107,7 +79,10 @@ add_definitions(-DSTR_FALSE="false")
 
 target_compile_definitions(AmazonTemplate3Lib PRIVATE AMAZONTEMPLATE3LIB_LIBRARY)
 
-target_include_directories(AmazonTemplate3Lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# Compatibility stub: newer QXlsx versions reference xlsxreadsax.h in
+# xlsxdocument.h but don't install it; the compat/ dir provides the stub.
+target_include_directories(AmazonTemplate3Lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+    PUBLIC ${CMAKE_SOURCE_DIR}/compat)
 
 # Library variant for unit tests (exposes protected hooks)
 add_library(AmazonTemplate3Lib_Tests STATIC
@@ -145,7 +120,10 @@ target_link_libraries(AmazonTemplate3Lib_Tests PUBLIC
     QCoro::Network
 )
 
-target_compile_definitions(AmazonTemplate3Lib_Tests PUBLIC 
+target_compile_definitions(AmazonTemplate3Lib_Tests PUBLIC
     AMAZONTEMPLATE3LIB_LIBRARY
     OPENAI2_UNIT_TESTS
 )
+
+target_include_directories(AmazonTemplate3Lib_Tests PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+    PUBLIC ${CMAKE_SOURCE_DIR}/compat)
