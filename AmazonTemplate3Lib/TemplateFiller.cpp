@@ -969,12 +969,25 @@ void TemplateFiller::_saveTemplates()
         int indColSku = _getIndColSku(fieldId_index);
         
         // Find where to start writing (after existing data)
-        int writeRow = docTo.dimension().lastRow();
+        int writeRow = 3;
         auto versionTo = _getDocumentVersion(docTo);
+        if (versionTo == V01)
+        {
+            writeRow = 3;
+        }
+        else if (versionTo == V02)
+        {
+            writeRow = 5;
+            const auto &sku = _get_cellVal(docTo, writeRow, indColSku);
+            if (sku.startsWith("ABC"))
+            {
+                ++writeRow;
+            }
+        }
         int rowHeader = _getRowFieldId(versionTo) + 1;
         docTo.setRowHidden(rowHeader, false);
         
-        for (const auto &sku : orderedSkus)
+        for (const auto &sku : std::as_const(orderedSkus))
         {
             docTo.write(writeRow + 1, indColSku + 1, sku); // Write SKU
             if (m_countryCode_langCode_sku_fieldId_toValues.contains(countryCode)
