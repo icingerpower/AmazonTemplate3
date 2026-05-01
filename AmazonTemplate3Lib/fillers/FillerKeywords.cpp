@@ -39,38 +39,36 @@ QCoro::Task<void> FillerKeywords::fill(
     {
         const auto &sku = it.key();
         const auto &fieldId_fromValues = it.value();
-        if (fieldId_fromValues.contains(fieldIdFrom) && !fieldId_fromValues[fieldIdFrom].isEmpty())
+        QString keywordsForSku;
+        bool found = false;
+        QStringList patterns = skuPattern_countryCode_langCode_keywords.keys();
+        patterns.sort();
+        for (const auto &pattern : std::as_const(patterns))
         {
-            QString keywordsForSku;
-            bool found = false;
-            QStringList patterns = skuPattern_countryCode_langCode_keywords.keys();
-            patterns.sort();
-            for (const auto &pattern : patterns)
+            if (sku.contains(pattern, Qt::CaseInsensitive))
             {
-                 if (sku.contains(pattern, Qt::CaseInsensitive))
-                 {
-                     const auto &countryCode_langCode_keywords_local = skuPattern_countryCode_langCode_keywords[pattern];
-                     if (countryCode_langCode_keywords_local.contains(countryCodeTo)
-                             && countryCode_langCode_keywords_local[countryCodeTo].contains(langCodeTo))
-                     {
-                         keywordsForSku = countryCode_langCode_keywords_local[countryCodeTo][langCodeTo];
-                         found = true;
-                         break;
-                     }
-                 }
+                const auto &countryCode_langCode_keywords_local
+                    = skuPattern_countryCode_langCode_keywords[pattern];
+                if (countryCode_langCode_keywords_local.contains(countryCodeTo)
+                    && countryCode_langCode_keywords_local[countryCodeTo].contains(langCodeTo))
+                {
+                    keywordsForSku = countryCode_langCode_keywords_local[countryCodeTo][langCodeTo];
+                    found = true;
+                    break;
+                }
             }
-            if (!found)
+        }
+        if (!found)
+        {
+            if (countryCode_langCode_keywords.contains(countryCodeTo)
+                && countryCode_langCode_keywords[countryCodeTo].contains(langCodeTo))
             {
-                 if (countryCode_langCode_keywords.contains(countryCodeTo)
-                         && countryCode_langCode_keywords[countryCodeTo].contains(langCodeTo))
-                 {
-                     keywordsForSku = countryCode_langCode_keywords[countryCodeTo][langCodeTo];
-                 }
+                keywordsForSku = countryCode_langCode_keywords[countryCodeTo][langCodeTo];
             }
-            if (!keywordsForSku.isEmpty())
-            {
-                sku_fieldId_toValues[sku][fieldIdTo] = keywordsForSku;
-            }
+        }
+        if (!keywordsForSku.isEmpty())
+        {
+            sku_fieldId_toValues[sku][fieldIdTo] = keywordsForSku;
         }
     }
     co_return;
