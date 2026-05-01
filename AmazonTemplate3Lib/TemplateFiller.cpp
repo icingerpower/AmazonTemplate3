@@ -668,17 +668,17 @@ void TemplateFiller::checkColumnsFilled()
     for (const auto &fieldId : fieldIds)
     {
         if (m_attributeFlagsTable->hasFlag(
-                    marketplace, fieldId, Attribute::NoAI))
+                marketplace, fieldId, Attribute::NoAI))
         {
             fieldIdsNeededChildren.insert(fieldId);
             if (!m_attributeFlagsTable->hasFlag(
-                        marketplace, fieldId, Attribute::ChildOnly))
+                    marketplace, fieldId, Attribute::ChildOnly))
             {
                 fieldIdsNeededAll.insert(fieldId);
             }
         }
         if (m_attributeFlagsTable->hasFlag(
-                    marketplace, fieldId, Attribute::ChildOnly))
+                marketplace, fieldId, Attribute::ChildOnly))
         {
             fieldIdsNeededNoParent.insert(fieldId);
         }
@@ -728,7 +728,10 @@ void TemplateFiller::checkColumnsFilled()
                             continue;
                         }
                     }
-                    fieldIdsWithMissingValue[fieldId].insert(sku);
+                    if (!m_attributeFlagsTable->hasFlag(marketplace, fieldId, Attribute::CopyIfPresent))
+                    {
+                        fieldIdsWithMissingValue[fieldId].insert(sku);
+                    }
                 }
             }
         }
@@ -877,6 +880,36 @@ QCoro::Task<void> TemplateFiller::fillValues()
                     }
                     qDebug() << "TemplateFiller Loop. Filler:" << filler << "Field:" << fieldIdFrom << "END";
                 }
+            }
+        }
+
+        // Second pass: copy attributes flagged CopyIfPresent when source has a value
+        const auto &copyIfPresentFieldIds = m_attributeFlagsTable->getCopyIfPresentFieldIds(marketplaceFrom);
+        for (const auto &fieldIdFrom : copyIfPresentFieldIds)
+        {
+            bool sourceHasValue = false;
+            for (auto it = m_sku_fieldId_fromValues.cbegin(); it != m_sku_fieldId_fromValues.cend(); ++it)
+            {
+                if (it.value().contains(fieldIdFrom) && !it.value()[fieldIdFrom].isEmpty())
+                {
+                    sourceHasValue = true;
+                    break;
+                }
+            }
+            if (!sourceHasValue)
+                continue;
+
+            if (!fieldId_index.contains(fieldIdFrom))
+                continue;
+
+            const auto &fieldIdTo = m_attributeFlagsTable->getFieldId(marketplaceFrom, fieldIdFrom, marketplaceTo);
+            auto &sku_fieldId_toValues = m_countryCode_langCode_sku_fieldId_toValues[countryCodeTo][langCodeTo];
+            for (auto it = m_sku_fieldId_fromValues.cbegin(); it != m_sku_fieldId_fromValues.cend(); ++it)
+            {
+                const auto &sku = it.key();
+                const auto &fieldId_fromValues = it.value();
+                if (fieldId_fromValues.contains(fieldIdFrom) && !fieldId_fromValues[fieldIdFrom].isEmpty())
+                    sku_fieldId_toValues[sku][fieldIdTo] = fieldId_fromValues[fieldIdFrom];
             }
         }
     }

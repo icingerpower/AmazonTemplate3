@@ -26,6 +26,7 @@ public:
         , MandatoryAmazon = 256
         , MandatoryTemu = 512
         , MandatoryPartialUpdate = 1024
+        , CopyIfPresent = 2048
     };
     static const QHash<Flag, QString> FLAG_STRING;
     static const QMap<QString, Flag> STRING_FLAG;

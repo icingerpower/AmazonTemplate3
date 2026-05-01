@@ -11,7 +11,9 @@ bool FillerCopy::canFill(
         , const QString &fieldIdFrom) const
 {
     if (templateFiller->attributeFlagsTable()
-            ->hasFlag(marketplaceFrom, fieldIdFrom, Attribute::Copy))
+            ->hasFlag(marketplaceFrom, fieldIdFrom, Attribute::Copy)
+        || templateFiller->attributeFlagsTable()
+            ->hasFlag(marketplaceFrom, fieldIdFrom, Attribute::CopyIfPresent))
     {
         return true;
     }

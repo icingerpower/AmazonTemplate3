@@ -82,7 +82,7 @@ AttributesMandatoryTable::AttributesMandatoryTable(
         m_idsMandatory[alwaysId] = true;
         m_idsNotMandatory.remove(alwaysId);
     }
-    _saveInSettings();
+    //_saveInSettings();
 }
 
 void AttributesMandatoryTable::update(

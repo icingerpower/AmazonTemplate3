@@ -175,6 +175,37 @@ QStringList AttributeFlagsTable::getSizeFieldIds() const
     return fieldIds;
 }
 
+QSet<QString> AttributeFlagsTable::getCopyIfPresentFieldIds(const QString &marketplace) const
+{
+    QSet<QString> fieldIds;
+    int colIdx = m_colNames.indexOf(marketplace);
+    if (colIdx == -1)
+        return fieldIds;
+
+    int flagColIdx = -1;
+    for (int i = m_indFirstFlag; i < m_colNames.size(); ++i)
+    {
+        if (Attribute::STRING_FLAG.value(m_colNames[i]) == Attribute::CopyIfPresent)
+        {
+            flagColIdx = i;
+            break;
+        }
+    }
+    if (flagColIdx == -1)
+        return fieldIds;
+
+    for (const auto &variantList : std::as_const(m_listOfVariantList))
+    {
+        if (variantList[flagColIdx].toBool())
+        {
+            const QString &fieldId = variantList[colIdx].toString();
+            if (!fieldId.isEmpty())
+                fieldIds.insert(fieldId);
+        }
+    }
+    return fieldIds;
+}
+
 void AttributeFlagsTable::recordAttributeNotRecordedYet(
         const QString &marketplace, const QSet<QString> &fieldIds)
 {
