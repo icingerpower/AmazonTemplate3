@@ -146,7 +146,32 @@ QCoro::Task<void> FillerSelectable::fill(
                         , sku_fieldId_toValueslangCommon
                         , sku_fieldId_toValues
                         );
-
+            // Fallback for SKUs where no from-value existed (field absent from source):
+            // _fillSameLangCountry only acts on SKUs still empty after the above.
+            co_await _fillSameLangCountry(
+                        templateFiller
+                        , parentSku_variation_skus
+                        , marketplaceFrom
+                        , marketplaceTo
+                        , fieldIdFrom
+                        , fieldIdTo
+                        , attribute
+                        , productTypeFrom
+                        , productTypeTo
+                        , countryCodeFrom
+                        , langCodeFrom
+                        , countryCodeTo
+                        , langCodeTo
+                        , countryCode_langCode_keywords
+                        , skuPattern_countryCode_langCode_keywords
+                        , gender
+                        , age
+                        , sku_fieldId_fromValues
+                        , sku_attribute_valuesForAi
+                        , sku_fieldId_toValuesFrom
+                        , sku_fieldId_toValueslangCommon
+                        , sku_fieldId_toValues
+                        );
         }
     }
     else
@@ -312,7 +337,10 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
     {
         const auto &sku = it.key();
         const auto &fieldId_fromValues = it.value();
-        if (fieldId_fromValues.contains(fieldIdFrom) && !fieldId_fromValues[fieldIdFrom].isEmpty())
+        if (fieldId_fromValues.contains(fieldIdFrom) && !fieldId_fromValues[fieldIdFrom].isEmpty()
+                && (!sku_fieldId_toValues.contains(sku)
+                    || !sku_fieldId_toValues[sku].contains(fieldIdTo)
+                    || sku_fieldId_toValues[sku][fieldIdTo].isEmpty()))
         {
             sku_fieldId_toValues[sku][fieldIdTo] = it.value()[fieldIdFrom];
         }
