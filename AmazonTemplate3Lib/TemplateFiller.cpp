@@ -728,7 +728,7 @@ void TemplateFiller::checkColumnsFilled()
                             continue;
                         }
                     }
-                    if (!m_attributeFlagsTable->hasFlag(marketplace, fieldId, Attribute::CopyIfPresent))
+                    if (!m_attributeFlagsTable->hasFlag(marketplace, fieldId, Attribute::FillIfPresent))
                     {
                         fieldIdsWithMissingValue[fieldId].insert(sku);
                     }
@@ -836,6 +836,20 @@ QCoro::Task<void> TemplateFiller::fillValues()
                 const auto &attribute =  m_marketplace_attributeId_attributeInfos[marketplaceFrom][fieldIdFrom].data();
                 if (fieldId_index.contains(fieldIdFrom) && filler->canFill(this, attribute, marketplaceFrom, fieldIdFrom))
                 {
+                    if (m_attributeFlagsTable->hasFlag(marketplaceFrom, fieldIdFrom, Attribute::FillIfPresent))
+                    {
+                        bool anySkuHasValue = false;
+                        for (auto it = m_sku_fieldId_fromValues.cbegin(); it != m_sku_fieldId_fromValues.cend(); ++it)
+                        {
+                            if (it.value().contains(fieldIdFrom) && !it.value()[fieldIdFrom].isEmpty())
+                            {
+                                anySkuHasValue = true;
+                                break;
+                            }
+                        }
+                        if (!anySkuHasValue)
+                            continue;
+                    }
                     const auto &fieldIdTo = m_attributeFlagsTable->getFieldId(
                                 marketplaceFrom, fieldIdFrom, marketplaceTo);
                     qDebug() << "TemplateFiller Loop. Filler:" << filler << countryCodeTo << langCodeTo << "Field:" << fieldIdFrom << "START";
@@ -883,35 +897,6 @@ QCoro::Task<void> TemplateFiller::fillValues()
             }
         }
 
-        // Second pass: copy attributes flagged CopyIfPresent when source has a value
-        const auto &copyIfPresentFieldIds = m_attributeFlagsTable->getCopyIfPresentFieldIds(marketplaceFrom);
-        for (const auto &fieldIdFrom : copyIfPresentFieldIds)
-        {
-            bool sourceHasValue = false;
-            for (auto it = m_sku_fieldId_fromValues.cbegin(); it != m_sku_fieldId_fromValues.cend(); ++it)
-            {
-                if (it.value().contains(fieldIdFrom) && !it.value()[fieldIdFrom].isEmpty())
-                {
-                    sourceHasValue = true;
-                    break;
-                }
-            }
-            if (!sourceHasValue)
-                continue;
-
-            if (!fieldId_index.contains(fieldIdFrom))
-                continue;
-
-            const auto &fieldIdTo = m_attributeFlagsTable->getFieldId(marketplaceFrom, fieldIdFrom, marketplaceTo);
-            auto &sku_fieldId_toValues = m_countryCode_langCode_sku_fieldId_toValues[countryCodeTo][langCodeTo];
-            for (auto it = m_sku_fieldId_fromValues.cbegin(); it != m_sku_fieldId_fromValues.cend(); ++it)
-            {
-                const auto &sku = it.key();
-                const auto &fieldId_fromValues = it.value();
-                if (fieldId_fromValues.contains(fieldIdFrom) && !fieldId_fromValues[fieldIdFrom].isEmpty())
-                    sku_fieldId_toValues[sku][fieldIdTo] = fieldId_fromValues[fieldIdFrom];
-            }
-        }
     }
     _saveTemplates();
     co_return;

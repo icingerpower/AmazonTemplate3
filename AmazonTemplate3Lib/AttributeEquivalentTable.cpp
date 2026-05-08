@@ -320,7 +320,7 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
             } else if (v.startsWith("'") && v.endsWith("'")) {
                 v = v.mid(1, v.length() - 2);
             }
-            v.replace("\"", "").replace("'", "");
+            v.replace("\"", "");
             v = v.trimmed();
             if (!v.isEmpty()) result.insert(v);
         }
@@ -328,9 +328,6 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
     };
     
     auto validateReply = [parseReply, choiceGroups](const QString &r, const QString &) -> bool {
-        // Must check that in the list, there is at least one value of each QStringList valuesList = allValues.values(); that is created
-        if (r.contains("Amazon V")) return false;
-        if (r.contains(": ")) return false;
         if (!r.contains("{") || !r.contains("}")) return false;
         
         QSet<QString> repliedValues = parseReply(r);
@@ -365,7 +362,9 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
             }
             
             if (!found) {
-                // qWarning() << "Validation failed: No valid value found for group" << group.label;
+                qWarning() << "validateReply failed: no match for group" << group.label
+                           << "| allowedValues:" << group.allowedValues
+                           << "| repliedValues:" << repliedValues;
                 return false;
             }
         }

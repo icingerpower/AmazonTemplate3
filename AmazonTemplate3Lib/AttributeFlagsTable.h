@@ -27,7 +27,7 @@ public:
     Attribute::Flag getFlags(const QString &marketplace, const QString &fieldId) const;
     bool hasFlag(const QString &marketplace, const QString &fieldId, Attribute::Flag flag) const;
     QStringList getSizeFieldIds() const;
-    QSet<QString> getCopyIfPresentFieldIds(const QString &marketplace) const;
+    QSet<QString> getFillIfPresentFieldIds(const QString &marketplace) const;
     //Attribute::Flag getFlag(const QString &attrId, const QString &marketplace) const;
 
     void recordAttributeNotRecordedYet(

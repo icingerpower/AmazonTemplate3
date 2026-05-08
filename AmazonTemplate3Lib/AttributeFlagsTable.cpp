@@ -175,7 +175,7 @@ QStringList AttributeFlagsTable::getSizeFieldIds() const
     return fieldIds;
 }
 
-QSet<QString> AttributeFlagsTable::getCopyIfPresentFieldIds(const QString &marketplace) const
+QSet<QString> AttributeFlagsTable::getFillIfPresentFieldIds(const QString &marketplace) const
 {
     QSet<QString> fieldIds;
     int colIdx = m_colNames.indexOf(marketplace);
@@ -185,7 +185,7 @@ QSet<QString> AttributeFlagsTable::getCopyIfPresentFieldIds(const QString &marke
     int flagColIdx = -1;
     for (int i = m_indFirstFlag; i < m_colNames.size(); ++i)
     {
-        if (Attribute::STRING_FLAG.value(m_colNames[i]) == Attribute::CopyIfPresent)
+        if (Attribute::STRING_FLAG.value(m_colNames[i]) == Attribute::FillIfPresent)
         {
             flagColIdx = i;
             break;

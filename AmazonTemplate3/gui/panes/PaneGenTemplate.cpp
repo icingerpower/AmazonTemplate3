@@ -5,6 +5,8 @@
 #include <QVBoxLayout>
 #include <QDialogButtonBox>
 #include <QHeaderView>
+#include <typeinfo>
+#include <cxxabi.h>
 
 #include <TemplateFiller.h>
 #include <ExceptionTemplate.h>
@@ -101,7 +103,7 @@ QCoro::Task<void> PaneGenTemplate::generate()
     auto progress = new QProgressDialog(
                 tr("Filling template..."),
                 QString{}, 0, 0, this);
-    progress->setWindowModality(Qt::ApplicationModal);
+    progress->setWindowModality(Qt::WindowModal);
     progress->setCancelButton(nullptr);
     progress->setMinimumDuration(0);
     progress->setAutoClose(false);
@@ -131,15 +133,22 @@ QCoro::Task<void> PaneGenTemplate::generate()
                     exception.title(),
                     exception.error());
     }
+    /* // Here we remove the catch so we know where it crashes
     catch (const std::exception &e)
     {
+        int status = 0;
+        char *demangled = abi::__cxa_demangle(typeid(e).name(), nullptr, nullptr, &status);
+        QString typeName = (status == 0 && demangled) ? QString(demangled) : QString(typeid(e).name());
+        free(demangled);
+        qCritical() << "Exception type:" << typeName << "| what():" << e.what();
         QMessageBox::critical(
                     this,
                     tr("Unknown Error"),
-                    QString("An unexpected generation error occurred: %1").arg(e.what()));
+                    QString("Type: %1\n%2").arg(typeName, e.what()));
     }
     catch (...)
     {
+        qCritical() << "Unknown non-std exception during template filling";
         QMessageBox::critical(
                     this,
                     tr("Unknown Error"),
