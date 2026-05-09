@@ -75,6 +75,7 @@ QCoro::Task<void> FillerSelectable::fill(
         , QHash<QString, QHash<QString, QString>> &sku_fieldId_toValueslangCommon
         , QHash<QString, QHash<QString, QString>> &sku_fieldId_toValues) const
 {
+    auto attributeFlagsTable = templateFiller->attributeFlagsTable();
     qDebug() << "FillerSelectable::fill...BEGIN";
     const auto &possibleValues = attribute->possibleValues(
                 marketplaceTo, countryCodeTo, langCodeTo, productTypeTo);
@@ -87,7 +88,12 @@ QCoro::Task<void> FillerSelectable::fill(
              it != sku_fieldId_fromValues.cend(); ++it)
         {
             const auto &sku = it.key();
-            sku_fieldId_toValues[sku][fieldIdTo] = uniquePossibleValue;
+            bool isParent = parentSku_variation_skus.contains(sku);
+            bool childOnly = attributeFlagsTable->hasFlag(marketplaceFrom, fieldIdFrom, Attribute::ChildOnly);
+            if (!childOnly || !isParent)
+            {
+                sku_fieldId_toValues[sku][fieldIdTo] = uniquePossibleValue;
+            }
         }
         qDebug() << "FillerSelectable::fill Single Value Path DONE.";
     }
