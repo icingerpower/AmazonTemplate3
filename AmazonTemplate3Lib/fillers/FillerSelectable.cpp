@@ -6,6 +6,7 @@
 #include <QJsonObject>
 
 #include "../../common/openai/OpenAi2.h"
+#include "../../common/openai/ExceptionOpenAiError.h"
 
 #include "Attribute.h"
 #include "TemplateFiller.h"
@@ -21,10 +22,16 @@
 
 
 FillerSelectable::EditCallback FillerSelectable::EDIT_MISSING_CALLBACK = nullptr;
+FillerSelectable::SelectValueCallback FillerSelectable::SELECT_VALUE_CALLBACK = nullptr;
 
 void FillerSelectable::recordEditCallback(EditCallback callback)
 {
     EDIT_MISSING_CALLBACK = callback;
+}
+
+void FillerSelectable::recordSelectValueCallback(SelectValueCallback callback)
+{
+    SELECT_VALUE_CALLBACK = callback;
 }
 
 bool FillerSelectable::canFill(
@@ -363,6 +370,10 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
 
     QList<QSharedPointer<QCoro::Task<void>>> tasks;
     QSet<QString> scheduledValueIds;
+    AttributeEquivalentTable *equivalentTable = templateFiller->attributeEquivalentTable();
+    QHash<QString, QSharedPointer<QString>> valueId_lastInvalidValue;
+    const bool fillIfPresent = attributeFlagsTable->hasFlag(
+                marketplaceFrom, fieldIdFrom, Attribute::FillIfPresent);
 
     auto parseValue = [](const QString &json) -> QString {
         QJsonParseError error;
@@ -381,6 +392,12 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
         bool isParent = parentSku_variation_skus.contains(sku);
         if (!isParent || !childOnly)
         {
+            if (fillIfPresent)
+            {
+                const auto &fromValues = it.value();
+                if (!fromValues.contains(fieldIdFrom) || fromValues[fieldIdFrom].isEmpty())
+                    continue;
+            }
             const auto &fieldId_toValues = sku_fieldId_toValues[sku];
             if (!fieldId_toValues.contains(fieldIdTo) || fieldId_toValues[fieldIdTo].isEmpty())
             {
@@ -436,6 +453,8 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
                     }
                     scheduledValueIds.insert(valueId);
 
+                    auto lastInvalidValue = QSharedPointer<QString>::create();
+                    valueId_lastInvalidValue[valueId] = lastInvalidValue;
 
                     auto task = [=]() -> QCoro::Task<void> {
 
@@ -454,11 +473,16 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
                         step->apply = [&](const QString &reply) {
                             phase1Result = reply;
                         };
-                        step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
+                        step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, lastInvalidValue](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
                         {
                             QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
                                     .arg(QString::number(networkError), reply, lastWhy);
                             templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, errorMsg);
+                            QJsonDocument doc = QJsonDocument::fromJson(reply.toUtf8());
+                            if (doc.isObject()) {
+                                const QString v = doc.object().value("value").toString();
+                                if (!v.isEmpty()) *lastInvalidValue = v;
+                            }
                             return true;
                         };
 
@@ -466,8 +490,12 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
                         {
                         }
 
-                        co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
-
+                        try {
+                            co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
+                        } catch (const ExceptionOpenAiError &e) {
+                            qWarning() << "_fillSameLangCountry Phase 1 hard-failed for" << fieldIdTo << ":" << e.error();
+                            // fall through to Phase 2
+                        }
 
                         // phase1Result is the JSON string if successful/agreed
                         if (!phase1Result.isEmpty())
@@ -498,18 +526,38 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
                             step->apply = [&](const QString &reply) {
                                 phase2Result = reply;
                             };
-                            step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
+                            step->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, lastInvalidValue](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
                             {
                                 QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
                                         .arg(QString::number(networkError), reply, lastWhy);
                                 templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo, errorMsg);
+                                QJsonDocument doc = QJsonDocument::fromJson(reply.toUtf8());
+                                if (doc.isObject()) {
+                                    const QString v = doc.object().value("value").toString();
+                                    if (!v.isEmpty()) *lastInvalidValue = v;
+                                }
                                 return true;
+                            };
+                            // Lenient validate for Phase 2: accept any well-formed {"value":"<non-empty>"}
+                            // so the AI's "closest value" suggestions don't exhaust retries.
+                            // Exact-match checking is done after apply().
+                            step->validate = [](const QString &gptReply, const QString &) -> bool {
+                                QJsonParseError err;
+                                QJsonDocument doc = QJsonDocument::fromJson(gptReply.toUtf8(), &err);
+                                if (err.error != QJsonParseError::NoError || !doc.isObject())
+                                    return false;
+                                return !doc.object().value("value").toString().isEmpty();
                             };
 
                             for (const auto &step : steps)
                             {
                             }
-                            co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
+                            try {
+                                co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
+                            } catch (const ExceptionOpenAiError &e) {
+                                qWarning() << "_fillSameLangCountry Phase 2 hard-failed for" << fieldIdTo << ":" << e.error();
+                                co_return;
+                            }
 
                             if (!phase2Result.isEmpty())
                             {
@@ -520,6 +568,13 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
                                     found = true;
                                     // Save valid JSON reply to cache
                                     templateFiller->saveAiValue(settingsFileName, valueId, phase2Result);
+                                }
+                                else if (!val.isEmpty() && val != "UNKNOWN")
+                                {
+                                    // AI suggested a value that isn't an exact match — record it
+                                    // so the third pass can look it up via equivalences (or prompt
+                                    // the user to add one with a useful hint).
+                                    *lastInvalidValue = val;
                                 }
                             }
                         }
@@ -554,6 +609,12 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
         bool isParent = parentSku_variation_skus.contains(sku);
         if (!isParent || !childOnly)
         {
+            if (fillIfPresent)
+            {
+                const auto &fromValues = it.value();
+                if (!fromValues.contains(fieldIdFrom) || fromValues[fieldIdFrom].isEmpty())
+                    continue;
+            }
             const auto &fieldId_toValues = sku_fieldId_toValues[sku];
             if (!fieldId_toValues.contains(fieldIdTo) || fieldId_toValues[fieldIdTo].isEmpty())
             {
@@ -583,6 +644,154 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
                             sku_fieldId_toValues[sku][fieldIdTo] = val;
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // Third pass: for SKUs still empty after both AI phases, show dialog until user resolves it.
+    // The expected fix is to add an equivalence in the dialog linking the AI's invalid reply
+    // (e.g. "Correa triple") to a valid allowed value (e.g. "Correa doble").
+    for (auto it = sku_fieldId_fromValues.cbegin(); it != sku_fieldId_fromValues.cend(); ++it)
+    {
+        const auto &sku = it.key();
+        bool isParent = parentSku_variation_skus.contains(sku);
+        if (!isParent || !childOnly)
+        {
+            if (fillIfPresent)
+            {
+                const auto &fromValues = it.value();
+                if (!fromValues.contains(fieldIdFrom) || fromValues[fieldIdFrom].isEmpty())
+                    continue;
+            }
+            const QString &valueId = _getValueId(
+                        marketplaceTo, countryCodeTo, langCodeTo,
+                        allSameValue, childSameValue,
+                        sku_parentSku[sku], sku_variation[sku], fieldIdTo);
+
+            bool rejectedIfHelpAsked = false;
+            while (!rejectedIfHelpAsked)
+            {
+                if (!sku_fieldId_toValues[sku][fieldIdTo].isEmpty())
+                    break;
+
+                const QString lastAiValue = valueId_lastInvalidValue.contains(valueId)
+                                             ? *valueId_lastInvalidValue[valueId]
+                                             : QString();
+                if (!lastAiValue.isEmpty()
+                        && equivalentTable->hasEquivalent(fieldIdToV02, lastAiValue, possibleValues))
+                {
+                    sku_fieldId_toValues[sku][fieldIdTo] = equivalentTable->getEquivalentValue(
+                                fieldIdToV02, lastAiValue, possibleValues);
+                    break;
+                }
+
+                auto possibleValuesList = possibleValues.values();
+                possibleValuesList.sort();
+                QString title = QObject::tr("No AI value selected");
+                QString description = QObject::tr(
+                    "For field id %1 (%2), AI could not select a value for %3 / %4 / %5.\n"
+                    "Possible values: %6")
+                        .arg(fieldIdFrom, sku, fieldIdTo, countryCodeTo, langCodeTo,
+                             possibleValuesList.join(", "));
+                if (!lastAiValue.isEmpty())
+                    description += QObject::tr(
+                        "\n\nAI kept returning \"%1\" which is not in the allowed values list.\n"
+                        "Tip: add an equivalence linking \"%2\" to the correct allowed value.")
+                            .arg(lastAiValue, lastAiValue);
+
+                if (SELECT_VALUE_CALLBACK)
+                {
+                    // Build the same prompt the AI would receive so the user can copy it
+                    // into an external AI with the product image attached.
+                    QString aiPrompt;
+                    if (sku_attribute_valuesForAi.contains(sku))
+                    {
+                        auto tempStep = ::createSelectStep(
+                            valueId, marketplaceTo, fieldIdTo,
+                            sku_attribute_valuesForAi[sku], possibleValues);
+                        aiPrompt = tempStep->getPrompt(0);
+                    }
+                    const QString imagePath =
+                        templateFiller->sku_imagePreviewFilePath().value(sku);
+                    const QString selected = co_await SELECT_VALUE_CALLBACK(
+                        templateFiller, title, description, aiPrompt, imagePath, possibleValues);
+                    if (!selected.isEmpty())
+                    {
+                        // Propagate to sibling SKUs so they don't re-open the dialog.
+                        // Propagation scope is determined by the flags:
+                        //   allSameValue  → all SKUs in this fill call
+                        //   childSameValue → all children that share the same parent SKU
+                        //   neither        → only exact valueId match (same variation)
+                        const QString currentParentSku = sku_parentSku.value(sku);
+                        for (auto it2 = sku_fieldId_fromValues.cbegin();
+                             it2 != sku_fieldId_fromValues.cend(); ++it2)
+                        {
+                            const QString &sku2 = it2.key();
+                            bool isParent2 = parentSku_variation_skus.contains(sku2);
+                            if (!isParent2 || !childOnly)
+                            {
+                                if (fillIfPresent)
+                                {
+                                    const auto &fv = it2.value();
+                                    if (!fv.contains(fieldIdFrom) || fv[fieldIdFrom].isEmpty())
+                                        continue;
+                                }
+                                if (sku_fieldId_toValues[sku2][fieldIdTo].isEmpty())
+                                {
+                                    bool shouldPropagate = false;
+                                    if (allSameValue)
+                                    {
+                                        shouldPropagate = true;
+                                    }
+                                    else if (childSameValue && !currentParentSku.isEmpty())
+                                    {
+                                        shouldPropagate =
+                                            (sku_parentSku.value(sku2) == currentParentSku);
+                                    }
+                                    else
+                                    {
+                                        const QString vid2 = _getValueId(
+                                            marketplaceTo, countryCodeTo, langCodeTo,
+                                            allSameValue, childSameValue,
+                                            sku_parentSku.value(sku2), sku_variation.value(sku2),
+                                            fieldIdTo);
+                                        shouldPropagate = (vid2 == valueId);
+                                    }
+                                    if (shouldPropagate)
+                                        sku_fieldId_toValues[sku2][fieldIdTo] = selected;
+                                }
+                            }
+                        }
+                        // Cache so the AI isn't asked again for this valueId.
+                        QJsonObject cacheObj;
+                        cacheObj["value"] = selected;
+                        templateFiller->saveAiValue(settingsFileName, valueId,
+                            QJsonDocument(cacheObj).toJson(QJsonDocument::Compact));
+                        break;
+                    }
+                    else
+                    {
+                        // User cancelled — stop filling for this field.
+                        ExceptionTemplate exception;
+                        exception.setInfos(title, description);
+                        exception.raise();
+                    }
+                }
+                else if (EDIT_MISSING_CALLBACK)
+                {
+                    rejectedIfHelpAsked = ! co_await EDIT_MISSING_CALLBACK(
+                                templateFiller, title, description);
+                    // Safety net: if AI gave no specific suggestion there is nothing
+                    // for the equivalence table to resolve on the next iteration.
+                    if (lastAiValue.isEmpty())
+                        rejectedIfHelpAsked = true;
+                }
+                else
+                {
+                    ExceptionTemplate exception;
+                    exception.setInfos(title, description);
+                    exception.raise();
                 }
             }
         }

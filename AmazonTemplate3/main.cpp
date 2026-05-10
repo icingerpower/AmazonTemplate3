@@ -2,6 +2,7 @@
 #include "../../common/workingdirectory/DialogOpenConfig.h"
 #include "../../common/types/types.h"
 #include "gui/DialogAttributes.h"
+#include "gui/DialogSelectValue.h"
 #include "fillers/FillerSelectable.h"
 
 #include "gui/MainWindow.h"
@@ -28,6 +29,7 @@ int main(int argc, char *argv[])
         return 0;
     }
     FillerSelectable::recordEditCallback(&DialogAttributes::editAttributes);
+    FillerSelectable::recordSelectValueCallback(&DialogSelectValue::selectValue);
 
     MainWindow w;
     w.show();

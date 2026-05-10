@@ -24,4 +24,6 @@ SET(GUI_FILES
     ${CMAKE_CURRENT_LIST_DIR}/DialogAddValueToReplace.cpp
     ${CMAKE_CURRENT_LIST_DIR}/DialogAddValueToReplace.h
     ${CMAKE_CURRENT_LIST_DIR}/DialogAddValueToReplace.ui
+    ${CMAKE_CURRENT_LIST_DIR}/DialogSelectValue.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/DialogSelectValue.h
 )

@@ -43,8 +43,19 @@ public:
             );
     using EditCallback = std::function<QCoro::Task<bool>(TemplateFiller*, const QString &error, const QString &message)>;
     static void recordEditCallback(EditCallback callback);
+
+    using SelectValueCallback = std::function<QCoro::Task<QString>(
+        TemplateFiller*,
+        const QString &title,
+        const QString &description,
+        const QString &aiPrompt,
+        const QString &imagePath,
+        const QSet<QString> &possibleValues)>;
+    static void recordSelectValueCallback(SelectValueCallback callback);
+
 private:
     static EditCallback EDIT_MISSING_CALLBACK;
+    static SelectValueCallback SELECT_VALUE_CALLBACK;
     QString _getValueId(
             const QString &marketplaceTo
             , const QString &countryCodeTo

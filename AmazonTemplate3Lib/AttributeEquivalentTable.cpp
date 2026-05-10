@@ -5,6 +5,7 @@
 #include <algorithm>
 
 #include "../../common/openai/OpenAi2.h"
+#include "../../common/openai/ExceptionOpenAiError.h"
 
 #include "AttributeEquivalentTable.h"
 #include "Attribute.h"
@@ -398,8 +399,12 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
         
         QList<QSharedPointer<OpenAi2::StepMultipleAsk>> phase1;
         phase1 << step;
-        co_await OpenAi2::instance()->askGptMultipleTimeCoro(phase1, "gpt-5.2");
-        
+        try {
+            co_await OpenAi2::instance()->askGptMultipleTimeCoro(phase1, "gpt-5.2");
+        } catch (const ExceptionOpenAiError &e) {
+            qWarning() << "askAiEquivalentValues Phase 1 hard-failed for" << fieldIdAmzV02 << ":" << e.error() << "- falling through to Phase 2";
+        }
+
         if (*success) co_return;
     }
     
@@ -441,15 +446,17 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
         step->onLastError = [fieldIdAmzV02](const QString &reply, QNetworkReply::NetworkError networkError, const QString &err) -> bool {
              QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
                      .arg(QString::number(networkError), reply, err);
-             ExceptionTemplate exception;
-             exception.setInfos("Attribute Equivalence Error", "Failed to get equivalent values for " + fieldIdAmzV02 + ": " + errorMsg);
-             exception.raise();
+             qWarning() << "askAiEquivalentValues Phase 2 onLastError for" << fieldIdAmzV02 << ":" << errorMsg;
              return true;
         };
-        
+
         QList<QSharedPointer<OpenAi2::StepMultipleAskAi>> phase2;
         phase2 << step;
-        co_await OpenAi2::instance()->askGptMultipleTimeAiCoro(phase2, "gpt-5.2");
+        try {
+            co_await OpenAi2::instance()->askGptMultipleTimeAiCoro(phase2, "gpt-5.2");
+        } catch (const ExceptionOpenAiError &e) {
+            qWarning() << "askAiEquivalentValues Phase 2 hard-failed for" << fieldIdAmzV02 << ":" << e.error();
+        }
     }
 }
 
@@ -540,15 +547,17 @@ QCoro::Task<void> AttributeEquivalentTable::askAiEquivalentValues(
     step->onLastError = [fieldIdAmzV02](const QString &reply, QNetworkReply::NetworkError networkError, const QString &err) -> bool {
          QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
                  .arg(QString::number(networkError), reply, err);
-         ExceptionTemplate exception;
-         exception.setInfos("Attribute Equivalence Error", "Failed to get equivalent values for " + fieldIdAmzV02 + ": " + errorMsg);
-         exception.raise();
+         qWarning() << "askAiEquivalentValues (v2) onLastError for" << fieldIdAmzV02 << ":" << errorMsg;
          return true;
     };
 
     QList<QSharedPointer<OpenAi2::StepMultipleAsk>> steps;
     steps << step;
-    co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
+    try {
+        co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
+    } catch (const ExceptionOpenAiError &e) {
+        qWarning() << "askAiEquivalentValues (v2) hard-failed for" << fieldIdAmzV02 << ":" << e.error();
+    }
 }
 
 QSet<QString> AttributeEquivalentTable::getEquivalentPartialUpdateValues() const
