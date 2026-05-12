@@ -92,6 +92,7 @@ void TemplateFiller::setTemplates(
                            , QObject::tr("The template is not filled as no product type could be found."));
         exception.raise();
     }
+    m_productType = productType;
     m_templateFromPath = templateFromPath;
     m_templateToPaths = templateToPaths;
     if (m_templateToPaths.contains(m_templateFromPath))
@@ -200,6 +201,33 @@ void TemplateFiller::_clearAttributeManagers()
 const QString &TemplateFiller::marketplaceFrom() const
 {
     return m_marketplaceFrom;
+}
+
+const QString &TemplateFiller::productTypeFrom() const
+{
+    return m_productType;
+}
+
+QList<TemplateFiller::TemplateLocale> TemplateFiller::getTargetTemplateLocales() const
+{
+    QList<TemplateLocale> locales;
+    for (const auto &path : m_templateToPaths)
+    {
+        TemplateLocale locale;
+        QStringList elements = QFileInfo{path}.baseName().split("-");
+        bool isNum = false;
+        while (!elements.isEmpty())
+        {
+            elements.last().toInt(&isNum);
+            if (isNum) elements.takeLast();
+            else break;
+        }
+        locale.displayName = elements.isEmpty() ? QFileInfo{path}.baseName() : elements.last();
+        locale.countryCode = _get_countryCode(path);
+        locale.langCode = _get_langCode(path);
+        locales.append(locale);
+    }
+    return locales;
 }
 
 QStringList TemplateFiller::_get_allTemplatePaths() const
@@ -1091,6 +1119,7 @@ void TemplateFiller::saveAiValue(const QString &settingsFileName, const QString 
     QSettings settings{settingsFilePath, QSettings::IniFormat};
     settings.setValue(id, value);
     settings.sync();
+    qDebug() << "saveAiValue:" << id << "ok=" << settings.contains(id);
 }
 
 bool TemplateFiller::hasAiValue(const QString &settingsFileName, const QString &id) const
@@ -1098,7 +1127,10 @@ bool TemplateFiller::hasAiValue(const QString &settingsFileName, const QString &
     Q_ASSERT(settingsFileName.endsWith(".ini"));
     const QString &settingsFilePath = m_workingDir.absoluteFilePath(settingsFileName);
     QSettings settings{settingsFilePath, QSettings::IniFormat};
-    return settings.contains(id);
+    const bool result = settings.contains(id);
+    if (!result)
+        qDebug() << "hasAiValue MISS:" << id;
+    return result;
 }
 
 QString TemplateFiller::getAiReply(const QString &settingsFileName, const QString &id) const

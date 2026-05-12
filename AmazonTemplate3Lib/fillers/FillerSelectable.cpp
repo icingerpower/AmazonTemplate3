@@ -458,11 +458,18 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
 
                     auto task = [=]() -> QCoro::Task<void> {
 
+                        // Copy valueId into coroutine-frame-local variable.
+                        // [=] captures of const QString& temporaries in outer
+                        // coroutine loops are not reliably copied per-frame by
+                        // GCC — all resumed coroutines would read the last
+                        // iteration's value from the shared stack slot.
+                        const QString vid = valueId;
+
                         QString selectedValue;
                         bool found = false;
 
                         // Phase 1: Ask 2 times, agreement check
-                        auto step = ::createSelectStep(valueId + "_p1", marketplaceTo, fieldIdTo, valuesForAi, possibleValues);
+                        auto step = ::createSelectStep(vid + "_p1", marketplaceTo, fieldIdTo, valuesForAi, possibleValues);
                         step->neededReplies = 2;
                         step->chooseBest = OpenAi2::CHOOSE_ALL_SAME_OR_EMPTY; // Returns empty if not all same
 
@@ -501,19 +508,20 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
                         if (!phase1Result.isEmpty())
                         {
                             QString val = parseValue(phase1Result);
+                            qDebug() << "Phase1:" << fieldIdTo << val << "inPossible:" << possibleValues.contains(val);
                             if (possibleValues.contains(val))
                             {
                                 selectedValue = val;
                                 found = true;
                                 // Save valid JSON reply to cache
-                                templateFiller->saveAiValue(settingsFileName, valueId, phase1Result);
+                                templateFiller->saveAiValue(settingsFileName, vid, phase1Result);
                             }
                         }
 
                         if (!found)
                         {
                             // Phase 2: Ask 5 times, frequent
-                            step->id = valueId + "_p2"; // Change ID to avoid cache collision
+                            step->id = vid + "_p2"; // Change ID to avoid cache collision
                             step->cachingKey = step->id;
                             step->neededReplies = 5;
                             step->chooseBest = OpenAi2::CHOOSE_MOST_FREQUENT;
@@ -562,12 +570,13 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
                             if (!phase2Result.isEmpty())
                             {
                                 QString val = parseValue(phase2Result);
+                                qDebug() << "Phase2:" << fieldIdTo << val << "inPossible:" << possibleValues.contains(val);
                                 if (possibleValues.contains(val))
                                 {
                                     selectedValue = val;
                                     found = true;
                                     // Save valid JSON reply to cache
-                                    templateFiller->saveAiValue(settingsFileName, valueId, phase2Result);
+                                    templateFiller->saveAiValue(settingsFileName, vid, phase2Result);
                                 }
                                 else if (!val.isEmpty() && val != "UNKNOWN")
                                 {
@@ -678,6 +687,9 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
                 const QString lastAiValue = valueId_lastInvalidValue.contains(valueId)
                                              ? *valueId_lastInvalidValue[valueId]
                                              : QString();
+                qDebug() << "FillerSelectable third-pass:" << fieldIdTo << sku
+                         << "toValue:" << sku_fieldId_toValues[sku][fieldIdTo]
+                         << "lastAiValue:" << lastAiValue;
                 if (!lastAiValue.isEmpty()
                         && equivalentTable->hasEquivalent(fieldIdToV02, lastAiValue, possibleValues))
                 {
