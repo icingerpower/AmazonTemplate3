@@ -751,14 +751,18 @@ void TemplateFiller::checkColumnsFilled()
                     if (isPartialUpdate)
                     {
                         if (!m_attributeFlagsTable->hasFlag(
-                                    marketplace, fieldId, Attribute::MandatoryPartialUpdate))
+                                marketplace, fieldId, Attribute::MandatoryPartialUpdate))
                         {
                             continue;
                         }
                     }
                     if (!m_attributeFlagsTable->hasFlag(marketplace, fieldId, Attribute::FillIfPresent))
                     {
+                        //bool isChildOnly = m_attributeFlagsTable->hasFlag(marketplace, fieldId, Attribute::ChildOnly); // For debugging only
+                        //if (!isParent || !isChildOnly)
+                        //{
                         fieldIdsWithMissingValue[fieldId].insert(sku);
+                        //}
                     }
                 }
             }
@@ -1788,7 +1792,11 @@ QHash<QString, QSet<QString>> TemplateFiller::_get_fieldId_possibleValues(
                                 value = cellValue->value().toString();
                                 if (!value.isEmpty())
                                 {
-                                    fieldId_possibleValues[fieldId] << value;
+                                    static QSet<QString> toExclude{"purchasable_offer#1.our_price#1.schedule#1.value_with_tax"};
+                                    if (!toExclude.contains(fieldId))
+                                    {
+                                        fieldId_possibleValues[fieldId] << value;
+                                    }
                                 }
                             }
                             if (value.isEmpty())
@@ -2264,14 +2272,14 @@ QCoro::Task<void> TemplateFiller::_readAgeGender()
             bool found = false;
             for (auto it = fieldId_index.begin(); it != fieldId_index.end(); ++it)
             {
-                if (it.key().startsWith(id))
+                const QString &fieldId = it.key();
+                if (fieldId.startsWith(id))
                 {
-                    const QString &realId = it.key();
                     if (m_marketplace_attributeId_attributeInfos.contains(marketplace) &&
-                        m_marketplace_attributeId_attributeInfos[marketplace].contains(realId))
+                        m_marketplace_attributeId_attributeInfos[marketplace].contains(fieldId))
                     {
-                        genderAttribute = m_marketplace_attributeId_attributeInfos[marketplace][realId];
-                        genderFieldIdFound = realId;
+                        genderAttribute = m_marketplace_attributeId_attributeInfos[marketplace][fieldId];
+                        genderFieldIdFound = fieldId;
                         found = true;
                         break;
                     }

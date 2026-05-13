@@ -270,6 +270,10 @@ QCoro::Task<void> FillerTitle::fill(
                         {
                             labelSize = sizePart.split("-").last().trimmed();
                         }
+                        else
+                        {
+                            labelSize = sizePart.trimmed();
+                        }
                     }
                     QString size;
                     QString sizeOrig;
@@ -306,10 +310,12 @@ QCoro::Task<void> FillerTitle::fill(
                             // size is for instance UK size which is 4
                             titleToAdd += labelSize + "=" + _get_sizeCountry(
                                               templateFiller, countryCodeTo, productTypeFrom, gender, age) + "-" + size;
+                            Q_ASSERT(!titleToAdd.contains(", ="));
                         }
                         else
                         {
                             titleToAdd += size;
+                            Q_ASSERT(!titleToAdd.contains(", ="));
                         }
                     }
                 }
@@ -319,6 +325,7 @@ QCoro::Task<void> FillerTitle::fill(
                     newTitle += titleToAdd;
                     newTitle += ")";
                 }
+                Q_ASSERT(!newTitle.contains(", ="));
                 sku_fieldId_toValues[sku][fieldIdTo] = newTitle;
             }
             else

@@ -32,6 +32,7 @@ private:
     Ui::DialogAttributes *ui;
     TemplateFiller *m_templateFiller;
     void _connectSlots();
+    void _setupReplacedDelegate();
 };
 
 #endif // DIALOGATTRIBUTES_H

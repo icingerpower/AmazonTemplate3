@@ -79,7 +79,15 @@ public:
 
     AttributeValueReplacedTable *attributeValueReplacedTable() const;
 
+    struct TemplateLocale {
+        QString displayName;
+        QString countryCode;
+        QString langCode;
+    };
+
     const QString &marketplaceFrom() const;
+    const QString &productTypeFrom() const;
+    QList<TemplateLocale> getTargetTemplateLocales() const;
     QSet<QString> getAllFieldIds() const;
 
     const QHash<QString, QString> &sku_imagePreviewFilePath() const;

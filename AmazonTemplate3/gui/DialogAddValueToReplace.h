@@ -2,6 +2,7 @@
 #define DIALOGADDVALUETOREPLACE_H
 
 #include <QDialog>
+#include <TemplateFiller.h>
 
 namespace Ui {
 class DialogAddValueToReplace;
@@ -12,10 +13,10 @@ class DialogAddValueToReplace : public QDialog
     Q_OBJECT
 
 public:
-    explicit DialogAddValueToReplace(QWidget *parent = nullptr);
+    explicit DialogAddValueToReplace(TemplateFiller *templateFiller, QWidget *parent = nullptr);
     ~DialogAddValueToReplace();
 
-    QString getMarketplaceId() const;
+    QString getMarketplace() const;
     QString getCountryCode() const;
     QString getLangCode() const;
     QString getProductType() const;
@@ -25,6 +26,9 @@ public:
 
 private:
     Ui::DialogAddValueToReplace *ui;
+    TemplateFiller *m_templateFiller;
+    QList<TemplateFiller::TemplateLocale> m_locales;
+    void _updateOkButton();
 };
 
 #endif // DIALOGADDVALUETOREPLACE_H

@@ -7,9 +7,11 @@
 #include <AttributeFlagsTable.h>
 #include <AttributesMandatoryTable.h>
 #include <TemplateFiller.h>
+#include <Attribute.h>
 
 #include "DialogAddPossibleValues.h"
 #include "DialogAddValueToReplace.h"
+#include "ComboBoxColumnDelegate.h"
 
 #include "DialogAttributes.h"
 #include "ui_DialogAttributes.h"
@@ -27,6 +29,7 @@ DialogAttributes::DialogAttributes(TemplateFiller *templateFiller, QWidget *pare
     ui->tableViewMandatory->resizeColumnsToContents();
     ui->tableViewMissingPossibleValues->setModel(m_templateFiller->attributePossibleMissingTable());
     ui->tableViewReplaced->setModel(m_templateFiller->attributeValueReplacedTable());
+    _setupReplacedDelegate();
     _connectSlots();
 }
 
@@ -47,6 +50,31 @@ QCoro::Task<bool> DialogAttributes::editAttributes(
     co_return ret == QDialog::Accepted;
 }
 
+void DialogAttributes::_setupReplacedDelegate()
+{
+    const auto &locales = m_templateFiller->getTargetTemplateLocales();
+    QStringList countryCodes, langCodes;
+    for (const auto &locale : locales)
+    {
+        if (!countryCodes.contains(locale.countryCode)) countryCodes.append(locale.countryCode);
+        if (!langCodes.contains(locale.langCode))       langCodes.append(locale.langCode);
+    }
+    std::sort(countryCodes.begin(), countryCodes.end());
+    std::sort(langCodes.begin(), langCodes.end());
+
+    QStringList fieldIds = m_templateFiller->getAllFieldIds().values();
+    std::sort(fieldIds.begin(), fieldIds.end());
+
+    // Columns: 0=Marketplace, 1=Country, 2=Lang, 3=ProductType, 4=FieldId, 5=From, 6=To
+    QHash<int, QStringList> columnItems{
+        {0, Attribute::MARKETPLACES},
+        {1, countryCodes},
+        {2, langCodes},
+        {4, fieldIds}
+    };
+    ui->tableViewReplaced->setItemDelegate(new ComboBoxColumnDelegate(columnItems, this));
+}
+
 void DialogAttributes::_connectSlots()
 {
     connect(ui->buttonMissingPossibleAdd,
@@ -57,11 +85,11 @@ void DialogAttributes::_connectSlots()
             &QPushButton::clicked,
             this,
             &DialogAttributes::missingPossibleRemove);
-    connect(ui->buttonReplacedRemove,
+    connect(ui->buttonReplacedAdd,
             &QPushButton::clicked,
             this,
             &DialogAttributes::replaceAdd);
-    connect(ui->buttonReplacedAdd,
+    connect(ui->buttonReplacedRemove,
             &QPushButton::clicked,
             this,
             &DialogAttributes::replaceRemove);
@@ -104,12 +132,12 @@ void DialogAttributes::missingPossibleRemove()
 
 void DialogAttributes::replaceAdd()
 {
-    DialogAddValueToReplace dialogReplace;
+    DialogAddValueToReplace dialogReplace(m_templateFiller, this);
     auto ret = dialogReplace.exec();
     if (ret == QDialog::Accepted)
     {
         m_templateFiller->attributeValueReplacedTable()->recordAttribute(
-                    dialogReplace.getMarketplaceId(),
+                    dialogReplace.getMarketplace(),
                     dialogReplace.getCountryCode(),
                     dialogReplace.getLangCode(),
                     dialogReplace.getProductType(),
@@ -122,7 +150,7 @@ void DialogAttributes::replaceAdd()
 void DialogAttributes::replaceRemove()
 {
     const auto &selIndexes
-            = ui->tableViewMissingPossibleValues
+            = ui->tableViewReplaced
             ->selectionModel()->selectedIndexes();
     if (selIndexes.size() > 0)
     {
