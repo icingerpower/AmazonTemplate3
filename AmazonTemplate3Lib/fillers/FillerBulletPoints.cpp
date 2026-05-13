@@ -234,48 +234,35 @@ QCoro::Task<void> FillerBulletPoints::fill(
 
         bool hasAllBullets = true;
         QStringList bulletPoints{5};
-        
-        // Check existing values in sku_fieldId_toValueslangCommon (e.g. from previous runs or other sources)
+
         for (int i=1; i<=5; ++i)
         {
             bool found = false;
-            QString curFieldId;
+
+            // Check if a translated value already exists (set by a prior AI call for this language)
             for (const auto &pattern : BULLET_POINT_PATTERNS)
             {
-                curFieldId = pattern.arg(i);
-                
-                // If we have a value from "from" values, propagate it (legacy logic preserved essentially)
-                if (sku_fieldId_fromValues[sku].contains(curFieldId)
-                        && !sku_fieldId_fromValues[sku][curFieldId].isEmpty())
-                {
-                    recordAllMarketplace(
-                                templateFiller
-                                , marketplaceTo
-                                , curFieldId
-                                , sku_fieldId_toValueslangCommon[sku]
-                                , sku_fieldId_fromValues[sku][curFieldId]);
-                    found = true;
-                }
-                
+                const QString curFieldId = pattern.arg(i);
                 if (sku_fieldId_toValueslangCommon[sku].contains(curFieldId)
                         && !sku_fieldId_toValueslangCommon[sku][curFieldId].isEmpty())
                 {
-                     // If we already have it in common, use it
                     found = true;
+                    bulletPoints[i-1] = sku_fieldId_toValueslangCommon[sku][curFieldId];
+                    break;
                 }
             }
+
             if (!found)
             {
                 hasAllBullets = false;
-            }
-            else
-            {
-                // Grab the value we have for this bullet index (just take one pattern that exists)
+                // Provide source value as context for AI translation/completion
                 for (const auto &pattern : BULLET_POINT_PATTERNS)
                 {
-                    curFieldId = pattern.arg(i);
-                    if (sku_fieldId_toValueslangCommon[sku].contains(curFieldId)) {
-                        bulletPoints[i-1] = sku_fieldId_toValueslangCommon[sku][curFieldId];
+                    const QString curFieldId = pattern.arg(i);
+                    if (sku_fieldId_fromValues[sku].contains(curFieldId)
+                            && !sku_fieldId_fromValues[sku][curFieldId].isEmpty())
+                    {
+                        bulletPoints[i-1] = sku_fieldId_fromValues[sku][curFieldId];
                         break;
                     }
                 }
@@ -353,7 +340,8 @@ QCoro::Task<void> FillerBulletPoints::fill(
                         {
                             for (const auto &pattern : FillerBulletPoints::BULLET_POINT_PATTERNS)
                             {
-                                templateFiller->aiFailureTable()->recordError(marketplaceTo, countryCodeTo, countryCodeFrom, pattern.arg(i), errorMsg);
+                                templateFiller->aiFailureTable()->recordError(
+                                    marketplaceTo, countryCodeTo, countryCodeFrom, pattern.arg(i), errorMsg);
                             }
                         }
                         return true;
@@ -391,7 +379,10 @@ QCoro::Task<void> FillerBulletPoints::fill(
         QStringList bullets{5};
         QJsonDocument doc = QJsonDocument::fromJson(json.toUtf8());
         QJsonArray arr = doc.object().value("bullet_points").toArray();
-        for(int k=0; k<5; ++k) bullets[k] = arr.at(k).toString();
+        for(int k=0; k<5; ++k)
+        {
+            bullets[k] = arr.at(k).toString();
+        }
         return bullets;
     };
 
@@ -424,14 +415,16 @@ QCoro::Task<void> FillerBulletPoints::fill(
             const QStringList &pts = valueId_bulletPoints[valueId];
             if (pts.size() == 5)
             {
+                // fieldIdFrom is in the TO-template's format (fieldId_index check guarantees it),
+                // so marketplaceTo + its pattern correctly finds the row in get_marketplace_id
+                // and writes to all marketplace variants (V01 and V02) in one call.
+                const QString toBulletPattern = fieldIdFrom.contains('#')
+                        ? BULLET_POINT_PATTERNS[1] : BULLET_POINT_PATTERNS[0];
                 for (int i=1; i<=5; ++i)
                 {
-                     for (const auto &pattern : BULLET_POINT_PATTERNS)
-                     {
-                         const QString &bulletFieldid = pattern.arg(i);
-                         recordAllMarketplace(
-                                     templateFiller, marketplaceTo, bulletFieldid, sku_fieldId_toValueslangCommon[sku], pts[i-1]);
-                     }
+                    recordAllMarketplace(
+                                templateFiller, marketplaceTo, toBulletPattern.arg(i),
+                                sku_fieldId_toValueslangCommon[sku], pts[i-1]);
                 }
             }
         }
