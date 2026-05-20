@@ -102,3 +102,19 @@ add_executable(TemplateFillerTests tst_templatefiller.cpp)
 target_link_libraries(TemplateFillerTests PRIVATE AmazonTemplate3Lib_Tests Qt6::Test)
 target_include_directories(TemplateFillerTests PRIVATE ../AmazonTemplate3Lib)
 add_test(NAME TemplateFillerTests COMMAND TemplateFillerTests)
+
+add_executable(TreeSizingAsinsTests tst_tree_sizing_asins.cpp)
+target_link_libraries(TreeSizingAsinsTests PRIVATE AmazonTemplate3Lib_Tests)
+target_include_directories(TreeSizingAsinsTests PRIVATE ../AmazonTemplate3Lib)
+target_include_directories(TreeSizingAsinsTests PRIVATE ../../common/openai/)
+target_link_libraries(TreeSizingAsinsTests PRIVATE
+    Qt${QT_VERSION_MAJOR}::Test
+    Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::Core
+    QCoro6::Core)
+add_test(NAME TreeSizingAsinsTests COMMAND TreeSizingAsinsTests)
+
+option(DO_REAL_AMAZON_TESTS "Run real Amazon SP-API contract tests" OFF)
+if(DO_REAL_AMAZON_TESTS)
+    target_compile_definitions(TreeSizingAsinsTests PRIVATE DO_REAL_AMAZON_TESTS=1)
+endif()

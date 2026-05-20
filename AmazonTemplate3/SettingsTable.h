@@ -13,11 +13,9 @@ public:
 
     static const QString KEY_LWA_CLIENT_ID;
     static const QString KEY_LWA_CLIENT_SECRET;
-    static const QString KEY_LWA_REFRESH_TOKEN;
-
-    static const QString KEY_AWS_ACCESS_KEY_ID;
-    static const QString KEY_AWS_SECRET_ACCESS_KEY;
-    static const QString KEY_AWS_ROLE_ARN;
+    static const QString KEY_EU_LWA_REFRESH_TOKEN;
+    static const QString KEY_NA_LWA_REFRESH_TOKEN;
+    static const QString KEY_JP_LWA_REFRESH_TOKEN;
 
     static const QString KEY_EU_SELLER_ID;
     static const QString KEY_NA_SELLER_ID;

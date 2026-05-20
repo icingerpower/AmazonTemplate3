@@ -6,6 +6,12 @@ SET(GUI_FILES
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneGenTemplate.cpp
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneGenTemplate.h
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneGenTemplate.ui
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneSizing.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneSizing.h
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneSizing.ui
+    ${CMAKE_CURRENT_LIST_DIR}/panes/MiddleTruncateDelegate.h
+    ${CMAKE_CURRENT_LIST_DIR}/panes/SizeTableGenerator.h
+    ${CMAKE_CURRENT_LIST_DIR}/panes/SizeTableGenerator.cpp
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneSettings.cpp
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneSettings.h
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneSettings.ui

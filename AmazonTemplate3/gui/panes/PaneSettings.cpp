@@ -25,14 +25,14 @@ void PaneSettings::_loadSettings()
 
     ui->lineEditLwaClientId->setText(st->value(SettingsTable::KEY_LWA_CLIENT_ID));
     ui->lineEditLwaClientSecret->setText(st->value(SettingsTable::KEY_LWA_CLIENT_SECRET));
-    ui->lineEditLwaRefreshToken->setText(st->value(SettingsTable::KEY_LWA_REFRESH_TOKEN));
 
-    ui->lineEditAwsAccessKeyId->setText(st->value(SettingsTable::KEY_AWS_ACCESS_KEY_ID));
-    ui->lineEditAwsSecretAccessKey->setText(st->value(SettingsTable::KEY_AWS_SECRET_ACCESS_KEY));
-    ui->lineEditAwsRoleArn->setText(st->value(SettingsTable::KEY_AWS_ROLE_ARN));
-
+    ui->lineEditEuLwaRefreshToken->setText(st->value(SettingsTable::KEY_EU_LWA_REFRESH_TOKEN));
     ui->lineEditEuSellerId->setText(st->value(SettingsTable::KEY_EU_SELLER_ID));
+
+    ui->lineEditNaLwaRefreshToken->setText(st->value(SettingsTable::KEY_NA_LWA_REFRESH_TOKEN));
     ui->lineEditNaSellerId->setText(st->value(SettingsTable::KEY_NA_SELLER_ID));
+
+    ui->lineEditJpLwaRefreshToken->setText(st->value(SettingsTable::KEY_JP_LWA_REFRESH_TOKEN));
     ui->lineEditJpSellerId->setText(st->value(SettingsTable::KEY_JP_SELLER_ID));
 
     const QString openAiKey = st->value(SettingsTable::KEY_OPENAI_API_KEY);
@@ -58,20 +58,19 @@ void PaneSettings::_connectSlots()
             this, [st](const QString &v){ st->setValue(SettingsTable::KEY_LWA_CLIENT_ID, v); });
     connect(ui->lineEditLwaClientSecret, &QLineEdit::textChanged,
             this, [st](const QString &v){ st->setValue(SettingsTable::KEY_LWA_CLIENT_SECRET, v); });
-    connect(ui->lineEditLwaRefreshToken, &QLineEdit::textChanged,
-            this, [st](const QString &v){ st->setValue(SettingsTable::KEY_LWA_REFRESH_TOKEN, v); });
 
-    connect(ui->lineEditAwsAccessKeyId, &QLineEdit::textChanged,
-            this, [st](const QString &v){ st->setValue(SettingsTable::KEY_AWS_ACCESS_KEY_ID, v); });
-    connect(ui->lineEditAwsSecretAccessKey, &QLineEdit::textChanged,
-            this, [st](const QString &v){ st->setValue(SettingsTable::KEY_AWS_SECRET_ACCESS_KEY, v); });
-    connect(ui->lineEditAwsRoleArn, &QLineEdit::textChanged,
-            this, [st](const QString &v){ st->setValue(SettingsTable::KEY_AWS_ROLE_ARN, v); });
-
+    connect(ui->lineEditEuLwaRefreshToken, &QLineEdit::textChanged,
+            this, [st](const QString &v){ st->setValue(SettingsTable::KEY_EU_LWA_REFRESH_TOKEN, v); });
     connect(ui->lineEditEuSellerId, &QLineEdit::textChanged,
             this, [st](const QString &v){ st->setValue(SettingsTable::KEY_EU_SELLER_ID, v); });
+
+    connect(ui->lineEditNaLwaRefreshToken, &QLineEdit::textChanged,
+            this, [st](const QString &v){ st->setValue(SettingsTable::KEY_NA_LWA_REFRESH_TOKEN, v); });
     connect(ui->lineEditNaSellerId, &QLineEdit::textChanged,
             this, [st](const QString &v){ st->setValue(SettingsTable::KEY_NA_SELLER_ID, v); });
+
+    connect(ui->lineEditJpLwaRefreshToken, &QLineEdit::textChanged,
+            this, [st](const QString &v){ st->setValue(SettingsTable::KEY_JP_LWA_REFRESH_TOKEN, v); });
     connect(ui->lineEditJpSellerId, &QLineEdit::textChanged,
             this, [st](const QString &v){ st->setValue(SettingsTable::KEY_JP_SELLER_ID, v); });
 }

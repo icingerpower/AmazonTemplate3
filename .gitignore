@@ -2,3 +2,4 @@ tests
 *.user
 .vscode
 *build*
+.env

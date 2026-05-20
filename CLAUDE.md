@@ -123,3 +123,21 @@ Defined in `AmazonTemplate3Lib/CMakeLists.txt`:
 - `COL_SEP=","` — CSV column separator
 - `CELL_SEP="\073"` — cell separator (`;`)
 - `OPENAI2_UNIT_TESTS` — set in the `_Tests` library variant to expose `OpenAi2` test hooks
+
+## Amazon SP-API Notes
+
+### Authentication — LWA only, no SigV4
+
+Since **October 2, 2023**, Amazon SP-API no longer requires AWS IAM or AWS Signature Version 4. Requests only need the `x-amz-access-token` header (obtained via LWA OAuth2 refresh-token exchange). The `_signRequest` / `regionForMarketplace` methods have been removed from `AmazonCatalogApi`. There are no AWS IAM credentials in the app settings.
+
+### Refresh tokens must be regenerated after adding app roles
+
+**This has burned us before.** LWA refresh tokens encode the SP-API application's roles at the time of authorization. If you add a new role to the SP-API app (e.g. "Product Listing") and the existing refresh tokens were obtained *before* that role was added, those tokens will not grant access to the new role's APIs — Amazon returns HTTP 403 `AccessDeniedException` on every call.
+
+**Fix:** re-authorize the app for the affected region in [solutionproviderportal.amazon.com](https://solutionproviderportal.amazon.com) to get fresh refresh tokens, then update them in the app's Settings pane.
+
+Symptom: all EU/NA marketplaces return `Access to requested resource is denied` while JP works (or vice-versa), because the JP token was obtained after the role change but the EU/NA tokens were not.
+
+### Diagnostic files
+
+`AmazonCatalogApi` automatically writes a full request+response dump to `/tmp/sp-api-{ASIN}-{timestamp}.txt` whenever a non-200 response is received. Attach this file to Amazon support cases — it contains all headers (access token truncated) and the response body.

@@ -34,6 +34,10 @@ add_library(AmazonTemplate3Lib STATIC
   AmazonTemplate3Lib.h
   ${OPENAI_FILES}
   #${WORKING_DIR_FILES}
+  apis/AmazonCatalogApi.h
+  apis/AmazonCatalogApi.cpp
+  apis/TreeSizingAsins.h
+  apis/TreeSizingAsins.cpp
   Attribute.h
   Attribute.cpp
   TemplateFiller.h
@@ -89,6 +93,10 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   AmazonTemplate3Lib.cpp
   AmazonTemplate3Lib.h
   ${OPENAI_FILES}
+  apis/AmazonCatalogApi.h
+  apis/AmazonCatalogApi.cpp
+  apis/TreeSizingAsins.h
+  apis/TreeSizingAsins.cpp
   Attribute.h
   Attribute.cpp
   TemplateFiller.h
@@ -123,6 +131,7 @@ target_link_libraries(AmazonTemplate3Lib_Tests PUBLIC
 target_compile_definitions(AmazonTemplate3Lib_Tests PUBLIC
     AMAZONTEMPLATE3LIB_LIBRARY
     OPENAI2_UNIT_TESTS
+    AMAZONCATALOGAPI_UNIT_TESTS
 )
 
 target_include_directories(AmazonTemplate3Lib_Tests PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}

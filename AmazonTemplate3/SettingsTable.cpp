@@ -7,10 +7,9 @@ SettingsTable *SettingsTable::s_instance = nullptr;
 const QString SettingsTable::KEY_OPENAI_API_KEY       = "OpenAI/apiKey";
 const QString SettingsTable::KEY_LWA_CLIENT_ID        = "AmazonApi/lwaClientId";
 const QString SettingsTable::KEY_LWA_CLIENT_SECRET    = "AmazonApi/lwaClientSecret";
-const QString SettingsTable::KEY_LWA_REFRESH_TOKEN    = "AmazonApi/lwaRefreshToken";
-const QString SettingsTable::KEY_AWS_ACCESS_KEY_ID    = "AmazonApi/awsAccessKeyId";
-const QString SettingsTable::KEY_AWS_SECRET_ACCESS_KEY = "AmazonApi/awsSecretAccessKey";
-const QString SettingsTable::KEY_AWS_ROLE_ARN         = "AmazonApi/awsRoleArn";
+const QString SettingsTable::KEY_EU_LWA_REFRESH_TOKEN = "AmazonApi/eu/lwaRefreshToken";
+const QString SettingsTable::KEY_NA_LWA_REFRESH_TOKEN = "AmazonApi/na/lwaRefreshToken";
+const QString SettingsTable::KEY_JP_LWA_REFRESH_TOKEN = "AmazonApi/jp/lwaRefreshToken";
 const QString SettingsTable::KEY_EU_SELLER_ID         = "AmazonApi/eu/sellerId";
 const QString SettingsTable::KEY_NA_SELLER_ID         = "AmazonApi/na/sellerId";
 const QString SettingsTable::KEY_JP_SELLER_ID         = "AmazonApi/jp/sellerId";
@@ -18,11 +17,10 @@ const QString SettingsTable::KEY_JP_SELLER_ID         = "AmazonApi/jp/sellerId";
 const QList<SettingsTable::Entry> SettingsTable::ENTRIES = {
     {"OpenAI API Key",        KEY_OPENAI_API_KEY,        true},
     {"LWA Client ID",         KEY_LWA_CLIENT_ID,         true},
-    {"LWA Client Secret",     KEY_LWA_CLIENT_SECRET,     true},
-    {"LWA Refresh Token",     KEY_LWA_REFRESH_TOKEN,     true},
-    {"AWS Access Key ID",     KEY_AWS_ACCESS_KEY_ID,     true},
-    {"AWS Secret Access Key", KEY_AWS_SECRET_ACCESS_KEY, true},
-    {"AWS Role ARN",          KEY_AWS_ROLE_ARN,          false},
+    {"LWA Client Secret",        KEY_LWA_CLIENT_SECRET,        true},
+    {"EU LWA Refresh Token",     KEY_EU_LWA_REFRESH_TOKEN,     true},
+    {"NA LWA Refresh Token",     KEY_NA_LWA_REFRESH_TOKEN,     true},
+    {"JP LWA Refresh Token",     KEY_JP_LWA_REFRESH_TOKEN,     true},
     {"Europe – Seller ID",    KEY_EU_SELLER_ID,          false},
     {"N. America – Seller ID",KEY_NA_SELLER_ID,          false},
     {"Japan – Seller ID",     KEY_JP_SELLER_ID,          false},
