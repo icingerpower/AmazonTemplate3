@@ -1,0 +1,14 @@
+SET(SIZECATEGORY_FILES
+    ${CMAKE_CURRENT_LIST_DIR}/AbstractSizeCategory.h
+    ${CMAKE_CURRENT_LIST_DIR}/AbstractSizeCategory.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ClothingWomenCategory.h
+    ${CMAKE_CURRENT_LIST_DIR}/ClothingWomenCategory.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ClothingMenCategory.h
+    ${CMAKE_CURRENT_LIST_DIR}/ClothingMenCategory.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ShoesWomenCategory.h
+    ${CMAKE_CURRENT_LIST_DIR}/ShoesWomenCategory.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ShoesMenCategory.h
+    ${CMAKE_CURRENT_LIST_DIR}/ShoesMenCategory.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ClothingKidCategory.h
+    ${CMAKE_CURRENT_LIST_DIR}/ClothingKidCategory.cpp
+)

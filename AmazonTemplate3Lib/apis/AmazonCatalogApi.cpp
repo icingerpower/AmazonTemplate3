@@ -510,6 +510,141 @@ AmazonCatalogApi::_fetchAsinItem(QString asin, QString marketplaceId, AsinItem* 
 }
 
 // ---------------------------------------------------------------------------
+// Public helpers
+// ---------------------------------------------------------------------------
+
+QString AmazonCatalogApi::sellerIdForMarketplace(const QString& marketplaceId) const
+{
+    const QString region = lwaRegionForMarketplace(marketplaceId);
+    if (region == "NA") return m_sellerIdNa;
+    if (region == "JP") return m_sellerIdJp;
+    return m_sellerIdEu;
+}
+
+// ---------------------------------------------------------------------------
+// patchListingSizeChart — PATCH /listings/2021-08-01/items/{sellerId}/{sku}
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonCatalogApi::patchListingSizeChart(QString marketplaceId,
+                                                          QString sku,
+                                                          QString productType,
+                                                          QStringList headerCells,
+                                                          QList<QStringList> dataRows,
+                                                          bool* success)
+{
+    *success = false;
+
+    const QString sellerId = sellerIdForMarketplace(marketplaceId);
+    if (sellerId.isEmpty()) {
+        m_lastError = QStringLiteral("No seller ID configured for marketplace %1").arg(marketplaceId);
+        qWarning() << "AmazonCatalogApi:" << m_lastError;
+        co_return;
+    }
+
+    // Build size_chart JSON
+    QJsonArray headerArr;
+    for (const QString& h : headerCells)
+        headerArr.append(QJsonObject{{QStringLiteral("text"), h}});
+
+    QJsonArray dataRowsArr;
+    for (const QStringList& row : dataRows) {
+        QJsonArray cells;
+        for (const QString& c : row)
+            cells.append(QJsonObject{{QStringLiteral("text"), c}});
+        dataRowsArr.append(QJsonObject{{QStringLiteral("cells"), cells}});
+    }
+
+    const QJsonObject sizeChart{
+        {QStringLiteral("title"),      QStringLiteral("Size Chart")},
+        {QStringLiteral("header_row"), QJsonObject{{QStringLiteral("cells"), headerArr}}},
+        {QStringLiteral("data_rows"),  dataRowsArr}
+    };
+
+    const QJsonObject attrValue{
+        {QStringLiteral("marketplace_id"), marketplaceId},
+        {QStringLiteral("size_chart"),     sizeChart}
+    };
+
+    const QJsonObject patch{
+        {QStringLiteral("op"),    QStringLiteral("replace")},
+        {QStringLiteral("path"),  QStringLiteral("/attributes/size_chart_display")},
+        {QStringLiteral("value"), QJsonArray{attrValue}}
+    };
+
+    const QJsonObject bodyObj{
+        {QStringLiteral("productType"), productType},
+        {QStringLiteral("patches"),     QJsonArray{patch}}
+    };
+    const QByteArray jsonBody = QJsonDocument(bodyObj).toJson(QJsonDocument::Compact);
+
+    // Build URL: /listings/2021-08-01/items/{sellerId}/{sku}?marketplaceIds={marketplaceId}
+    const QString endpoint = endpointForMarketplace(marketplaceId);
+    const QString urlPath  = QStringLiteral("/listings/2021-08-01/items/%1/%2").arg(sellerId, sku);
+
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("marketplaceIds"), marketplaceId);
+
+    QUrl url;
+    url.setScheme(QStringLiteral("https"));
+    url.setHost(endpoint);
+    url.setPath(urlPath);
+    url.setQuery(query);
+
+    // Acquire LWA token
+    QString token;
+    co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
+    if (token.isEmpty()) {
+        m_lastError = QStringLiteral("No access token for marketplace %1").arg(marketplaceId);
+        co_return;
+    }
+
+    QNetworkRequest req(url);
+    req.setRawHeader("x-amz-access-token", token.toUtf8());
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    req.setRawHeader("accept", "application/json");
+
+    qDebug() << "AmazonCatalogApi: PATCH" << url.toString()
+             << "body:" << jsonBody.left(200);
+    QNetworkReply* reply = _nam()->sendCustomRequest(req, "PATCH", jsonBody);
+    co_await qCoro(reply).waitForFinished();
+
+    const QByteArray data = reply->readAll();
+    const int httpStatus  = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QString requestId = rawHeaderCI(reply, "x-amzn-RequestId");
+    reply->deleteLater();
+
+    qDebug() << "AmazonCatalogApi: PATCH" << urlPath
+             << "HTTP" << httpStatus
+             << "RequestId:" << (requestId.isEmpty() ? QStringLiteral("(none)") : requestId)
+             << "response:" << QString::fromUtf8(data.left(300));
+
+    if (httpStatus >= 400 || reply->error() != QNetworkReply::NoError) {
+        m_lastError = QStringLiteral("HTTP %1 for SKU %2: %3")
+                          .arg(httpStatus).arg(sku, QString::fromUtf8(data.left(300)));
+        qWarning() << "AmazonCatalogApi: PATCH failed for" << sku << ":" << m_lastError;
+
+        // Write diagnostic file
+        const QString ts = QDateTime::currentDateTimeUtc().toString("yyyyMMdd'T'HHmmss'Z'");
+        const QString diagPath = QStringLiteral("/tmp/sp-api-patch-%1-%2.txt").arg(sku, ts);
+        QFile f(diagPath);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream s(&f);
+            s << "=== REQUEST ===\n"
+              << "PATCH " << url.toString() << "\n\n"
+              << "Request body:\n" << QString::fromUtf8(jsonBody) << "\n\n"
+              << "=== RESPONSE ===\n"
+              << "HTTP " << httpStatus << "\n\n"
+              << QString::fromUtf8(data) << "\n";
+            qDebug() << "AmazonCatalogApi: diagnostic written to" << diagPath;
+        }
+        co_return;
+    }
+
+    *success = true;
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 

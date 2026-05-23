@@ -19,7 +19,7 @@
      <property name="orientation">
       <enum>Qt::Orientation::Horizontal</enum>
      </property>
-     <widget class="QWidget" name="">
+     <widget class="QWidget" name="layoutWidget">
       <layout class="QVBoxLayout" name="verticalLayout">
        <item>
         <layout class="QHBoxLayout" name="horizontalLayout">
@@ -90,6 +90,16 @@
           </widget>
          </item>
          <item>
+          <widget class="QRadioButton" name="radioButton">
+           <property name="text">
+            <string>Numbers</string>
+           </property>
+           <property name="checked">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+         <item>
           <widget class="QComboBox" name="comboBoxSizeFrom"/>
          </item>
          <item>
@@ -108,6 +118,53 @@
             <enum>Qt::Orientation::Vertical</enum>
            </property>
           </widget>
+         </item>
+         <item>
+          <widget class="QRadioButton" name="radioButton_2">
+           <property name="text">
+            <string>Letters</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QComboBox" name="comboBoxLetterSizeFrom"/>
+         </item>
+         <item>
+          <widget class="QLabel" name="label_3">
+           <property name="text">
+            <string>to</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QComboBox" name="comboBoxLetterSizeTo"/>
+         </item>
+         <item>
+          <widget class="Line" name="line_3">
+           <property name="orientation">
+            <enum>Qt::Orientation::Vertical</enum>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QRadioButton" name="radioButton_3">
+           <property name="text">
+            <string>Height</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QComboBox" name="comboBoxHeightFrom"/>
+         </item>
+         <item>
+          <widget class="QLabel" name="label_4">
+           <property name="text">
+            <string>to</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QComboBox" name="comboBoxHeightTo"/>
          </item>
          <item>
           <widget class="QPushButton" name="buttoGenSizeTables">
@@ -132,6 +189,11 @@
         </layout>
        </item>
        <item>
+        <widget class="QWidget" name="widgetMeasurementForm" native="true">
+         <layout class="QHBoxLayout" name="layoutMeasurementForm"/>
+        </widget>
+       </item>
+       <item>
         <widget class="QToolBox" name="toolBoxSizing">
          <property name="sizePolicy">
           <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
@@ -140,7 +202,7 @@
           </sizepolicy>
          </property>
          <property name="currentIndex">
-          <number>2</number>
+          <number>0</number>
          </property>
          <widget class="QWidget" name="pageImageSize">
           <property name="geometry">
@@ -148,7 +210,7 @@
             <x>0</x>
             <y>0</y>
             <width>837</width>
-            <height>645</height>
+            <height>621</height>
            </rect>
           </property>
           <attribute name="label">
@@ -157,10 +219,23 @@
           <layout class="QVBoxLayout" name="verticalLayout_4">
            <item>
             <layout class="QHBoxLayout" name="horizontalLayout_3">
+             <property name="leftMargin">
+              <number>6</number>
+             </property>
              <item>
               <widget class="QPushButton" name="buttonUploadImageSize">
                <property name="text">
                 <string>Upload</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QCheckBox" name="checkBoxReplaceImage">
+               <property name="text">
+                <string>replace image</string>
+               </property>
+               <property name="checked">
+                <bool>true</bool>
                </property>
               </widget>
              </item>
@@ -173,18 +248,14 @@
              </item>
              <item>
               <widget class="QSpinBox" name="spinBoxImagePos">
+               <property name="enabled">
+                <bool>false</bool>
+               </property>
                <property name="maximum">
                 <number>9</number>
                </property>
                <property name="value">
                 <number>4</number>
-               </property>
-              </widget>
-             </item>
-             <item>
-              <widget class="QCheckBox" name="checkBoxReplaceImage">
-               <property name="text">
-                <string>replace image</string>
                </property>
               </widget>
              </item>
@@ -213,26 +284,63 @@
                <string>IMAGE</string>
               </property>
              </widget>
-             <widget class="QLabel" name="labelLastImage">
-              <property name="text">
-               <string>IMAGE</string>
-              </property>
+             <widget class="QWidget" name="widgetGroupImages" native="true">
+              <layout class="QVBoxLayout" name="verticalLayout_groups">
+               <item>
+                <widget class="QListWidget" name="listWidgetSizeGroups">
+                 <property name="maximumHeight">
+                  <number>120</number>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QLabel" name="labelSelectedImage">
+                 <property name="text">
+                  <string/>
+                 </property>
+                 <property name="alignment">
+                  <set>Qt::AlignTop|Qt::AlignLeft</set>
+                 </property>
+                </widget>
+               </item>
+              </layout>
              </widget>
             </widget>
            </item>
           </layout>
          </widget>
          <widget class="QWidget" name="pageImageTable">
+          <property name="geometry">
+           <rect>
+            <x>0</x>
+            <y>0</y>
+            <width>837</width>
+            <height>621</height>
+           </rect>
+          </property>
           <attribute name="label">
            <string>Size table</string>
           </attribute>
           <layout class="QVBoxLayout" name="verticalLayout_5">
            <item>
             <layout class="QHBoxLayout" name="horizontalLayout_4">
+             <property name="leftMargin">
+              <number>6</number>
+             </property>
              <item>
               <widget class="QPushButton" name="buttonUploadSizeTable">
                <property name="text">
                 <string>Upload</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QPushButton" name="buttonMakeEditable">
+               <property name="text">
+                <string>Make table editable</string>
+               </property>
+               <property name="checkable">
+                <bool>true</bool>
                </property>
               </widget>
              </item>
@@ -262,7 +370,7 @@
             <x>0</x>
             <y>0</y>
             <width>837</width>
-            <height>645</height>
+            <height>621</height>
            </rect>
           </property>
           <attribute name="label">
@@ -274,7 +382,7 @@
              <property name="orientation">
               <enum>Qt::Orientation::Vertical</enum>
              </property>
-             <widget class="QWidget" name="">
+             <widget class="QWidget" name="layoutWidget">
               <layout class="QVBoxLayout" name="verticalLayout_9">
                <item>
                 <layout class="QHBoxLayout" name="horizontalLayout_5">
@@ -329,7 +437,7 @@
                </item>
               </layout>
              </widget>
-             <widget class="QWidget" name="">
+             <widget class="QWidget" name="layoutWidget">
               <layout class="QVBoxLayout" name="verticalLayout_8">
                <item>
                 <layout class="QHBoxLayout" name="horizontalLayout_6">

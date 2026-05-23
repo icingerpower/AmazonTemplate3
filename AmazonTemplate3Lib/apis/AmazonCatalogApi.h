@@ -61,6 +61,22 @@ public:
     QString lastError() const { return m_lastError; }
     void    clearLastError()  { m_lastError.clear(); }
 
+    // Returns the seller ID configured for the given marketplace's region.
+    QString sellerIdForMarketplace(const QString& marketplaceId) const;
+
+    // PATCH size_chart_display for a single SKU via the Listings Items API.
+    // headerCells: full header row — first cell is the label-column header (usually ""),
+    //              remaining cells are size labels (e.g. "", "S", "M", "L").
+    // dataRows: each QStringList has label in col 0, then one value per size column.
+    // Sets *success = true on HTTP 200.
+    // GCC 13 ICE workaround: all non-trivially-destructible params passed by value.
+    QCoro::Task<void> patchListingSizeChart(QString marketplaceId,
+                                            QString sku,
+                                            QString productType,
+                                            QStringList headerCells,
+                                            QList<QStringList> dataRows,
+                                            bool* success);
+
 #ifdef AMAZONCATALOGAPI_UNIT_TESTS
     // Mock is called instead of real HTTP. Receives the path
     // (e.g. "/catalog/2022-04-01/items/B0XXX") and query params map,
