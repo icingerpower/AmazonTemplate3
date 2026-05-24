@@ -23,6 +23,13 @@ static QString fmtMeas(double val, double rangeVal)
     return fmt(val) + QLatin1Char('-') + fmt(val + rangeVal);
 }
 
+// Formats a cm measurement with its inch equivalent: "90-112 cm / 35.4-44.1 in"
+static QString fmtCmAndIn(double cmVal, double cmRange = 0.0)
+{
+    return fmtMeas(cmVal, cmRange) + QStringLiteral(" cm / ")
+         + fmtMeas(cmVal / 2.54, cmRange / 2.54) + QStringLiteral(" in");
+}
+
 QString AbstractSizeCategory::_formatVal(double val, bool isCm, bool isFloat)
 {
     if (isCm) {
@@ -142,7 +149,8 @@ QStandardItemModel* AbstractSizeCategory::buildTable(const QString &keyFrom,
         model->setItem(r, 0, label);
         for (int i = 0; i < nSizes; ++i) {
             const double v = rows[fromIdx + i].value(g.key);
-            auto *cell = new QStandardItem(_formatVal(v, g.isCm, g.isFloat));
+            auto *cell = new QStandardItem(
+                g.isCm ? fmtCmAndIn(v) : _formatVal(v, false, g.isFloat));
             cell->setFlags(noEditFlags);
             model->setItem(r, 1 + i, cell);
         }
@@ -159,7 +167,8 @@ QStandardItemModel* AbstractSizeCategory::buildTable(const QString &keyFrom,
             const bool isCm = field.label.contains(QStringLiteral("cm"));
             for (int i = 0; i < nSizes; ++i) {
                 const double v = rows[fromIdx + i].value(field.derivedKey);
-                auto *cell = new QStandardItem(_formatVal(v, isCm, true));
+                auto *cell = new QStandardItem(
+                    isCm ? fmtCmAndIn(v) : _formatVal(v, false, true));
                 cell->setFlags(noEditFlags);
                 model->setItem(r, 1 + i, cell);
             }
@@ -167,7 +176,7 @@ QStandardItemModel* AbstractSizeCategory::buildTable(const QString &keyFrom,
             const auto m = measurements.value(field.id);
             for (int i = 0; i < nSizes; ++i) {
                 const double v = m.refValue + i * m.step;
-                auto *cell = new QStandardItem(fmtMeas(v, m.rangeVal));
+                auto *cell = new QStandardItem(fmtCmAndIn(v, m.rangeVal));
                 cell->setFlags(noEditFlags);
                 model->setItem(r, 1 + i, cell);
             }
@@ -257,17 +266,49 @@ QImage AbstractSizeCategory::renderImage(QStandardItemModel *model) const
     const int nRows = model->rowCount();
     const int nCols = model->columnCount();
 
+    // Split cells that contain " cm / " into two rows: one for cm, one for inches.
+    // The UI table keeps combined cells for editing; only the rendered image is split.
+    static const QString kSep = QStringLiteral(" cm / ");
+
     QList<QPair<QString,QStringList>> rows;
-    rows.reserve(nRows);
     for (int r = 0; r < nRows; ++r) {
         const auto *labelItem = model->item(r, 0);
         const QString label = labelItem ? labelItem->text() : QString();
-        QStringList values;
+
+        QStringList cmVals, inVals;
+        bool hasDual = false;
         for (int c = 1; c < nCols; ++c) {
             const auto *it = model->item(r, c);
-            values << (it ? it->text() : QString());
+            const QString text = it ? it->text() : QString();
+            const int sepPos = text.indexOf(kSep);
+            if (sepPos >= 0) {
+                // "90-112 cm / 35.4-44.1 in" → cm part before " / ", in part after
+                cmVals << text.left(sepPos) + QStringLiteral(" cm");
+                const QString inPart = text.mid(sepPos + kSep.size());
+                // strip trailing " in" if present; we'll add the unit via label
+                inVals << inPart;
+                hasDual = true;
+            } else {
+                cmVals << text;
+                inVals << text;
+            }
         }
-        rows << qMakePair(label, values);
+
+        if (hasDual) {
+            // cm row: replace "(cm)" with "(cm)" (unchanged), or append " (cm)"
+            QString cmLabel = label;
+            if (!cmLabel.contains(QStringLiteral("cm"), Qt::CaseInsensitive))
+                cmLabel += QStringLiteral(" (cm)");
+            // inches row: replace "cm" → "in" in the label
+            QString inLabel = label;
+            inLabel.replace(QStringLiteral("(cm)"), QStringLiteral("(in)"),  Qt::CaseInsensitive);
+            if (inLabel == label)
+                inLabel += QStringLiteral(" (in)");
+            rows << qMakePair(cmLabel, cmVals);
+            rows << qMakePair(inLabel, inVals);
+        } else {
+            rows << qMakePair(label, cmVals);
+        }
     }
     return _renderRows(rows);
 }

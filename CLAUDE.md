@@ -124,6 +124,40 @@ Defined in `AmazonTemplate3Lib/CMakeLists.txt`:
 - `CELL_SEP="\073"` — cell separator (`;`)
 - `OPENAI2_UNIT_TESTS` — set in the `_Tests` library variant to expose `OpenAi2` test hooks
 
+## PaneSizing — Working Directory Structure
+
+`PaneSizing` organises all per-product files under the user's working directory:
+
+```
+{workingDir}/
+  sizing/
+    {ASIN}-{simplified-title}/     ← one folder per product family
+      settings.ini                 ← sizing settings for this product
+      {ASIN}_main.jpg              ← product main image (downloaded from Amazon CDN)
+```
+
+### Folder resolution (`_resolveProductDir`)
+
+When an ASIN is loaded:
+1. **`modelReset`** fires first (before API attributes arrive). Scans `{workingDir}/sizing/` for any existing folder matching `{ASIN}` exactly or starting with `{ASIN}-`. If found, sets `m_productWorkingDir` and loads `settings.ini` immediately.
+2. **`attributesFetched`** fires after the API call completes, carrying the parent ASIN and first-child title directly in the signal parameters. Calls `_resolveProductDir(asin, title)`, which reuses the existing folder if found by the same `{ASIN}` / `{ASIN}-*` prefix check, or creates `sizing/{ASIN}-{simplified-title}/` if nothing exists yet. Then loads `settings.ini`.
+
+The folder name uses the title at creation time and is **never renamed** — if the title changes on Amazon the folder is found by its ASIN prefix and reused as-is.
+
+### `settings.ini` keys
+
+| Key | Value |
+|---|---|
+| `sizing/type` | `displayName()` of the selected `AbstractSizeCategory` |
+| `sizing/mode` | `numbers` / `letters` / `height` |
+| `sizing/from` | Selected "from" value (text) for the active mode |
+| `sizing/to` | Selected "to" value (text) for the active mode |
+| `sizing/measurements/{fieldId}/ref` | Reference spinbox value |
+| `sizing/measurements/{fieldId}/step` | Step spinbox value |
+| `sizing/measurements/{fieldId}/range` | Range spinbox value |
+
+`settings.ini` is written by `_saveProductSettings()` on every successful "Generate" click, and read by `_loadProductSettings()` whenever `m_productWorkingDir` is first set.
+
 ## Amazon SP-API Notes
 
 ### Authentication — LWA only, no SigV4

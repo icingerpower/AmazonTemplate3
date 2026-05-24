@@ -54,6 +54,14 @@ public:
 
 signals:
     void loadError(const QString& message);
+    // Emitted after the first variation family loads; carries the first child's
+    // bullet points and material/fabric attributes for use in content generation.
+    void attributesFetched(QStringList bulletPoints, QStringList materialAttrs,
+                           QString mainImageUrl, QString parentAsin, QString firstChildTitle);
+    // All image URLs (MAIN, PT01, PT02…) from the first child of the first family.
+    // Using one child's angles rather than MAIN-per-child avoids duplicates for
+    // size-only variants where every child shares the same photos.
+    void variantImagesFetched(QStringList imageUrls);
 
 private:
     struct ChildItem {

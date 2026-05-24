@@ -6,7 +6,7 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1132</width>
+    <width>1251</width>
     <height>781</height>
    </rect>
   </property>
@@ -53,7 +53,20 @@
         </layout>
        </item>
        <item>
-        <widget class="QTreeView" name="treeViewAsins"/>
+        <widget class="QSplitter" name="splitterLeft">
+         <property name="orientation">
+          <enum>Qt::Orientation::Vertical</enum>
+         </property>
+         <widget class="QTreeView" name="treeViewAsins"/>
+         <widget class="QTextEdit" name="textEditAttributes">
+          <property name="readOnly">
+           <bool>true</bool>
+          </property>
+          <property name="placeholderText">
+           <string>Bullet points and material attributes will appear here after loading an ASIN…</string>
+          </property>
+         </widget>
+        </widget>
        </item>
       </layout>
      </widget>
@@ -77,6 +90,27 @@
        <property name="bottomMargin">
         <number>0</number>
        </property>
+       <item>
+        <layout class="QHBoxLayout" name="horizontalLayout_7">
+         <item>
+          <widget class="QComboBox" name="comboBoxCli"/>
+         </item>
+         <item>
+          <widget class="QLineEdit" name="lineEditSubWorkingDir">
+           <property name="readOnly">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="buttonOpenSubWorkingDir">
+           <property name="text">
+            <string>Open</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
        <item>
         <layout class="QHBoxLayout" name="horizontalLayout_2">
          <item>
@@ -204,13 +238,64 @@
          <property name="currentIndex">
           <number>0</number>
          </property>
+         <widget class="QWidget" name="pageImages">
+          <property name="geometry">
+           <rect>
+            <x>0</x>
+            <y>0</y>
+            <width>996</width>
+            <height>590</height>
+           </rect>
+          </property>
+          <attribute name="label">
+           <string>Images</string>
+          </attribute>
+          <layout class="QHBoxLayout" name="horizontalLayoutImages">
+           <item>
+            <widget class="QListWidget" name="listWidgetImages">
+             <property name="maximumWidth">
+              <number>220</number>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QScrollArea" name="scrollAreaImage">
+             <property name="widgetResizable">
+              <bool>true</bool>
+             </property>
+             <widget class="QWidget" name="scrollAreaWidgetContents">
+              <property name="geometry">
+               <rect>
+                <x>0</x>
+                <y>0</y>
+                <width>770</width>
+                <height>570</height>
+               </rect>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayoutScrollImage">
+               <item>
+                <widget class="QLabel" name="labelVariantImage">
+                 <property name="alignment">
+                  <set>Qt::AlignmentFlag::AlignTop|Qt::AlignmentFlag::AlignLeft</set>
+                 </property>
+                 <property name="scaledContents">
+                  <bool>false</bool>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </widget>
+           </item>
+          </layout>
+         </widget>
          <widget class="QWidget" name="pageImageSize">
           <property name="geometry">
            <rect>
             <x>0</x>
             <y>0</y>
-            <width>837</width>
-            <height>621</height>
+            <width>996</width>
+            <height>590</height>
            </rect>
           </property>
           <attribute name="label">
@@ -287,11 +372,7 @@
              <widget class="QWidget" name="widgetGroupImages" native="true">
               <layout class="QVBoxLayout" name="verticalLayout_groups">
                <item>
-                <widget class="QListWidget" name="listWidgetSizeGroups">
-                 <property name="maximumHeight">
-                  <number>120</number>
-                 </property>
-                </widget>
+                <widget class="QListWidget" name="listWidgetSizeGroups"/>
                </item>
                <item>
                 <widget class="QLabel" name="labelSelectedImage">
@@ -299,7 +380,7 @@
                   <string/>
                  </property>
                  <property name="alignment">
-                  <set>Qt::AlignTop|Qt::AlignLeft</set>
+                  <set>Qt::AlignmentFlag::AlignLeading|Qt::AlignmentFlag::AlignLeft|Qt::AlignmentFlag::AlignTop</set>
                  </property>
                 </widget>
                </item>
@@ -314,8 +395,8 @@
            <rect>
             <x>0</x>
             <y>0</y>
-            <width>837</width>
-            <height>621</height>
+            <width>996</width>
+            <height>590</height>
            </rect>
           </property>
           <attribute name="label">
@@ -369,8 +450,8 @@
            <rect>
             <x>0</x>
             <y>0</y>
-            <width>837</width>
-            <height>621</height>
+            <width>996</width>
+            <height>590</height>
            </rect>
           </property>
           <attribute name="label">
@@ -441,6 +522,13 @@
               <layout class="QVBoxLayout" name="verticalLayout_8">
                <item>
                 <layout class="QHBoxLayout" name="horizontalLayout_6">
+                 <item>
+                  <widget class="QPushButton" name="buttonGenerateFAQ">
+                   <property name="text">
+                    <string>Generate FAQ</string>
+                   </property>
+                  </widget>
+                 </item>
                  <item>
                   <widget class="QPushButton" name="buttonAddFAQ">
                    <property name="text">

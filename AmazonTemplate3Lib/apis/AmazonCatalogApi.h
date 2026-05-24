@@ -28,6 +28,10 @@ public:
         QString color;      // attribute "color" value (NOT "color_map")
         QString size;       // attribute "size" value
         bool    hasSizeTable = false; // true if "size_chart_node_id" attribute is non-empty
+        QStringList bulletPoints;    // from attributes.bullet_point (or summaries fallback)
+        QStringList materialAttrs;   // formatted "Label: value" strings for fabric/material keys
+        QString     mainImageUrl;    // MAIN variant image URL from images[]
+        QStringList allImageUrls;    // all image variant URLs in order (MAIN, PT01, PT02…)
     };
 
     struct VariationFamily {

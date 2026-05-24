@@ -214,6 +214,7 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
 
     QList<ParentItem> newFamilies;
     QSet<QString> seenParents;
+    bool attributesEmitted = false;
     for (const QString& asin : asins) {
         if (asin.isEmpty()) continue;
         AmazonCatalogApi::VariationFamily family;
@@ -258,6 +259,21 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
         }
         _applyDatesToFamily(p);
         newFamilies.append(p);
+
+        // Emit bullet points + material for the first child of the first family
+        if (!attributesEmitted && !family.children.isEmpty()) {
+            emit attributesFetched(family.children.first().bulletPoints,
+                                   family.children.first().materialAttrs,
+                                   family.children.first().mainImageUrl,
+                                   family.parentAsin,
+                                   family.children.first().title);
+
+            // Emit all image angles from the first child. Size-only variants
+            // share photos, so per-child MAIN would just duplicate the same image.
+            emit variantImagesFetched(family.children.first().allImageUrls);
+
+            attributesEmitted = true;
+        }
     }
 
     beginResetModel();

@@ -1,7 +1,10 @@
 #ifndef PANESETTINGS_H
 #define PANESETTINGS_H
 
+#include <QList>
 #include <QWidget>
+
+#include "AbstractCli.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class PaneSettings; }
@@ -14,9 +17,12 @@ class PaneSettings : public QWidget
 public:
     explicit PaneSettings(QWidget *parent = nullptr);
     ~PaneSettings();
+    void setAvailableClis(const QList<AbstractCli *> &clis);
 
 private:
-    Ui::PaneSettings *ui;
+    Ui::PaneSettings    *ui;
+    QList<AbstractCli *> m_availableClis;
+
     void _connectSlots();
     void _loadSettings();
 };

@@ -34,6 +34,21 @@
 #include <QClipboard>
 
 #include "../../common/workingdirectory/WorkingDirectoryManager.h"
+#include "AbstractCli.h"
+
+#include <QDesktopServices>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QPointer>
+#include <QProcess>
+#include <QSettings>
+#include <QUrl>
 
 PaneSizing::PaneSizing(QWidget *parent)
     : QWidget(parent)
@@ -90,6 +105,9 @@ PaneSizing::PaneSizing(QWidget *parent)
     connect(ui->listWidgetSizeGroups, &QListWidget::currentRowChanged,
             this, &PaneSizing::onGroupImageSelected);
 
+    connect(ui->listWidgetImages, &QListWidget::currentRowChanged,
+            this, &PaneSizing::onVariantImageSelected);
+
     auto makePromptSaver = [this](QTextEdit* editor, const QString& key) {
         connect(editor, &QTextEdit::textChanged, this, [this, editor, key]() {
             QTimer::singleShot(2000, this, [this, editor, key]() {
@@ -124,6 +142,17 @@ PaneSizing::PaneSizing(QWidget *parent)
         QGuiApplication::clipboard()->setText(editor->toPlainText());
     });
 
+    m_imageNam = new QNetworkAccessManager(this);
+
+    connect(ui->buttonGenerateFAQ, &QPushButton::clicked,
+            this, &PaneSizing::onGenerateFaqClicked);
+
+    connect(ui->buttonOpenSubWorkingDir, &QPushButton::clicked, this, [this]() {
+        const QDir &dir = m_productWorkingDir.exists() ? m_productWorkingDir : m_workingDir;
+        if (dir.exists())
+            QDesktopServices::openUrl(QUrl::fromLocalFile(dir.absolutePath()));
+    });
+
     ui->treeViewAsins->setItemDelegateForColumn(
         TreeSizingAsins::Title, new MiddleTruncateDelegate(this));
 
@@ -137,8 +166,41 @@ PaneSizing::~PaneSizing()
     delete ui;
 }
 
+void PaneSizing::setAvailableClis(const QList<AbstractCli *> &clis)
+{
+    m_availableClis = clis;
+
+    ui->comboBoxCli->blockSignals(true);
+    ui->comboBoxCli->clear();
+    for (AbstractCli *cli : clis)
+        ui->comboBoxCli->addItem(cli->getName(), QVariant::fromValue(cli));
+
+    // Default: first CLI with canGenImages(); fall back to first available.
+    int defaultIndex = 0;
+    for (int i = 0; i < clis.size(); ++i) {
+        if (clis[i]->canGenImages()) { defaultIndex = i; break; }
+    }
+
+    // Restore last user selection.
+    const QString saved = QSettings().value(QStringLiteral("sizing/selectedCli")).toString();
+    int restoredIndex = -1;
+    for (int i = 0; i < clis.size(); ++i) {
+        if (clis[i]->getName() == saved) { restoredIndex = i; break; }
+    }
+    ui->comboBoxCli->setCurrentIndex(restoredIndex >= 0 ? restoredIndex : defaultIndex);
+    ui->comboBoxCli->blockSignals(false);
+
+    connect(ui->comboBoxCli, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int index) {
+        if (index < 0 || index >= m_availableClis.size()) return;
+        QSettings().setValue(QStringLiteral("sizing/selectedCli"),
+                             m_availableClis[index]->getName());
+    });
+}
+
 void PaneSizing::setWorkingDir(const QDir &workingDir)
 {
+    m_workingDir = workingDir;
     _ensureModel(workingDir);
 }
 
@@ -158,6 +220,133 @@ void PaneSizing::_refreshApi()
         m_treeModel->setApiClient(m_api.get());
 }
 
+static QString simplifyForDirName(const QString &s)
+{
+    QString result;
+    for (const QChar &c : s.toLower()) {
+        if (c.isLetterOrNumber())
+            result += c;
+        else if (!result.isEmpty() && result.back() != QLatin1Char('-'))
+            result += QLatin1Char('-');
+    }
+    while (result.endsWith(QLatin1Char('-')))
+        result.chop(1);
+    return result.left(60);
+}
+
+QDir PaneSizing::_resolveProductDir(const QString &asin, const QString &title)
+{
+    if (!m_workingDir.exists())
+        return m_workingDir;
+
+    const QDir sizingRoot(m_workingDir.filePath(QStringLiteral("sizing")));
+
+    const QString prefix = asin + QLatin1Char('-');
+    for (const QString &entry : sizingRoot.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+        if (entry == asin || entry.startsWith(prefix))
+            return QDir(sizingRoot.filePath(entry));
+    }
+
+    const QString simplified = simplifyForDirName(title);
+    const QString dirName = simplified.isEmpty() ? asin : asin + QLatin1Char('-') + simplified;
+    m_workingDir.mkpath(QStringLiteral("sizing/") + dirName);
+    return QDir(sizingRoot.filePath(dirName));
+}
+
+void PaneSizing::_saveProductSettings()
+{
+    if (!m_productWorkingDir.exists())
+        return;
+
+    QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                 QSettings::IniFormat);
+
+    const auto *cat = _currentCategory();
+    s.setValue(QStringLiteral("sizing/type"),
+               cat ? cat->displayName() : ui->comboBoxSizeType->currentText());
+
+    QString mode, from, to;
+    if (ui->radioButton_2->isChecked()) {
+        mode = QStringLiteral("letters");
+        from = ui->comboBoxLetterSizeFrom->currentText();
+        to   = ui->comboBoxLetterSizeTo->currentText();
+    } else if (ui->radioButton_3->isChecked()) {
+        mode = QStringLiteral("height");
+        from = ui->comboBoxHeightFrom->currentText();
+        to   = ui->comboBoxHeightTo->currentText();
+    } else {
+        mode = QStringLiteral("numbers");
+        from = ui->comboBoxSizeFrom->currentText();
+        to   = ui->comboBoxSizeTo->currentText();
+    }
+    s.setValue(QStringLiteral("sizing/mode"), mode);
+    s.setValue(QStringLiteral("sizing/from"), from);
+    s.setValue(QStringLiteral("sizing/to"),   to);
+
+    const QString mPrefix = QStringLiteral("sizing/measurements/");
+    for (const auto &w : m_measurementWidgets) {
+        const QString base = mPrefix + w.fieldId;
+        s.setValue(base + QStringLiteral("/ref"),   w.refSpinBox->value());
+        s.setValue(base + QStringLiteral("/step"),  w.stepSpinBox->value());
+        s.setValue(base + QStringLiteral("/range"), w.rangeSpinBox->value());
+    }
+}
+
+void PaneSizing::_loadProductSettings()
+{
+    if (!m_productWorkingDir.exists())
+        return;
+
+    QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                 QSettings::IniFormat);
+
+    if (!s.contains(QStringLiteral("sizing/type")))
+        return;
+
+    // Set size type — triggers onSizeTypeChanged → _populateSizeRangeCombos +
+    // _rebuildMeasurementForm, which also restores generic measurement defaults.
+    const QString savedType = s.value(QStringLiteral("sizing/type")).toString();
+    const int typeIdx = ui->comboBoxSizeType->findText(savedType);
+    if (typeIdx >= 0)
+        ui->comboBoxSizeType->setCurrentIndex(typeIdx);
+
+    // Restore mode radio button.
+    const QString mode = s.value(QStringLiteral("sizing/mode")).toString();
+    if (mode == QStringLiteral("letters"))
+        ui->radioButton_2->setChecked(true);
+    else if (mode == QStringLiteral("height"))
+        ui->radioButton_3->setChecked(true);
+    else
+        ui->radioButton->setChecked(true);
+
+    // Restore from/to values.
+    const QString from = s.value(QStringLiteral("sizing/from")).toString();
+    const QString to   = s.value(QStringLiteral("sizing/to")).toString();
+    if (mode == QStringLiteral("letters")) {
+        ui->comboBoxLetterSizeFrom->setCurrentText(from);
+        ui->comboBoxLetterSizeTo->setCurrentText(to);
+    } else if (mode == QStringLiteral("height")) {
+        ui->comboBoxHeightFrom->setCurrentText(from);
+        ui->comboBoxHeightTo->setCurrentText(to);
+    } else {
+        ui->comboBoxSizeFrom->setCurrentText(from);
+        ui->comboBoxSizeTo->setCurrentText(to);
+    }
+
+    // Override measurement spinbox values with the product-specific ones.
+    // These take priority over the generic category defaults restored by
+    // _rebuildMeasurementForm above.
+    const QString mPrefix = QStringLiteral("sizing/measurements/");
+    for (const auto &w : m_measurementWidgets) {
+        const QString base = mPrefix + w.fieldId;
+        if (s.contains(base + QStringLiteral("/ref"))) {
+            w.refSpinBox->setValue( s.value(base + QStringLiteral("/ref")).toDouble());
+            w.stepSpinBox->setValue(s.value(base + QStringLiteral("/step")).toDouble());
+            w.rangeSpinBox->setValue(s.value(base + QStringLiteral("/range")).toDouble());
+        }
+    }
+}
+
 void PaneSizing::_ensureModel(const QDir &dir)
 {
     if (m_treeModel)
@@ -172,11 +361,64 @@ void PaneSizing::_ensureModel(const QDir &dir)
                 ui->treeViewAsins->expandAll();
                 updateButtonStates();
                 _tryGuessSizeRange();
+
+                // If a product subdir already exists for this ASIN, show it
+                // immediately. Creation (with full ASIN-title name) is deferred
+                // to attributesFetched once the title is available.
+                if (m_treeModel->rowCount() > 0) {
+                    const QString asin = m_treeModel->data(
+                        m_treeModel->index(0, TreeSizingAsins::ASIN),
+                        Qt::DisplayRole).toString();
+                    if (!asin.isEmpty() && m_workingDir.exists()) {
+                        const QDir sizingRoot(m_workingDir.filePath(QStringLiteral("sizing")));
+                        const QString prefix = asin + QLatin1Char('-');
+                        for (const QString &entry : sizingRoot.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+                            if (entry == asin || entry.startsWith(prefix)) {
+                                m_productWorkingDir = QDir(sizingRoot.filePath(entry));
+                                ui->lineEditSubWorkingDir->setText(m_productWorkingDir.absolutePath());
+                                _loadProductSettings();
+                                break;
+                            }
+                        }
+                    }
+                }
             });
+
+    connect(m_treeModel.get(), &TreeSizingAsins::variantImagesFetched,
+            this, &PaneSizing::_downloadVariantImages);
+
 
     connect(m_treeModel.get(), &TreeSizingAsins::loadError,
             this, [this](const QString& message) {
                 QMessageBox::warning(this, tr("Amazon API error"), message);
+            });
+
+    connect(m_treeModel.get(), &TreeSizingAsins::attributesFetched,
+            this, [this](const QStringList& bullets, const QStringList& materials,
+                         const QString& mainImageUrl, const QString& asin,
+                         const QString& title) {
+                QString text;
+                if (!bullets.isEmpty()) {
+                    text += tr("Bullet points:\n");
+                    for (const QString& b : bullets)
+                        text += QStringLiteral("• ") + b + QLatin1Char('\n');
+                }
+                if (!materials.isEmpty()) {
+                    if (!text.isEmpty()) text += QLatin1Char('\n');
+                    text += tr("Material / fabric:\n");
+                    for (const QString& m : materials)
+                        text += QStringLiteral("• ") + m + QLatin1Char('\n');
+                }
+                ui->textEditAttributes->setPlainText(text.trimmed());
+
+                if (!asin.isEmpty()) {
+                    m_productWorkingDir = _resolveProductDir(asin, title);
+                    ui->lineEditSubWorkingDir->setText(m_productWorkingDir.absolutePath());
+                    _loadProductSettings();
+                }
+
+                if (!mainImageUrl.isEmpty() && !asin.isEmpty())
+                    _downloadMainImage(mainImageUrl, asin);
             });
 }
 
@@ -359,6 +601,18 @@ void PaneSizing::_rebuildMeasurementForm()
         m_measurementWidgets.append({field.id, refSpin, stepSpin, rangeSpin});
     }
     layout->addStretch();
+
+    // Restore previously saved values for this category (if any)
+    auto s = WorkingDirectoryManager::instance()->settings();
+    const QString prefix = QStringLiteral("sizeCat/") + cat->displayName() + QLatin1Char('/');
+    for (const auto &w : m_measurementWidgets) {
+        const QString base = prefix + w.fieldId;
+        if (s->contains(base + QStringLiteral("/ref"))) {
+            w.refSpinBox->setValue( s->value(base + QStringLiteral("/ref")).toDouble());
+            w.stepSpinBox->setValue(s->value(base + QStringLiteral("/step")).toDouble());
+            w.rangeSpinBox->setValue(s->value(base + QStringLiteral("/range")).toDouble());
+        }
+    }
 }
 
 void PaneSizing::onSizeModeChanged()
@@ -452,6 +706,19 @@ void PaneSizing::onGenSizeTablesClicked()
             ui->listWidgetSizeGroups->setCurrentRow(0);
 
         m_generatedSuccessfully = true;
+
+        _saveProductSettings();
+
+        // Persist spinbox values for this category (generic fallback)
+        auto s = WorkingDirectoryManager::instance()->settings();
+        const QString prefix = QStringLiteral("sizeCat/") + cat->displayName() + QLatin1Char('/');
+        for (const auto &w : m_measurementWidgets) {
+            const QString base = prefix + w.fieldId;
+            s->setValue(base + QStringLiteral("/ref"),   w.refSpinBox->value());
+            s->setValue(base + QStringLiteral("/step"),  w.stepSpinBox->value());
+            s->setValue(base + QStringLiteral("/range"), w.rangeSpinBox->value());
+        }
+
     } catch (const std::exception &e) {
         QMessageBox::warning(this, tr("Generation failed"), QString::fromUtf8(e.what()));
     }
@@ -556,6 +823,268 @@ void PaneSizing::onUploadSizeTableClicked()
         return;
 
     _uploadSizeChart(mpCombo->currentData().toString(), productType);
+}
+
+static QString colorToFileSegment(const QString &color)
+{
+    QString result;
+    for (const QChar &c : color.toLower()) {
+        if (c.isLetterOrNumber())
+            result += c;
+        else if (!result.isEmpty() && result.back() != QLatin1Char('-'))
+            result += QLatin1Char('-');
+    }
+    while (result.endsWith(QLatin1Char('-')))
+        result.chop(1);
+    return result.isEmpty() ? QStringLiteral("unknown") : result;
+}
+
+void PaneSizing::_downloadVariantImages(const QStringList &imageUrls)
+{
+    if (!m_productWorkingDir.exists() || imageUrls.isEmpty())
+        return;
+
+    ui->listWidgetImages->clear();
+    m_variantImagePaths.clear();
+
+    const QString dir = m_productWorkingDir.absolutePath();
+    int index = 1;
+    for (const QString &url : imageUrls) {
+        const QString filename = QStringLiteral("image-%1.jpg")
+            .arg(index, 2, 10, QLatin1Char('0'));
+        const QString localPath = dir + QLatin1Char('/') + filename;
+        m_variantImagePaths.append(localPath);
+        ui->listWidgetImages->addItem(filename);
+
+        if (!QFileInfo::exists(localPath)) {
+            QNetworkRequest req{QUrl(url)};
+            QNetworkReply *reply = m_imageNam->get(req);
+            const QString savedPath = localPath;
+            connect(reply, &QNetworkReply::finished, this, [this, reply, savedPath]() {
+                reply->deleteLater();
+                if (reply->error() != QNetworkReply::NoError)
+                    return;
+                QFile f(savedPath);
+                if (f.open(QIODevice::WriteOnly)) {
+                    f.write(reply->readAll());
+                    f.close();
+                }
+                const int row = m_variantImagePaths.indexOf(savedPath);
+                if (row >= 0 && ui->listWidgetImages->currentRow() == row)
+                    onVariantImageSelected(row);
+            });
+        }
+        ++index;
+    }
+
+    if (ui->listWidgetImages->count() > 0) {
+        ui->listWidgetImages->setCurrentRow(0);
+        onVariantImageSelected(0);
+    }
+}
+
+void PaneSizing::onVariantImageSelected(int row)
+{
+    if (row < 0 || row >= m_variantImagePaths.size()) {
+        ui->labelVariantImage->clear();
+        return;
+    }
+    const QPixmap pm(m_variantImagePaths.at(row));
+    if (pm.isNull()) {
+        ui->labelVariantImage->setText(tr("(image not yet downloaded)"));
+        return;
+    }
+    const QSize vp = ui->scrollAreaImage->viewport()->size();
+    const int maxW = vp.width()  - 4;
+    const int maxH = vp.height() - 4;
+    ui->labelVariantImage->setPixmap(
+        pm.scaled(maxW, maxH, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+}
+
+void PaneSizing::_downloadMainImage(const QString &url, const QString &asin)
+{
+    const QDir &targetDir = m_productWorkingDir.exists() ? m_productWorkingDir : m_workingDir;
+    const QString dir = targetDir.isAbsolute()
+        ? targetDir.path()
+        : QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    const QString filename = dir + QLatin1Char('/') + (asin.isEmpty() ? QStringLiteral("main") : asin) + QStringLiteral("_main.jpg");
+
+    if (QFileInfo::exists(filename)) {
+        m_mainImageLocalPath = filename;
+        return;
+    }
+
+    QNetworkRequest req{QUrl(url)};
+    QNetworkReply *reply = m_imageNam->get(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, filename]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError)
+            return;
+        QFile f(filename);
+        if (f.open(QIODevice::WriteOnly)) {
+            f.write(reply->readAll());
+            f.close();
+            m_mainImageLocalPath = filename;
+        }
+    });
+}
+
+void PaneSizing::onGenerateFaqClicked()
+{
+    const QString description = ui->textEditAttributes->toPlainText().trimmed();
+    if (description.isEmpty()) {
+        QMessageBox::information(this, tr("Generate FAQ"),
+            tr("No product description available. Load an ASIN first."));
+        return;
+    }
+
+    AbstractCli *cli = ui->comboBoxCli->currentData().value<AbstractCli *>();
+    if (!cli) {
+        QMessageBox::warning(this, tr("Generate FAQ"),
+            tr("No AI CLI tool is available. Install Claude or another CLI tool and check Settings."));
+        return;
+    }
+
+    const QTextEdit *promptEditor = (ui->tabWidgetPrompt_01->currentIndex() == 0)
+                                  ? ui->textEditPrompt_01
+                                  : ui->textEditPrompt_02;
+    const QString userPrompt = promptEditor->toPlainText().trimmed();
+
+    QString prompt;
+    prompt += QStringLiteral("Product description:\n") + description + QStringLiteral("\n\n");
+    if (!userPrompt.isEmpty())
+        prompt += QStringLiteral("Instructions:\n") + userPrompt + QStringLiteral("\n\n");
+    prompt += QStringLiteral("[DEBUG] Before anything else, output exactly one token on its own line: "
+                             "IMGSUCCESS if you can see a product photo in this message, "
+                             "IMGFAILURE if no photo is visible to you.\n\n");
+    prompt += QStringLiteral("Generate a concise, engaging Amazon A+ Content FAQ section for this product. "
+                             "Output as a list of question/answer pairs in plain text.");
+
+    // --- Prompt review dialog ---
+    QDialog reviewDlg(this);
+    reviewDlg.setWindowTitle(tr("Review prompt — %1").arg(cli->getName()));
+    reviewDlg.resize(700, 450);
+    auto *reviewLayout = new QVBoxLayout(&reviewDlg);
+    auto *promptEdit = new QTextEdit(&reviewDlg);
+    promptEdit->setPlainText(prompt);
+    reviewLayout->addWidget(promptEdit);
+    auto *reviewBtns = new QDialogButtonBox(&reviewDlg);
+    auto *generateBtn = reviewBtns->addButton(tr("Generate"), QDialogButtonBox::AcceptRole);
+    Q_UNUSED(generateBtn)
+    reviewBtns->addButton(QDialogButtonBox::Cancel);
+    connect(reviewBtns, &QDialogButtonBox::accepted, &reviewDlg, &QDialog::accept);
+    connect(reviewBtns, &QDialogButtonBox::rejected, &reviewDlg, &QDialog::reject);
+    reviewLayout->addWidget(reviewBtns);
+
+    if (reviewDlg.exec() != QDialog::Accepted)
+        return;
+
+    const QString finalPrompt = promptEdit->toPlainText();
+    const QDir &effectiveDir = m_productWorkingDir.exists() ? m_productWorkingDir : m_workingDir;
+    const QString workDir = effectiveDir.isAbsolute() ? effectiveDir.path() : QString{};
+
+    // --- Result dialog ---
+    auto *resultDlg = new QDialog(this);
+    resultDlg->setAttribute(Qt::WA_DeleteOnClose);
+    resultDlg->setWindowTitle(tr("FAQ — %1").arg(cli->getName()));
+    resultDlg->resize(700, 500);
+    auto *resultLayout = new QVBoxLayout(resultDlg);
+    auto *output = new QTextEdit(resultDlg);
+    output->setReadOnly(true);
+    output->setPlainText(tr("Generating FAQ with %1…").arg(cli->getName()));
+    resultLayout->addWidget(output);
+    auto *closeBtns = new QDialogButtonBox(QDialogButtonBox::Close, resultDlg);
+    connect(closeBtns, &QDialogButtonBox::rejected, resultDlg, &QDialog::reject);
+    resultLayout->addWidget(closeBtns);
+    resultDlg->show();
+
+    // If an image is available and the CLI is Claude, use stream-json to embed it.
+    if (!m_mainImageLocalPath.isEmpty()
+            && cli->getExecutable() == QStringLiteral("claude")) {
+        QFile imgFile(m_mainImageLocalPath);
+        if (imgFile.open(QIODevice::ReadOnly)) {
+            const QByteArray b64 = imgFile.readAll().toBase64();
+            imgFile.close();
+
+            // Build a single stream-json user message with image + text content blocks.
+            QJsonObject imgSource;
+            imgSource[QStringLiteral("type")]       = QStringLiteral("base64");
+            imgSource[QStringLiteral("media_type")] = QStringLiteral("image/jpeg");
+            imgSource[QStringLiteral("data")]       = QString::fromLatin1(b64);
+
+            QJsonObject imgBlock;
+            imgBlock[QStringLiteral("type")]   = QStringLiteral("image");
+            imgBlock[QStringLiteral("source")] = imgSource;
+
+            QJsonObject textBlock;
+            textBlock[QStringLiteral("type")] = QStringLiteral("text");
+            textBlock[QStringLiteral("text")] = finalPrompt;
+
+            QJsonObject message;
+            message[QStringLiteral("content")] = QJsonArray{imgBlock, textBlock};
+
+            QJsonObject userMsg;
+            userMsg[QStringLiteral("type")]    = QStringLiteral("user");
+            userMsg[QStringLiteral("message")] = message;
+
+            const QByteArray stdinData =
+                QJsonDocument(userMsg).toJson(QJsonDocument::Compact) + '\n';
+
+            const QStringList args = {
+                QStringLiteral("-p"),
+                QStringLiteral("--input-format"), QStringLiteral("stream-json"),
+                QStringLiteral("--output-format"), QStringLiteral("text"),
+                QStringLiteral("--dangerously-skip-permissions"),
+            };
+
+            _runCliPrompt(cli->getExecutable(), args, stdinData, workDir,
+                          resultDlg, [output](QString text) {
+                output->setPlainText(text.isEmpty() ? tr("(empty response)") : text);
+            });
+            return;
+        }
+    }
+
+    // Fallback: text-only via normal CLI path.
+    cli->runPromptAsync(finalPrompt, workDir, resultDlg, [output](CliRunResult result) {
+        if (!result.processStarted) {
+            output->setPlainText(QObject::tr("Failed to start CLI process."));
+            return;
+        }
+        const QString text = result.output.trimmed();
+        output->setPlainText(text.isEmpty() ? result.errorOutput.trimmed() : text);
+    });
+}
+
+void PaneSizing::_runCliPrompt(const QString &executable, const QStringList &args,
+                                const QByteArray &stdinData, const QString &workDir,
+                                QObject *guard, std::function<void(QString)> callback)
+{
+    auto *process = new QProcess(this);
+    process->setProgram(executable);
+    process->setArguments(args);
+    if (!workDir.isEmpty())
+        process->setWorkingDirectory(workDir);
+
+    connect(process, &QProcess::finished, this,
+            [process, guard, cb = std::move(callback)](int, QProcess::ExitStatus) {
+        process->deleteLater();
+        if (!guard)
+            return;
+        const QString out = QString::fromUtf8(process->readAllStandardOutput()).trimmed();
+        const QString err = QString::fromUtf8(process->readAllStandardError()).trimmed();
+        cb(out.isEmpty() ? err : out);
+    });
+
+    process->start();
+    if (process->waitForStarted(3000)) {
+        process->write(stdinData);
+        process->closeWriteChannel();
+    } else {
+        process->deleteLater();
+        if (guard)
+            callback(tr("Failed to start CLI process."));
+    }
 }
 
 QCoro::Task<void> PaneSizing::_uploadSizeChart(QString marketplaceId, QString productType)

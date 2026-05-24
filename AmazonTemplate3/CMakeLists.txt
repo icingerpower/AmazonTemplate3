@@ -9,6 +9,7 @@ find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Network)
 
 #include(../../common/openai/openai.cmake)
 include(../../common/workingdirectory/workingdirectory.cmake)
+include(../../common/aicli/aicli.cmake)
 
 include(gui/gui.cmake)
 
@@ -22,6 +23,7 @@ set(PROJECT_SOURCES
         "../../common/types/types.cpp"
         ${GUI_FILES}
         ${WORKING_DIR_FILES}
+        ${AICLI_FILES}
     )
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
@@ -49,7 +51,7 @@ endif()
 
 target_link_libraries(AmazonTemplate3 PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network AmazonTemplate3Lib)
 
-target_include_directories(AmazonTemplate3 PRIVATE ../../common/openai)
+target_include_directories(AmazonTemplate3 PRIVATE ../../common/openai ../../common/aicli)
 
 set_target_properties(AmazonTemplate3 PROPERTIES
     MACOSX_BUNDLE_GUI_IDENTIFIER my.example.com

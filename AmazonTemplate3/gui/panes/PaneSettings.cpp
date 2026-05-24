@@ -2,12 +2,23 @@
 #include "ui_PaneSettings.h"
 #include "SettingsTable.h"
 #include "OpenAi2.h"
+#include "AbstractCli.h"
+
+#include <QColor>
+#include <QHeaderView>
+#include <QStandardItemModel>
 
 PaneSettings::PaneSettings(QWidget *parent)
     : QWidget(parent)
     , ui(new Ui::PaneSettings)
 {
     ui->setupUi(this);
+
+    // The CLI list is now built synchronously in MainWindow via PATH lookup,
+    // so there is nothing to refresh. The button is kept for UI consistency
+    // but is left without a handler.
+    ui->buttonRefreshCliTools->setEnabled(false);
+
     _loadSettings();
     _connectSlots();
 }
@@ -15,6 +26,26 @@ PaneSettings::PaneSettings(QWidget *parent)
 PaneSettings::~PaneSettings()
 {
     delete ui;
+}
+
+void PaneSettings::setAvailableClis(const QList<AbstractCli *> &clis)
+{
+    m_availableClis = clis;
+
+    const QList<AbstractCli *> &all = AbstractCli::ALL_CLIS();
+    auto *model = new QStandardItemModel(all.size(), 3, this);
+    model->setHorizontalHeaderLabels({tr("CLI"), tr("Executable"), tr("Status")});
+    for (int i = 0; i < all.size(); ++i) {
+        model->setItem(i, 0, new QStandardItem(all[i]->getName()));
+        model->setItem(i, 1, new QStandardItem(all[i]->getExecutable()));
+        const bool available = clis.contains(all[i]);
+        auto *statusItem = new QStandardItem(available ? tr("Available") : tr("Not installed"));
+        statusItem->setForeground(available ? QColor(Qt::darkGreen) : QColor(Qt::gray));
+        model->setItem(i, 2, statusItem);
+    }
+    ui->tableViewCliTools->setModel(model);
+    ui->tableViewCliTools->horizontalHeader()->setStretchLastSection(true);
+    ui->tableViewCliTools->verticalHeader()->hide();
 }
 
 void PaneSettings::_loadSettings()

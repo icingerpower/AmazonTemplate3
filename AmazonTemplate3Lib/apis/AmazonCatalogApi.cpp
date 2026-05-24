@@ -474,6 +474,17 @@ static QString firstAttrValue(const QJsonObject& attrs, const QString& key)
     return arr.first().toString();
 }
 
+static QStringList allAttrValues(const QJsonObject& attrs, const QString& key)
+{
+    QStringList result;
+    for (const QJsonValue& v : attrs.value(key).toArray()) {
+        const QString val = v.toObject().value("value").toString();
+        if (!val.isEmpty())
+            result << val;
+    }
+    return result;
+}
+
 static AmazonCatalogApi::AsinItem parseAsinItem(const QString& asin, const QByteArray& data)
 {
     AmazonCatalogApi::AsinItem item;
@@ -496,6 +507,96 @@ static AmazonCatalogApi::AsinItem parseAsinItem(const QString& asin, const QByte
     item.color = firstAttrValue(attrs, "color");
     item.size  = firstAttrValue(attrs, "size");
     item.hasSizeTable = !attrs.value("size_chart_node_id").toArray().isEmpty();
+
+    // Bullet points — try attributes.bullet_point first, fall back to summaries
+    for (const QJsonValue& v : attrs.value("bullet_point").toArray()) {
+        const QString val = v.toObject().value("value").toString();
+        if (!val.isEmpty() && !item.bulletPoints.contains(val))
+            item.bulletPoints << val;
+    }
+    if (item.bulletPoints.isEmpty() && !summaries.isEmpty()) {
+        for (const QJsonValue& v : summaries.first().toObject().value("bulletPoints").toArray()) {
+            const QString val = v.toString();
+            if (!val.isEmpty())
+                item.bulletPoints << val;
+        }
+    }
+
+    // Material / fabric attributes
+    static const QList<QPair<QString,QString>> kMatKeys = {
+        {"material_type",        QStringLiteral("Material")},
+        {"fabric_type",          QStringLiteral("Fabric")},
+        {"material_composition", QStringLiteral("Composition")},
+        {"outer_material_type",  QStringLiteral("Outer material")},
+        {"inner_material_type",  QStringLiteral("Inner material")},
+        {"sole_material",        QStringLiteral("Sole")},
+        {"lining_description",   QStringLiteral("Lining")},
+        {"material_feature",     QStringLiteral("Feature")},
+    };
+    for (const auto& [key, label] : kMatKeys) {
+        const QStringList vals = allAttrValues(attrs, key);
+        if (!vals.isEmpty())
+            item.materialAttrs << label + QStringLiteral(": ") + vals.join(QStringLiteral(", "));
+    }
+
+    // Collect one URL per image angle (MAIN, PT01, PT02…). Amazon returns the same
+    // angle at several resolutions (75, 300, 500, 2000 px). We keep the resolution
+    // closest to 500 px from above (i.e. ≥500 preferred, smallest among those).
+    // If no entry is ≥500 px we fall back to the largest available.
+    //
+    // bestByVariant: variant → {url, height}  (height = max(w,h) of chosen entry)
+    struct BestImg { QString url; int size = 0; };
+    QMap<QString, BestImg> bestByVariant;
+    QStringList variantOrder; // preserves insertion order
+
+    const QJsonArray imageSets = root.value("images").toArray();
+    for (const QJsonValue &setVal : imageSets) {
+        const QJsonObject set = setVal.toObject();
+        const QString setAsin = set.value(QStringLiteral("asin")).toString();
+        if (!setAsin.isEmpty() && setAsin != asin)
+            continue;
+        const QJsonArray imgs = set.value(QStringLiteral("images")).toArray();
+        for (const QJsonValue &v : imgs) {
+            const QJsonObject img = v.toObject();
+            const QString link    = img.value(QStringLiteral("link")).toString();
+            const QString variant = img.value(QStringLiteral("variant")).toString();
+            if (link.isEmpty() || variant.isEmpty())
+                continue;
+            const int w = img.value(QStringLiteral("width")).toInt();
+            const int h = img.value(QStringLiteral("height")).toInt();
+            const int sz = qMax(w, h);
+
+            if (!bestByVariant.contains(variant))
+                variantOrder << variant;
+
+            BestImg &best = bestByVariant[variant];
+            if (best.url.isEmpty()) {
+                best = {link, sz};
+            } else {
+                // Prefer ≥500 px; among those, smaller is better (less bandwidth).
+                // Among sub-500 entries, larger is better.
+                const bool curGe500  = (best.size >= 500);
+                const bool newGe500  = (sz        >= 500);
+                const bool replace =
+                    (!curGe500 && newGe500)                        // upgrade to ≥500
+                    || (curGe500 && newGe500 && sz < best.size)    // both ≥500, pick smaller
+                    || (!curGe500 && !newGe500 && sz > best.size); // both <500, pick larger
+                if (replace)
+                    best = {link, sz};
+            }
+        }
+        if (!bestByVariant.isEmpty())
+            break;
+    }
+
+    // Rebuild allImageUrls in original variant order (MAIN first, then PT01, PT02…)
+    for (const QString &variant : variantOrder) {
+        const QString &url = bestByVariant[variant].url;
+        item.allImageUrls << url;
+        if (variant == QStringLiteral("MAIN"))
+            item.mainImageUrl = url;
+    }
+
     return item;
 }
 
@@ -503,7 +604,7 @@ QCoro::Task<void>
 AmazonCatalogApi::_fetchAsinItem(QString asin, QString marketplaceId, AsinItem* out)
 {
     static const QStringList kSumAttr =
-        QStringList() << "summaries" << "attributes";
+        QStringList() << "summaries" << "attributes" << "images";
     QByteArray data;
     co_await _doGet(marketplaceId, asin, kSumAttr, &data);
     *out = parseAsinItem(asin, data);
@@ -729,8 +830,29 @@ AmazonCatalogApi::fetchVariationFamily(const QString& asin,
         family.children.append(std::move(item));
     }
 
+    // Step 4: if the first child has only one image (MAIN only), fetch the parent ASIN
+    // to obtain all product angles (PT01, PT02…). Amazon's catalog API typically
+    // associates secondary images with the parent, not individual child ASINs.
+    if (!family.children.isEmpty()
+            && family.children.first().allImageUrls.size() <= 1
+            && !family.parentAsin.isEmpty()) {
+        qDebug() << "AmazonCatalogApi: first child has"
+                 << family.children.first().allImageUrls.size()
+                 << "image(s) — fetching parent" << family.parentAsin << "for all angles";
+        AsinItem parentItem;
+        co_await _fetchAsinItem(family.parentAsin, marketplaceId, &parentItem);
+        if (parentItem.allImageUrls.size() > family.children.first().allImageUrls.size()) {
+            qDebug() << "AmazonCatalogApi: using parent's"
+                     << parentItem.allImageUrls.size() << "image(s) instead";
+            family.children.first().allImageUrls = std::move(parentItem.allImageUrls);
+            if (family.children.first().mainImageUrl.isEmpty())
+                family.children.first().mainImageUrl = parentItem.mainImageUrl;
+        }
+    }
+
     qDebug() << "AmazonCatalogApi: fetchVariationFamily done. parent ="
-             << family.parentAsin << "children:" << family.children.size();
+             << family.parentAsin << "children:" << family.children.size()
+             << "first child images:" << (family.children.isEmpty() ? 0 : family.children.first().allImageUrls.size());
     *out = std::move(family);
     co_return;
 }
