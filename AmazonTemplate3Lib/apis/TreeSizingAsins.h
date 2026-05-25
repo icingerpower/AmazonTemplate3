@@ -62,6 +62,10 @@ signals:
     // Using one child's angles rather than MAIN-per-child avoids duplicates for
     // size-only variants where every child shares the same photos.
     void variantImagesFetched(QStringList imageUrls);
+    // Emitted after the first family load: country codes where the product
+    // exists (no suffix) followed by missing ones suffixed with " (missing)".
+    // Regions checked: EU representative (FR), NA representative (US), JP.
+    void marketplacesChecked(QStringList countryCodes);
 
 private:
     struct ChildItem {

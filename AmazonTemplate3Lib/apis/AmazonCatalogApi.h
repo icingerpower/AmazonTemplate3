@@ -68,6 +68,11 @@ public:
     // Returns the seller ID configured for the given marketplace's region.
     QString sellerIdForMarketplace(const QString& marketplaceId) const;
 
+    // Lightweight existence check: returns true in *out if the ASIN is listed
+    // in the given marketplace (one GET, no relationship traversal).
+    // GCC 13 ICE workaround: params passed by value.
+    QCoro::Task<void> checkAsinExists(QString asin, QString marketplaceId, bool* out);
+
     // PATCH size_chart_display for a single SKU via the Listings Items API.
     // headerCells: full header row — first cell is the label-column header (usually ""),
     //              remaining cells are size labels (e.g. "", "S", "M", "L").

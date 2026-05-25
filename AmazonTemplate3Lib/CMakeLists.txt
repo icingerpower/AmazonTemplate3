@@ -39,6 +39,10 @@ add_library(AmazonTemplate3Lib STATIC
   apis/AmazonCatalogApi.cpp
   apis/TreeSizingAsins.h
   apis/TreeSizingAsins.cpp
+  aplus/APlusContent.h
+  aplus/APlusContent.cpp
+  aplus/APlusTreeModel.h
+  aplus/APlusTreeModel.cpp
   Attribute.h
   Attribute.cpp
   TemplateFiller.h
@@ -99,6 +103,10 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   apis/AmazonCatalogApi.cpp
   apis/TreeSizingAsins.h
   apis/TreeSizingAsins.cpp
+  aplus/APlusContent.h
+  aplus/APlusContent.cpp
+  aplus/APlusTreeModel.h
+  aplus/APlusTreeModel.cpp
   Attribute.h
   Attribute.cpp
   TemplateFiller.h

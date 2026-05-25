@@ -112,6 +112,25 @@
         </layout>
        </item>
        <item>
+        <widget class="QListWidget" name="listWidgetCountries">
+         <property name="sizePolicy">
+          <sizepolicy hsizetype="Expanding" vsizetype="Preferred">
+           <horstretch>0</horstretch>
+           <verstretch>0</verstretch>
+          </sizepolicy>
+         </property>
+         <property name="maximumSize">
+          <size>
+           <width>16777215</width>
+           <height>30</height>
+          </size>
+         </property>
+         <property name="flow">
+          <enum>QListView::Flow::LeftToRight</enum>
+         </property>
+        </widget>
+       </item>
+       <item>
         <layout class="QHBoxLayout" name="horizontalLayout_2">
          <item>
           <widget class="QComboBox" name="comboBoxSizeType"/>
@@ -244,7 +263,7 @@
             <x>0</x>
             <y>0</y>
             <width>996</width>
-            <height>590</height>
+            <height>525</height>
            </rect>
           </property>
           <attribute name="label">
@@ -252,11 +271,7 @@
           </attribute>
           <layout class="QHBoxLayout" name="horizontalLayoutImages">
            <item>
-            <widget class="QListWidget" name="listWidgetImages">
-             <property name="maximumWidth">
-              <number>220</number>
-             </property>
-            </widget>
+            <widget class="QListWidget" name="listWidgetImages"/>
            </item>
            <item>
             <widget class="QScrollArea" name="scrollAreaImage">
@@ -268,18 +283,18 @@
                <rect>
                 <x>0</x>
                 <y>0</y>
-                <width>770</width>
-                <height>570</height>
+                <width>484</width>
+                <height>505</height>
                </rect>
               </property>
               <layout class="QVBoxLayout" name="verticalLayoutScrollImage">
                <item>
                 <widget class="QLabel" name="labelVariantImage">
-                 <property name="alignment">
-                  <set>Qt::AlignmentFlag::AlignTop|Qt::AlignmentFlag::AlignLeft</set>
-                 </property>
                  <property name="scaledContents">
                   <bool>false</bool>
+                 </property>
+                 <property name="alignment">
+                  <set>Qt::AlignmentFlag::AlignLeading|Qt::AlignmentFlag::AlignLeft|Qt::AlignmentFlag::AlignTop</set>
                  </property>
                 </widget>
                </item>
@@ -295,7 +310,7 @@
             <x>0</x>
             <y>0</y>
             <width>996</width>
-            <height>590</height>
+            <height>525</height>
            </rect>
           </property>
           <attribute name="label">
@@ -375,7 +390,7 @@
                 <widget class="QListWidget" name="listWidgetSizeGroups"/>
                </item>
                <item>
-                <widget class="QLabel" name="labelSelectedImage">
+                <widget class="QLabel" name="labelSizeChartDisplay">
                  <property name="text">
                   <string/>
                  </property>
@@ -396,7 +411,7 @@
             <x>0</x>
             <y>0</y>
             <width>996</width>
-            <height>590</height>
+            <height>525</height>
            </rect>
           </property>
           <attribute name="label">
@@ -451,7 +466,7 @@
             <x>0</x>
             <y>0</y>
             <width>996</width>
-            <height>590</height>
+            <height>525</height>
            </rect>
           </property>
           <attribute name="label">
@@ -496,7 +511,7 @@
                  </property>
                  <widget class="QWidget" name="tab">
                   <attribute name="title">
-                   <string>One color</string>
+                   <string>Desktop image</string>
                   </attribute>
                   <layout class="QVBoxLayout" name="verticalLayout_6">
                    <item>
@@ -506,7 +521,7 @@
                  </widget>
                  <widget class="QWidget" name="tab_2">
                   <attribute name="title">
-                   <string>Multiple colors</string>
+                   <string>Mobile image</string>
                   </attribute>
                   <layout class="QVBoxLayout" name="verticalLayout_7">
                    <item>
@@ -514,51 +529,53 @@
                    </item>
                   </layout>
                  </widget>
+                 <widget class="QWidget" name="tabFaqPrompt">
+                  <attribute name="title">
+                   <string>FAQ</string>
+                  </attribute>
+                  <layout class="QVBoxLayout" name="verticalLayoutFaqPrompt">
+                   <item>
+                    <widget class="QTextEdit" name="textEditFaqPrompt"/>
+                   </item>
+                  </layout>
+                 </widget>
                 </widget>
                </item>
               </layout>
              </widget>
-             <widget class="QWidget" name="layoutWidget">
-              <layout class="QVBoxLayout" name="verticalLayout_8">
+             <widget class="QWidget" name="aplusBottomWidget">
+              <layout class="QVBoxLayout" name="verticalLayoutAplusBottom">
                <item>
-                <layout class="QHBoxLayout" name="horizontalLayout_6">
+                <layout class="QHBoxLayout" name="horizontalLayoutAplusToolbar">
                  <item>
-                  <widget class="QPushButton" name="buttonGenerateFAQ">
+                  <widget class="QPushButton" name="buttonAplusGenerate">
+                   <property name="enabled">
+                    <bool>false</bool>
+                   </property>
                    <property name="text">
-                    <string>Generate FAQ</string>
+                    <string>Generate</string>
                    </property>
                   </widget>
                  </item>
                  <item>
-                  <widget class="QPushButton" name="buttonAddFAQ">
+                  <widget class="QPushButton" name="buttonAplusAddImageSlot">
                    <property name="text">
-                    <string>Add FAQ</string>
+                    <string>Add image slot</string>
                    </property>
                   </widget>
                  </item>
                  <item>
-                  <widget class="QPushButton" name="buttonAddImage">
+                  <widget class="QPushButton" name="buttonAplusDeleteVersion">
+                   <property name="enabled">
+                    <bool>false</bool>
+                   </property>
                    <property name="text">
-                    <string>Add Image</string>
+                    <string>Delete version</string>
                    </property>
                   </widget>
                  </item>
                  <item>
-                  <widget class="QPushButton" name="buttonAddText">
-                   <property name="text">
-                    <string>Add texte</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item>
-                  <widget class="QPushButton" name="buttonRemove">
-                   <property name="text">
-                    <string>Remove</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item>
-                  <spacer name="horizontalSpacer_6">
+                  <spacer name="horizontalSpacerAplusToolbar">
                    <property name="orientation">
                     <enum>Qt::Orientation::Horizontal</enum>
                    </property>
@@ -584,8 +601,112 @@
                  <property name="orientation">
                   <enum>Qt::Orientation::Horizontal</enum>
                  </property>
-                 <widget class="QListView" name="listViewAPlusElements"/>
-                 <widget class="QStackedWidget" name="stackedWidgetAPlus"/>
+                 <widget class="QTreeView" name="aplusTreeView"/>
+                 <widget class="QWidget" name="aplusPreviewWidget">
+                  <layout class="QVBoxLayout" name="verticalLayoutAplusPreview">
+                   <property name="spacing">
+                    <number>4</number>
+                   </property>
+                   <item>
+                    <layout class="QHBoxLayout" name="horizontalLayoutAplusToggle">
+                     <item>
+                      <widget class="QToolButton" name="buttonAplusDesktop">
+                       <property name="text">
+                        <string>Desktop</string>
+                       </property>
+                       <property name="checkable">
+                        <bool>true</bool>
+                       </property>
+                       <property name="checked">
+                        <bool>true</bool>
+                       </property>
+                      </widget>
+                     </item>
+                     <item>
+                      <widget class="QToolButton" name="buttonAplusMobile">
+                       <property name="text">
+                        <string>Mobile</string>
+                       </property>
+                       <property name="checkable">
+                        <bool>true</bool>
+                       </property>
+                      </widget>
+                     </item>
+                     <item>
+                      <widget class="QComboBox" name="comboBoxAplusLanguage">
+                       <property name="minimumWidth">
+                        <number>120</number>
+                       </property>
+                       <property name="toolTip">
+                        <string>Select language for preview</string>
+                       </property>
+                       <property name="visible">
+                        <bool>false</bool>
+                       </property>
+                      </widget>
+                     </item>
+                     <item>
+                      <spacer name="horizontalSpacerAplusToggle">
+                       <property name="orientation">
+                        <enum>Qt::Orientation::Horizontal</enum>
+                       </property>
+                       <property name="sizeHint" stdset="0">
+                        <size>
+                         <width>40</width>
+                         <height>20</height>
+                        </size>
+                       </property>
+                      </spacer>
+                     </item>
+                    </layout>
+                   </item>
+                   <item>
+                    <widget class="QStackedWidget" name="aplusPreviewStack">
+                     <widget class="QWidget" name="aplusPreviewPageImage">
+                      <layout class="QVBoxLayout" name="verticalLayoutAplusImage">
+                       <item>
+                        <widget class="QScrollArea" name="scrollAreaAplusPreview">
+                         <property name="widgetResizable">
+                          <bool>true</bool>
+                         </property>
+                         <widget class="QWidget" name="scrollAreaWidgetAplusContents">
+                          <property name="geometry">
+                           <rect>
+                            <x>0</x>
+                            <y>0</y>
+                            <width>482</width>
+                            <height>168</height>
+                           </rect>
+                          </property>
+                          <layout class="QVBoxLayout" name="verticalLayoutAplusScrollContents">
+                           <item>
+                            <widget class="QLabel" name="labelAplusPreview">
+                             <property name="alignment">
+                              <set>Qt::AlignmentFlag::AlignLeading|Qt::AlignmentFlag::AlignLeft|Qt::AlignmentFlag::AlignTop</set>
+                             </property>
+                            </widget>
+                           </item>
+                          </layout>
+                         </widget>
+                        </widget>
+                       </item>
+                      </layout>
+                     </widget>
+                     <widget class="QWidget" name="aplusPreviewPageText">
+                      <layout class="QVBoxLayout" name="verticalLayoutAplusText">
+                       <item>
+                        <widget class="QTextEdit" name="textEditAplusPreview">
+                         <property name="readOnly">
+                          <bool>true</bool>
+                         </property>
+                        </widget>
+                       </item>
+                      </layout>
+                     </widget>
+                    </widget>
+                   </item>
+                  </layout>
+                 </widget>
                 </widget>
                </item>
               </layout>

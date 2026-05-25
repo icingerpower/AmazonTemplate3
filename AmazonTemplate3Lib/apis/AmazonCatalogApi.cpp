@@ -601,6 +601,21 @@ static AmazonCatalogApi::AsinItem parseAsinItem(const QString& asin, const QByte
 }
 
 QCoro::Task<void>
+AmazonCatalogApi::checkAsinExists(QString asin, QString marketplaceId, bool* out)
+{
+    *out = false;
+    // GCC 13 ICE workaround: use static to keep QStringList out of coroutine frame.
+    static const QStringList kData = {QStringLiteral("summaries")};
+    QByteArray body;
+    co_await _doGet(marketplaceId, asin, kData, &body);
+    if (body.isEmpty())
+        co_return;
+    const QJsonDocument doc = QJsonDocument::fromJson(body);
+    *out = doc.isObject() && !doc.object().value(QStringLiteral("asin")).toString().isEmpty();
+    co_return;
+}
+
+QCoro::Task<void>
 AmazonCatalogApi::_fetchAsinItem(QString asin, QString marketplaceId, AsinItem* out)
 {
     static const QStringList kSumAttr =

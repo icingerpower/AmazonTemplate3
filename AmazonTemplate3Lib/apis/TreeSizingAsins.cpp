@@ -19,12 +19,13 @@ constexpr const char* kJsonFileName = "sizing_upload.json";
 // All EU entries share the EU LWA token, so trying multiple costs no extra auth
 // round-trips — Amazon EU products may be listed in one country but not another.
 const QStringList kRegionMarketplaces = QStringList()
-    << QStringLiteral("A13V1IB3VIYZZH")   // FR  (EU)
-    << QStringLiteral("A1PA6795UKMFR9")   // DE  (EU)
+    << QStringLiteral("ATVPDKIKX0DER")    // US  (NA)
     << QStringLiteral("A1F83G8C2ARO7P")   // UK  (EU)
+    << QStringLiteral("A2EUQ1WTGCTBG2")   // CA  (NA)
+    << QStringLiteral("A13V1IB3VIYZZH")   // FR  (EU)
     << QStringLiteral("APJ6JRA9NG5V4")    // IT  (EU)
     << QStringLiteral("A1RKKUPIHCS9HS")   // ES  (EU)
-    << QStringLiteral("ATVPDKIKX0DER")    // US  (NA)
+    << QStringLiteral("A1PA6795UKMFR9")   // DE  (EU)
     << QStringLiteral("A1VC38T7YXB528");  // JP  (FE)
 } // namespace
 
@@ -209,12 +210,27 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
     static const QMap<QString,QString> kMktName = {
         {"A13V1IB3VIYZZH","FR"}, {"A1PA6795UKMFR9","DE"}, {"A1F83G8C2ARO7P","UK"},
         {"APJ6JRA9NG5V4","IT"},  {"A1RKKUPIHCS9HS","ES"}, {"ATVPDKIKX0DER","US"},
-        {"A1VC38T7YXB528","JP"}
+        {"A2EUQ1WTGCTBG2","CA"}, {"A1VC38T7YXB528","JP"}
     };
+
+    // Region classification — independent of the probe order in kRegionMarketplaces.
+    enum Region { EU, NA, JP };
+    static const QHash<QString,Region> kMktRegion = {
+        {"A13V1IB3VIYZZH", EU}, {"A1PA6795UKMFR9", EU}, {"A1F83G8C2ARO7P", EU},
+        {"APJ6JRA9NG5V4",  EU}, {"A1RKKUPIHCS9HS", EU},
+        {"ATVPDKIKX0DER",  NA}, {"A2EUQ1WTGCTBG2", NA},
+        {"A1VC38T7YXB528", JP}
+    };
+    // Fixed representatives for the per-region existence check (order-independent).
+    static const QString kEuRep = QStringLiteral("A1F83G8C2ARO7P"); // UK
+    static const QString kNaRep = QStringLiteral("ATVPDKIKX0DER");  // US
+    static const QString kJpRep = QStringLiteral("A1VC38T7YXB528");  // JP
 
     QList<ParentItem> newFamilies;
     QSet<QString> seenParents;
     bool attributesEmitted = false;
+    int  succeededRegionIdx = -1;
+    QString probeChildAsin;
     for (const QString& asin : asins) {
         if (asin.isEmpty()) continue;
         AmazonCatalogApi::VariationFamily family;
@@ -226,8 +242,10 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
         for (int ri = 0; ri < kRegionMarketplaces.size(); ++ri) {
             m_api->clearLastError();
             co_await m_api->fetchVariationFamily(asin, kRegionMarketplaces[ri], &family);
-            if (!family.parentAsin.isEmpty() || !family.children.isEmpty())
+            if (!family.parentAsin.isEmpty() || !family.children.isEmpty()) {
+                if (!attributesEmitted) succeededRegionIdx = ri;
                 break;
+            }
             const QString mkt = kRegionMarketplaces[ri];
             const QString err = m_api->lastError();
             attemptLog << QStringLiteral("%1(%2): %3")
@@ -262,6 +280,8 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
 
         // Emit bullet points + material for the first child of the first family
         if (!attributesEmitted && !family.children.isEmpty()) {
+            probeChildAsin = family.children.first().asin;
+
             emit attributesFetched(family.children.first().bulletPoints,
                                    family.children.first().materialAttrs,
                                    family.children.first().mainImageUrl,
@@ -279,6 +299,55 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
     beginResetModel();
     m_families = std::move(newFamilies);
     endResetModel();
+
+    // Check which geographic regions carry this product and emit the result.
+    // We use one lightweight existence check per unchecked region so we don't
+    // repeat the region we already confirmed during the family load above.
+    if (!probeChildAsin.isEmpty() && succeededRegionIdx >= 0) {
+        const Region succeededRegion =
+            kMktRegion.value(kRegionMarketplaces[succeededRegionIdx], EU);
+        const bool euConfirmed = (succeededRegion == EU);
+        const bool naConfirmed = (succeededRegion == NA);
+        const bool jpConfirmed = (succeededRegion == JP);
+
+        bool euExists = euConfirmed;
+        bool naExists = naConfirmed;
+        bool jpExists = jpConfirmed;
+
+        if (!euConfirmed)
+            co_await m_api->checkAsinExists(probeChildAsin, kEuRep, &euExists);
+        if (!naConfirmed)
+            co_await m_api->checkAsinExists(probeChildAsin, kNaRep, &naExists);
+        if (!jpConfirmed)
+            co_await m_api->checkAsinExists(probeChildAsin, kJpRep, &jpExists);
+
+
+        // EU country codes (same LWA region, so if one works they all do)
+        static const QStringList kEuCodes = {
+            QStringLiteral("fr"), QStringLiteral("de"), QStringLiteral("it"),
+            QStringLiteral("es"), QStringLiteral("uk"), QStringLiteral("nl"),
+            QStringLiteral("se"), QStringLiteral("pl"), QStringLiteral("be"),
+            QStringLiteral("ie"), QStringLiteral("tr")
+        };
+        static const QStringList kNaCodes = {
+            QStringLiteral("us"), QStringLiteral("ca"), QStringLiteral("mx")
+        };
+
+        QStringList available, missing;
+        for (const QString &c : kEuCodes) {
+            if (euExists) available.append(c);
+            else          missing.append(c + QStringLiteral(" (missing)"));
+        }
+        for (const QString &c : kNaCodes) {
+            if (naExists) available.append(c);
+            else          missing.append(c + QStringLiteral(" (missing)"));
+        }
+        if (jpExists) available.append(QStringLiteral("jp"));
+        else          missing.append(QStringLiteral("jp (missing)"));
+
+        emit marketplacesChecked(available + missing);
+    }
+
     co_return;
 }
 
