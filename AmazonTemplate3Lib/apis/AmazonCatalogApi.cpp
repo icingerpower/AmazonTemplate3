@@ -780,6 +780,7 @@ AmazonCatalogApi::fetchVariationFamily(const QString& asin,
     QByteArray parentBody;
     QStringList unusedParents;
     QStringList uniqueChildAsins;
+    AsinItem fallback;
 
     static const QStringList kRelOnly =
         QStringList() << "relationships";
@@ -843,6 +844,33 @@ AmazonCatalogApi::fetchVariationFamily(const QString& asin,
         AsinItem item;
         co_await _fetchAsinItem(childAsin, marketplaceId, &item);
         family.children.append(std::move(item));
+    }
+
+    // Step 3b: for children still missing color or size, retry from FR then DE.
+    // Amazon sometimes omits attributes on non-primary marketplaces; FR and DE
+    // tend to have the most complete catalogue data for EU products.
+    static const QStringList kAttrFallbacks = {
+        QStringLiteral("A13V1IB3VIYZZH"), // FR
+        QStringLiteral("A1PA6795UKMFR9"), // DE
+    };
+    for (auto& child : family.children) {
+        if (!child.color.isEmpty() && !child.size.isEmpty())
+            continue;
+        for (const QString& fbMp : kAttrFallbacks) {
+            if (fbMp == marketplaceId)
+                continue;
+            fallback = AsinItem{};
+            co_await _fetchAsinItem(child.asin, fbMp, &fallback);
+            if (child.color.isEmpty() && !fallback.color.isEmpty())
+                child.color = fallback.color;
+            if (child.size.isEmpty() && !fallback.size.isEmpty())
+                child.size = fallback.size;
+            // Also take more images from this marketplace if the primary gave fewer
+            if (fallback.allImageUrls.size() > child.allImageUrls.size())
+                child.allImageUrls = std::move(fallback.allImageUrls);
+            if (!child.color.isEmpty() && !child.size.isEmpty())
+                break;
+        }
     }
 
     // Step 4: if the first child has only one image (MAIN only), fetch the parent ASIN

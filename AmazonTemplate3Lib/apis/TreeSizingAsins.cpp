@@ -288,9 +288,20 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
                                    family.parentAsin,
                                    family.children.first().title);
 
-            // Emit all image angles from the first child. Size-only variants
-            // share photos, so per-child MAIN would just duplicate the same image.
-            emit variantImagesFetched(family.children.first().allImageUrls);
+            // Emit images grouped by unique color. Color variants each have
+            // their own photos; size-only variants share photos, so dedup
+            // by color naturally collapses them to one entry.
+            QList<QPair<QString, QStringList>> colorImages;
+            QSet<QString> seenColors;
+            for (const auto& c : family.children) {
+                if (c.allImageUrls.isEmpty()) continue;
+                const QString key = c.color.toLower();
+                if (seenColors.contains(key)) continue;
+                seenColors.insert(key);
+                colorImages.append({c.color, c.allImageUrls});
+            }
+            if (!colorImages.isEmpty())
+                emit variantImagesFetched(colorImages);
 
             attributesEmitted = true;
         }

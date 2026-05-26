@@ -6,6 +6,7 @@
 #include <QList>
 #include <QMap>
 #include <QDate>
+#include <QPair>
 #include <QString>
 
 #include <QCoro/QCoroTask>
@@ -58,10 +59,11 @@ signals:
     // bullet points and material/fabric attributes for use in content generation.
     void attributesFetched(QStringList bulletPoints, QStringList materialAttrs,
                            QString mainImageUrl, QString parentAsin, QString firstChildTitle);
-    // All image URLs (MAIN, PT01, PT02…) from the first child of the first family.
-    // Using one child's angles rather than MAIN-per-child avoids duplicates for
-    // size-only variants where every child shares the same photos.
-    void variantImagesFetched(QStringList imageUrls);
+    // Images grouped by color variant: each pair is (colorName, imageUrls).
+    // For size-only products, deduplication by color yields a single entry.
+    // For color variants, one entry per unique color is emitted so each
+    // color's photos can be downloaded and shown separately.
+    void variantImagesFetched(QList<QPair<QString, QStringList>> colorImages);
     // Emitted after the first family load: country codes where the product
     // exists (no suffix) followed by missing ones suffixed with " (missing)".
     // Regions checked: EU representative (FR), NA representative (US), JP.

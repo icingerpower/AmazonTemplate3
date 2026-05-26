@@ -6,6 +6,7 @@
 #include <QImage>
 #include <QList>
 #include <QMenu>
+#include <QPair>
 #include <memory>
 
 #include <QCoro/QCoroTask>
@@ -103,9 +104,9 @@ private:
     void _tryGuessSizeRange();
     void _rebuildMeasurementForm();
     const AbstractSizeCategory* _currentCategory() const;
-    QCoro::Task<void> _uploadSizeChart(QString marketplaceId, QString productType);
+    QCoro::Task<void> _uploadSizeChart(QStringList marketplaceIds, QString productType);
     void _downloadMainImage(const QString &url, const QString &asin);
-    void _downloadVariantImages(const QStringList &imageUrls);
+    void _downloadVariantImages(const QList<QPair<QString, QStringList>> &colorImages);
     void _runCliPrompt(const QString &executable, const QStringList &args,
                        const QByteArray &stdinData, const QString &workDir,
                        QObject *guard, std::function<void(QString)> callback);

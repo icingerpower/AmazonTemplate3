@@ -877,25 +877,40 @@ void PaneSizing::onUploadSizeTableClicked()
     if (!m_generatedSuccessfully || !m_sizeTableModel)
         return;
 
+    static const QHash<QString, QString> kCodeToMarketplace = {
+        {"fr", "A13V1IB3VIYZZH"}, {"de", "A1PA6795UKMFR9"},
+        {"it", "APJ6JRA9NG5V4"},  {"es", "A1RKKUPIHCS9HS"},
+        {"uk", "A1F83G8C2ARO7P"}, {"nl", "A1805IZSGTT6HS"},
+        {"se", "A2NODRKZP88ZB9"}, {"pl", "A1C3SOZRARQ6R3"},
+        {"be", "AMEN7PMS3EDWL"},  {"ie", "A28R8C7NBKEWEA"},
+        {"tr", "A33AVAJ2PDY3EV"}, {"us", "ATVPDKIKX0DER"},
+        {"ca", "A2EUQ1WTGCTBG2"}, {"mx", "A1AM78C64UM0Y8"},
+        {"jp", "A1VC38T7YXB528"},
+    };
+
+    QStringList availableCodes, marketplaceIds;
+    for (int i = 0; i < ui->listWidgetCountries->count(); ++i) {
+        const QString text = ui->listWidgetCountries->item(i)->text().trimmed();
+        if (text.contains(QLatin1String("(missing)")))
+            continue;
+        const QString mpId = kCodeToMarketplace.value(text.toLower());
+        if (!mpId.isEmpty()) {
+            availableCodes << text.toUpper();
+            marketplaceIds << mpId;
+        }
+    }
+
+    if (marketplaceIds.isEmpty()) {
+        QMessageBox::warning(this, tr("Upload"), tr("No available marketplaces found."));
+        return;
+    }
+
     QDialog dlg(this);
     dlg.setWindowTitle(tr("Upload Size Chart"));
     auto *layout = new QVBoxLayout(&dlg);
 
-    auto *mpLabel = new QLabel(tr("Marketplace:"), &dlg);
-    auto *mpCombo = new QComboBox(&dlg);
-    mpCombo->addItem(QStringLiteral("FR  (A13V1IB3VIYZZH)"), QStringLiteral("A13V1IB3VIYZZH"));
-    mpCombo->addItem(QStringLiteral("DE  (A1PA6795UKMFR9)"), QStringLiteral("A1PA6795UKMFR9"));
-    mpCombo->addItem(QStringLiteral("IT  (APJ6JRA9NG5V4)"),  QStringLiteral("APJ6JRA9NG5V4"));
-    mpCombo->addItem(QStringLiteral("ES  (A1RKKUPIHCS9HS)"), QStringLiteral("A1RKKUPIHCS9HS"));
-    mpCombo->addItem(QStringLiteral("UK  (A1F83G8C2ARO7P)"), QStringLiteral("A1F83G8C2ARO7P"));
-    mpCombo->addItem(QStringLiteral("NL  (A1805IZSGTT6HS)"), QStringLiteral("A1805IZSGTT6HS"));
-    mpCombo->addItem(QStringLiteral("SE  (A2NODRKZP88ZB9)"), QStringLiteral("A2NODRKZP88ZB9"));
-    mpCombo->addItem(QStringLiteral("PL  (A1C3SOZRARQ6R3)"), QStringLiteral("A1C3SOZRARQ6R3"));
-    mpCombo->addItem(QStringLiteral("BE  (AMEN7PMS3EDWL)"),  QStringLiteral("AMEN7PMS3EDWL"));
-    mpCombo->addItem(QStringLiteral("US  (ATVPDKIKX0DER)"),  QStringLiteral("ATVPDKIKX0DER"));
-    mpCombo->addItem(QStringLiteral("CA  (A2EUQ1WTGCTBG2)"), QStringLiteral("A2EUQ1WTGCTBG2"));
-    mpCombo->addItem(QStringLiteral("TR  (A33AVAJ2PDY3EV)"),  QStringLiteral("A33AVAJ2PDY3EV"));
-    mpCombo->addItem(QStringLiteral("JP  (A1VC38T7YXB528)"), QStringLiteral("A1VC38T7YXB528"));
+    layout->addWidget(new QLabel(
+        tr("Marketplaces: %1").arg(availableCodes.join(QStringLiteral(", "))), &dlg));
 
     auto *ptLabel = new QLabel(tr("Product type (e.g. SHIRT, SHOES, PANTS):"), &dlg);
     auto *ptEdit  = new QLineEdit(&dlg);
@@ -905,8 +920,6 @@ void PaneSizing::onUploadSizeTableClicked()
     connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
 
-    layout->addWidget(mpLabel);
-    layout->addWidget(mpCombo);
     layout->addWidget(ptLabel);
     layout->addWidget(ptEdit);
     layout->addWidget(buttons);
@@ -917,7 +930,7 @@ void PaneSizing::onUploadSizeTableClicked()
     if (productType.isEmpty())
         return;
 
-    _uploadSizeChart(mpCombo->currentData().toString(), productType);
+    _uploadSizeChart(marketplaceIds, productType);
 }
 
 static QString colorToFileSegment(const QString &color)
@@ -934,42 +947,49 @@ static QString colorToFileSegment(const QString &color)
     return result.isEmpty() ? QStringLiteral("unknown") : result;
 }
 
-void PaneSizing::_downloadVariantImages(const QStringList &imageUrls)
+void PaneSizing::_downloadVariantImages(const QList<QPair<QString, QStringList>> &colorImages)
 {
-    if (!m_productWorkingDir.exists() || imageUrls.isEmpty())
+    if (!m_productWorkingDir.exists() || colorImages.isEmpty())
         return;
 
     ui->listWidgetImages->clear();
     m_variantImagePaths.clear();
 
+    const bool multiColor = colorImages.size() > 1;
     const QString dir = m_productWorkingDir.absolutePath();
-    int index = 1;
-    for (const QString &url : imageUrls) {
-        const QString filename = QStringLiteral("image-%1.jpg")
-            .arg(index, 2, 10, QLatin1Char('0'));
-        const QString localPath = dir + QLatin1Char('/') + filename;
-        m_variantImagePaths.append(localPath);
-        ui->listWidgetImages->addItem(filename);
 
-        if (!QFileInfo::exists(localPath)) {
-            QNetworkRequest req{QUrl(url)};
-            QNetworkReply *reply = m_imageNam->get(req);
-            const QString savedPath = localPath;
-            connect(reply, &QNetworkReply::finished, this, [this, reply, savedPath]() {
-                reply->deleteLater();
-                if (reply->error() != QNetworkReply::NoError)
-                    return;
-                QFile f(savedPath);
-                if (f.open(QIODevice::WriteOnly)) {
-                    f.write(reply->readAll());
-                    f.close();
-                }
-                const int row = m_variantImagePaths.indexOf(savedPath);
-                if (row >= 0 && ui->listWidgetImages->currentRow() == row)
-                    onVariantImageSelected(row);
-            });
+    for (const auto &[color, urls] : colorImages) {
+        const QString prefix = multiColor
+            ? colorToFileSegment(color) + QLatin1Char('-')
+            : QString{};
+        int index = 1;
+        for (const QString &url : urls) {
+            const QString filename = QStringLiteral("%1image-%2.jpg")
+                .arg(prefix).arg(index, 2, 10, QLatin1Char('0'));
+            const QString localPath = dir + QLatin1Char('/') + filename;
+            m_variantImagePaths.append(localPath);
+            ui->listWidgetImages->addItem(filename);
+
+            if (!QFileInfo::exists(localPath)) {
+                QNetworkRequest req{QUrl(url)};
+                QNetworkReply *reply = m_imageNam->get(req);
+                const QString savedPath = localPath;
+                connect(reply, &QNetworkReply::finished, this, [this, reply, savedPath]() {
+                    reply->deleteLater();
+                    if (reply->error() != QNetworkReply::NoError)
+                        return;
+                    QFile f(savedPath);
+                    if (f.open(QIODevice::WriteOnly)) {
+                        f.write(reply->readAll());
+                        f.close();
+                    }
+                    const int row = m_variantImagePaths.indexOf(savedPath);
+                    if (row >= 0 && ui->listWidgetImages->currentRow() == row)
+                        onVariantImageSelected(row);
+                });
+            }
+            ++index;
         }
-        ++index;
     }
 
     if (ui->listWidgetImages->count() > 0) {
@@ -2631,7 +2651,7 @@ void PaneSizing::_runCliPrompt(const QString &executable, const QStringList &arg
     }
 }
 
-QCoro::Task<void> PaneSizing::_uploadSizeChart(QString marketplaceId, QString productType)
+QCoro::Task<void> PaneSizing::_uploadSizeChart(QStringList marketplaceIds, QString productType)
 {
     // Build header row: blank label cell + size column labels from horizontal header
     QStringList headerCells;
@@ -2674,25 +2694,30 @@ QCoro::Task<void> PaneSizing::_uploadSizeChart(QString marketplaceId, QString pr
     }
 
     int successCount = 0;
+    const int totalAttempts = marketplaceIds.size() * skus.size();
     QStringList errors;
-    for (const QString& sku : skus) {
-        bool ok = false;
-        co_await m_api->patchListingSizeChart(
-            marketplaceId, sku, productType, headerCells, dataRows, &ok);
-        if (ok)
-            ++successCount;
-        else
-            errors << QStringLiteral("%1: %2").arg(sku, m_api->lastError());
-        m_api->clearLastError();
+
+    for (const QString &marketplaceId : marketplaceIds) {
+        for (const QString &sku : skus) {
+            bool ok = false;
+            co_await m_api->patchListingSizeChart(
+                marketplaceId, sku, productType, headerCells, dataRows, &ok);
+            if (ok)
+                ++successCount;
+            else
+                errors << QStringLiteral("%1 / %2: %3").arg(marketplaceId, sku, m_api->lastError());
+            m_api->clearLastError();
+        }
     }
 
     if (errors.isEmpty()) {
         QMessageBox::information(this, tr("Upload"),
-            tr("Size chart uploaded to %1 listing(s).").arg(successCount));
+            tr("Size chart uploaded to %1 listing(s) across %2 marketplace(s).")
+                .arg(successCount).arg(marketplaceIds.size()));
     } else {
         QMessageBox::warning(this, tr("Upload"),
-            tr("Uploaded to %1 of %2 listing(s).\n\nErrors:\n%3")
-                .arg(successCount).arg(skus.size()).arg(errors.join('\n')));
+            tr("Uploaded %1 of %2 listing(s).\n\nErrors:\n%3")
+                .arg(successCount).arg(totalAttempts).arg(errors.join('\n')));
     }
     co_return;
 }
