@@ -143,81 +143,7 @@
           </widget>
          </item>
          <item>
-          <widget class="QRadioButton" name="radioButton">
-           <property name="text">
-            <string>Numbers</string>
-           </property>
-           <property name="checked">
-            <bool>true</bool>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QComboBox" name="comboBoxSizeFrom"/>
-         </item>
-         <item>
-          <widget class="QLabel" name="label">
-           <property name="text">
-            <string>to</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QComboBox" name="comboBoxSizeTo"/>
-         </item>
-         <item>
-          <widget class="Line" name="line_2">
-           <property name="orientation">
-            <enum>Qt::Orientation::Vertical</enum>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QRadioButton" name="radioButton_2">
-           <property name="text">
-            <string>Letters</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QComboBox" name="comboBoxLetterSizeFrom"/>
-         </item>
-         <item>
-          <widget class="QLabel" name="label_3">
-           <property name="text">
-            <string>to</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QComboBox" name="comboBoxLetterSizeTo"/>
-         </item>
-         <item>
-          <widget class="Line" name="line_3">
-           <property name="orientation">
-            <enum>Qt::Orientation::Vertical</enum>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QRadioButton" name="radioButton_3">
-           <property name="text">
-            <string>Height</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QComboBox" name="comboBoxHeightFrom"/>
-         </item>
-         <item>
-          <widget class="QLabel" name="label_4">
-           <property name="text">
-            <string>to</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QComboBox" name="comboBoxHeightTo"/>
+          <widget class="SizeRangeWidget" name="sizeRangeMain" native="true"/>
          </item>
          <item>
           <widget class="QPushButton" name="buttoGenSizeTables">
@@ -228,6 +154,33 @@
          </item>
          <item>
           <spacer name="horizontalSpacer_2">
+           <property name="orientation">
+            <enum>Qt::Orientation::Horizontal</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>40</width>
+             <height>20</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="horizontalLayoutBrandSize">
+         <item>
+          <widget class="QLabel" name="labelBrandSize">
+           <property name="text">
+            <string>Brand size:</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="SizeRangeWidget" name="sizeRangeBrand" native="true"/>
+         </item>
+         <item>
+          <spacer name="horizontalSpacerBrand">
            <property name="orientation">
             <enum>Qt::Orientation::Horizontal</enum>
            </property>
@@ -330,9 +283,9 @@
               </widget>
              </item>
              <item>
-              <widget class="QCheckBox" name="checkBoxReplaceImage">
+              <widget class="QRadioButton" name="radioButtonAppendImage">
                <property name="text">
-                <string>replace image</string>
+                <string>Append at end</string>
                </property>
                <property name="checked">
                 <bool>true</bool>
@@ -340,9 +293,16 @@
               </widget>
              </item>
              <item>
-              <widget class="QLabel" name="label_2">
+              <widget class="QRadioButton" name="radioButtonReplaceLastImage">
                <property name="text">
-                <string>Insert as image (0=first image)</string>
+                <string>Replace last image</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QRadioButton" name="radioButtonReplaceImageAtIndex">
+               <property name="text">
+                <string>Replace at index:</string>
                </property>
               </widget>
              </item>
@@ -424,19 +384,26 @@
               <number>6</number>
              </property>
              <item>
-              <widget class="QPushButton" name="buttonUploadSizeTable">
-               <property name="text">
-                <string>Upload</string>
-               </property>
-              </widget>
-             </item>
-             <item>
               <widget class="QPushButton" name="buttonMakeEditable">
                <property name="text">
                 <string>Make table editable</string>
                </property>
                <property name="checkable">
                 <bool>true</bool>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QPushButton" name="buttonOpenSizeTableFolder">
+               <property name="text">
+                <string>Open size-table folder</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QPushButton" name="buttonAddSkusFromTemplate">
+               <property name="text">
+                <string>Add SKUs from template</string>
                </property>
               </widget>
              </item>
@@ -480,6 +447,33 @@
              </property>
              <widget class="QWidget" name="layoutWidget">
               <layout class="QVBoxLayout" name="verticalLayout_9">
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayoutWorkflow">
+                 <item>
+                  <widget class="QLabel" name="labelWorkflow">
+                   <property name="text">
+                    <string>Workflow:</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QComboBox" name="comboBoxWorkflow"/>
+                 </item>
+                 <item>
+                  <spacer name="horizontalSpacerWorkflow">
+                   <property name="orientation">
+                    <enum>Qt::Orientation::Horizontal</enum>
+                   </property>
+                   <property name="sizeHint" stdset="0">
+                    <size>
+                     <width>40</width>
+                     <height>20</height>
+                    </size>
+                   </property>
+                  </spacer>
+                 </item>
+                </layout>
+               </item>
                <item>
                 <layout class="QHBoxLayout" name="horizontalLayout_5">
                  <item>
@@ -526,6 +520,16 @@
                   <layout class="QVBoxLayout" name="verticalLayout_7">
                    <item>
                     <widget class="QTextEdit" name="textEditPrompt_02"/>
+                   </item>
+                  </layout>
+                 </widget>
+                 <widget class="QWidget" name="tabStep2">
+                  <attribute name="title">
+                   <string>Step 2</string>
+                  </attribute>
+                  <layout class="QVBoxLayout" name="verticalLayoutStep2">
+                   <item>
+                    <widget class="QTextEdit" name="textEditPrompt_03"/>
                    </item>
                   </layout>
                  </widget>
@@ -723,6 +727,14 @@
    </item>
   </layout>
  </widget>
+ <customwidgets>
+  <customwidget>
+   <class>SizeRangeWidget</class>
+   <extends>QWidget</extends>
+   <header>SizeRangeWidget.h</header>
+   <container>0</container>
+  </customwidget>
+ </customwidgets>
  <resources/>
  <connections/>
 </ui>

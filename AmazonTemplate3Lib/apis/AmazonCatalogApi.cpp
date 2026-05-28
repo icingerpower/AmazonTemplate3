@@ -24,12 +24,48 @@
 #include <QDir>
 #include <QFile>
 #include <QTextStream>
+#include <QCryptographicHash>
 
 #include <QCoro/QCoroNetworkReply>
+#include <QCoro/QCoroTimer>
+#include <zlib.h>
 
 // ---------------------------------------------------------------------------
 // Static helpers
 // ---------------------------------------------------------------------------
+
+// Decompress gzip data (Amazon report downloads use real gzip, not Qt's custom format).
+static QByteArray gunzip(const QByteArray &data)
+{
+    if (data.isEmpty()) return {};
+
+    z_stream stream{};
+    // windowBits = 15 + 16 tells zlib to expect a gzip header
+    if (inflateInit2(&stream, 15 + 16) != Z_OK)
+        return {};
+
+    stream.next_in  = reinterpret_cast<Bytef *>(const_cast<char *>(data.data()));
+    stream.avail_in = static_cast<uInt>(data.size());
+
+    QByteArray result;
+    const int chunkSize = 64 * 1024;
+    QByteArray chunk(chunkSize, '\0');
+
+    int ret;
+    do {
+        stream.next_out  = reinterpret_cast<Bytef *>(chunk.data());
+        stream.avail_out = static_cast<uInt>(chunkSize);
+        ret = inflate(&stream, Z_NO_FLUSH);
+        if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
+            inflateEnd(&stream);
+            return {};
+        }
+        result.append(chunk.constData(), chunkSize - static_cast<int>(stream.avail_out));
+    } while (ret != Z_STREAM_END);
+
+    inflateEnd(&stream);
+    return result;
+}
 
 QString AmazonCatalogApi::endpointForMarketplace(const QString& marketplaceId)
 {
@@ -106,8 +142,10 @@ AmazonCatalogApi::~AmazonCatalogApi() = default;
 
 QNetworkAccessManager* AmazonCatalogApi::_nam()
 {
-    if (!m_nam)
+    if (!m_nam) {
         m_nam = new QNetworkAccessManager(this);
+        m_nam->setTransferTimeout(30'000); // 30 s — aborts silently-hanging requests
+    }
     return m_nam;
 }
 
@@ -306,12 +344,26 @@ QCoro::Task<void> AmazonCatalogApi::_doGet(const QString& marketplaceId,
     req.setRawHeader("x-amz-access-token", token.toUtf8());
     req.setRawHeader("accept", "application/json");
 
+    // Throttle: Amazon's catalog API allows ~2 req/s. Enforce at least 600 ms between
+    // consecutive requests so a family with many children never triggers a 429.
+    constexpr int kMinIntervalMs = 600;
+    const int elapsed = m_lastRequestTime.isValid()
+        ? static_cast<int>(m_lastRequestTime.msecsTo(QDateTime::currentDateTimeUtc()))
+        : kMinIntervalMs;
+    if (elapsed < kMinIntervalMs) {
+        QTimer throttleTimer;
+        throttleTimer.setSingleShot(true);
+        throttleTimer.start(kMinIntervalMs - elapsed);
+        co_await qCoro(&throttleTimer).waitForTimeout();
+    }
+    m_lastRequestTime = QDateTime::currentDateTimeUtc();
+
     qDebug() << "AmazonCatalogApi: GET" << url.toString();
     QNetworkReply* reply = _nam()->get(req);
     co_await qCoro(reply).waitForFinished();
 
     const QByteArray data = reply->readAll();
-    const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const int httpStatus  = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const QString requestId = rawHeaderCI(reply, "x-amzn-RequestId");
     if (reply->error() != QNetworkReply::NoError) {
         qWarning() << "AmazonCatalogApi: GET" << url.toString()
@@ -646,7 +698,8 @@ QCoro::Task<void> AmazonCatalogApi::patchListingSizeChart(QString marketplaceId,
                                                           QString productType,
                                                           QStringList headerCells,
                                                           QList<QStringList> dataRows,
-                                                          bool* success)
+                                                          bool* success,
+                                                          QString sizeChartAttr)
 {
     *success = false;
 
@@ -681,9 +734,11 @@ QCoro::Task<void> AmazonCatalogApi::patchListingSizeChart(QString marketplaceId,
         {QStringLiteral("size_chart"),     sizeChart}
     };
 
+    const QString effectiveAttr = sizeChartAttr.isEmpty()
+        ? QStringLiteral("size_chart_display") : sizeChartAttr;
     const QJsonObject patch{
         {QStringLiteral("op"),    QStringLiteral("replace")},
-        {QStringLiteral("path"),  QStringLiteral("/attributes/size_chart_display")},
+        {QStringLiteral("path"),  QStringLiteral("/attributes/") + effectiveAttr},
         {QStringLiteral("value"), QJsonArray{attrValue}}
     };
 
@@ -739,7 +794,31 @@ QCoro::Task<void> AmazonCatalogApi::patchListingSizeChart(QString marketplaceId,
                           .arg(httpStatus).arg(sku, QString::fromUtf8(data.left(300)));
         qWarning() << "AmazonCatalogApi: PATCH failed for" << sku << ":" << m_lastError;
 
-        // Write diagnostic file
+        // On 400 "attribute path is not valid", do a GET on the listing to show
+        // its actual productType + attribute names — helps find the correct path.
+        QByteArray getBody;
+        if (httpStatus == 400) {
+            QString getToken;
+            co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &getToken);
+            if (!getToken.isEmpty()) {
+                QUrl getUrl;
+                getUrl.setScheme(QStringLiteral("https"));
+                getUrl.setHost(endpoint);
+                getUrl.setPath(urlPath);
+                QUrlQuery getQuery;
+                getQuery.addQueryItem(QStringLiteral("marketplaceIds"), marketplaceId);
+                getQuery.addQueryItem(QStringLiteral("includedData"), QStringLiteral("summaries,attributes"));
+                getUrl.setQuery(getQuery);
+                QNetworkRequest getReq(getUrl);
+                getReq.setRawHeader("x-amz-access-token", getToken.toUtf8());
+                getReq.setRawHeader("accept", "application/json");
+                QNetworkReply* getReply = _nam()->get(getReq);
+                co_await qCoro(getReply).waitForFinished();
+                getBody = getReply->readAll();
+                getReply->deleteLater();
+            }
+        }
+
         const QString ts = QDateTime::currentDateTimeUtc().toString("yyyyMMdd'T'HHmmss'Z'");
         const QString diagPath = QStringLiteral("/tmp/sp-api-patch-%1-%2.txt").arg(sku, ts);
         QFile f(diagPath);
@@ -751,6 +830,9 @@ QCoro::Task<void> AmazonCatalogApi::patchListingSizeChart(QString marketplaceId,
               << "=== RESPONSE ===\n"
               << "HTTP " << httpStatus << "\n\n"
               << QString::fromUtf8(data) << "\n";
+            if (!getBody.isEmpty())
+                s << "\n=== LISTING GET (attributes + productType) ===\n"
+                  << QString::fromUtf8(getBody) << "\n";
             qDebug() << "AmazonCatalogApi: diagnostic written to" << diagPath;
         }
         co_return;
@@ -897,5 +979,896 @@ AmazonCatalogApi::fetchVariationFamily(const QString& asin,
              << family.parentAsin << "children:" << family.children.size()
              << "first child images:" << (family.children.isEmpty() ? 0 : family.children.first().allImageUrls.size());
     *out = std::move(family);
+    co_return;
+}
+
+QCoro::Task<void> AmazonCatalogApi::patchListingImage(QString marketplaceId,
+                                                      QString sku,
+                                                      QString productType,
+                                                      QByteArray jpegData,
+                                                      int imageIndex,
+                                                      bool* success)
+{
+    *success = false;
+
+    const QString sellerId = sellerIdForMarketplace(marketplaceId);
+    if (sellerId.isEmpty()) {
+        m_lastError = QStringLiteral("No seller ID configured for marketplace %1").arg(marketplaceId);
+        qWarning() << "AmazonCatalogApi:" << m_lastError;
+        co_return;
+    }
+
+    const QString endpoint = endpointForMarketplace(marketplaceId);
+
+    // Step 1: Create upload destination
+    const QByteArray md5Bytes = QCryptographicHash::hash(jpegData, QCryptographicHash::Md5);
+    const QString contentMd5 = QString::fromLatin1(md5Bytes.toBase64());
+
+    // Build the upload-destination URL. The resource path contains literal slashes that
+    // must be percent-encoded as %2F in the URL path segment. QUrl::setPath() uses
+    // DecodedMode by default and would re-encode '%' → '%25', corrupting the URL.
+    // Use QUrl::fromEncoded() so the pre-encoded %2F is preserved intact.
+    const QString resource = QStringLiteral("listings/items/%1/%2").arg(sellerId, sku);
+    const QString encodedResource = QString::fromUtf8(
+        QUrl::toPercentEncoding(resource, {}, QByteArrayLiteral("/")));
+    const QUrl uploadsUrl = QUrl::fromEncoded(
+        QStringLiteral("https://%1/uploads/2020-11-01/uploadDestinations/%2?marketplaceIds=%3")
+            .arg(endpoint, encodedResource, marketplaceId)
+            .toUtf8());
+
+    QString token;
+    co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
+    if (token.isEmpty()) {
+        m_lastError = QStringLiteral("No access token for marketplace %1").arg(marketplaceId);
+        co_return;
+    }
+
+    const QJsonObject uploadsBodyObj{
+        {QStringLiteral("contentType"), QStringLiteral("image/jpeg")},
+        {QStringLiteral("contentMD5"),  contentMd5}
+    };
+    const QByteArray uploadsBodyBytes = QJsonDocument(uploadsBodyObj).toJson(QJsonDocument::Compact);
+
+    QNetworkRequest uploadsReq(uploadsUrl);
+    uploadsReq.setRawHeader("x-amz-access-token", token.toUtf8());
+    uploadsReq.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    uploadsReq.setRawHeader("accept", "application/json");
+
+    const QString uploadsTs = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+    qDebug() << "AmazonCatalogApi: POST upload destination" << uploadsUrl.toString();
+    QNetworkReply* uploadsReply = _nam()->post(uploadsReq, uploadsBodyBytes);
+    co_await qCoro(uploadsReply).waitForFinished();
+
+    const QByteArray uploadsData = uploadsReply->readAll();
+    const int uploadsStatus = uploadsReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QString uploadsRequestId = rawHeaderCI(uploadsReply, "x-amzn-RequestId");
+    uploadsReply->deleteLater();
+
+    qDebug() << "AmazonCatalogApi: upload destination HTTP" << uploadsStatus
+             << "RequestId:" << uploadsRequestId
+             << "response:" << QString::fromUtf8(uploadsData.left(300));
+
+    if (uploadsStatus != 201 && uploadsStatus != 200) {
+        m_lastError = QStringLiteral("Upload destination HTTP %1 for SKU %2: %3")
+                          .arg(uploadsStatus).arg(sku, QString::fromUtf8(uploadsData.left(300)));
+        qWarning() << "AmazonCatalogApi:" << m_lastError;
+        const QString tsFile = QDateTime::currentDateTimeUtc().toString("yyyyMMdd'T'HHmmss'Z'");
+        const QString diagPath = QStringLiteral("/tmp/sp-api-img-upload-%1-%2.txt").arg(sku, tsFile);
+        QFile f(diagPath);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream s(&f);
+            s << "=== API OPERATION ===\n"
+              << "createUploadDestinationForResource\n\n"
+              << "=== REQUEST ===\n"
+              << "Timestamp:  " << uploadsTs << "\n"
+              << "POST " << uploadsUrl.toString() << "\n"
+              << "x-amz-access-token: " << token.left(20) << "...(truncated)\n"
+              << "Content-Type: application/json\n"
+              << "accept: application/json\n\n"
+              << "Body:\n" << QString::fromUtf8(uploadsBodyBytes) << "\n\n"
+              << "=== RESPONSE ===\n"
+              << "HTTP " << uploadsStatus << "\n"
+              << "x-amzn-RequestId: " << uploadsRequestId << "\n\n"
+              << QString::fromUtf8(uploadsData) << "\n";
+        }
+        co_return;
+    }
+
+    const QJsonObject uploadsDoc = QJsonDocument::fromJson(uploadsData).object();
+    const QJsonObject payload = uploadsDoc.value(QStringLiteral("payload")).toObject();
+    const QString uploadDestinationId = payload.value(QStringLiteral("uploadDestinationId")).toString();
+    const QString presignedUrl = payload.value(QStringLiteral("url")).toString();
+    const QJsonObject extraHeaders = payload.value(QStringLiteral("headers")).toObject();
+
+    if (uploadDestinationId.isEmpty() || presignedUrl.isEmpty()) {
+        m_lastError = QStringLiteral("Upload destination missing uploadDestinationId or url for SKU %1: %2")
+                          .arg(sku, QString::fromUtf8(uploadsData.left(300)));
+        qWarning() << "AmazonCatalogApi:" << m_lastError;
+        co_return;
+    }
+
+    // Step 2: PUT image to the presigned URL
+    const QUrl presignedUrlObj(presignedUrl);
+    QNetworkRequest putReq(presignedUrlObj);
+    putReq.setHeader(QNetworkRequest::ContentTypeHeader, "image/jpeg");
+    for (auto it = extraHeaders.constBegin(); it != extraHeaders.constEnd(); ++it)
+        putReq.setRawHeader(it.key().toUtf8(), it.value().toString().toUtf8());
+
+    qDebug() << "AmazonCatalogApi: PUT image" << jpegData.size() << "bytes to presigned URL";
+    QNetworkReply* putReply = _nam()->put(putReq, jpegData);
+    co_await qCoro(putReply).waitForFinished();
+
+    const QByteArray putData = putReply->readAll();
+    const int putStatus = putReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QNetworkReply::NetworkError putError = putReply->error();
+    putReply->deleteLater();
+
+    qDebug() << "AmazonCatalogApi: PUT image HTTP" << putStatus;
+
+    if (putStatus != 200 && putStatus != 204 && putError != QNetworkReply::NoError) {
+        m_lastError = QStringLiteral("PUT image HTTP %1 for SKU %2: %3")
+                          .arg(putStatus).arg(sku, QString::fromUtf8(putData.left(300)));
+        qWarning() << "AmazonCatalogApi:" << m_lastError;
+        co_return;
+    }
+
+    // Step 3: Determine target image slot
+    int targetIndex = imageIndex; // >= 0: use directly
+
+    if (imageIndex == -1 || imageIndex == -2) {
+        const QString listingPath = QStringLiteral("/listings/2021-08-01/items/%1/%2")
+                                        .arg(sellerId, sku);
+        QUrlQuery listingQuery;
+        listingQuery.addQueryItem(QStringLiteral("marketplaceIds"), marketplaceId);
+        listingQuery.addQueryItem(QStringLiteral("includedData"), QStringLiteral("attributes"));
+
+        QUrl listingUrl;
+        listingUrl.setScheme(QStringLiteral("https"));
+        listingUrl.setHost(endpoint);
+        listingUrl.setPath(listingPath);
+        listingUrl.setQuery(listingQuery);
+
+        co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
+        if (token.isEmpty()) {
+            m_lastError = QStringLiteral("No access token for marketplace %1").arg(marketplaceId);
+            co_return;
+        }
+
+        QNetworkRequest getReq(listingUrl);
+        getReq.setRawHeader("x-amz-access-token", token.toUtf8());
+        getReq.setRawHeader("accept", "application/json");
+
+        qDebug() << "AmazonCatalogApi: GET listing for image slot detection" << listingUrl.toString();
+        QNetworkReply* getReply = _nam()->get(getReq);
+        co_await qCoro(getReply).waitForFinished();
+
+        const QByteArray getData = getReply->readAll();
+        const int getStatus = getReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        getReply->deleteLater();
+
+        qDebug() << "AmazonCatalogApi: GET listing HTTP" << getStatus
+                 << "response:" << QString::fromUtf8(getData.left(300));
+
+        int highestFilledSlot = -1; // 0-based
+        if (getStatus == 200) {
+            const QJsonObject getDoc = QJsonDocument::fromJson(getData).object();
+            const QJsonObject attrs = getDoc.value(QStringLiteral("attributes")).toObject();
+            for (int i = 0; i < 8; ++i) {
+                const QString attrName = QStringLiteral("other_product_image_locator_%1").arg(i + 1);
+                if (!attrs.value(attrName).toArray().isEmpty())
+                    highestFilledSlot = i;
+            }
+        } else {
+            qWarning() << "AmazonCatalogApi: failed to GET listing for image slot, defaulting to slot 0";
+        }
+
+        if (imageIndex == -1)
+            targetIndex = qMin(highestFilledSlot + 1, 7); // append: next after last
+        else
+            targetIndex = qMax(highestFilledSlot, 0);     // replace last
+    }
+
+    // Step 4: PATCH listing with the uploaded image
+    const int slotNumber = targetIndex + 1; // 1-based
+    const QString attrName = QStringLiteral("other_product_image_locator_%1").arg(slotNumber);
+    const QString variantName = QStringLiteral("PT%1").arg(slotNumber, 2, 10, QLatin1Char('0'));
+
+    const QJsonObject imageValue{
+        {QStringLiteral("marketplace_id"), marketplaceId},
+        {QStringLiteral("images"), QJsonArray{
+            QJsonObject{
+                {QStringLiteral("link"),    uploadDestinationId},
+                {QStringLiteral("variant"), variantName}
+            }
+        }}
+    };
+
+    const QJsonObject patch{
+        {QStringLiteral("op"),    QStringLiteral("replace")},
+        {QStringLiteral("path"),  QStringLiteral("/attributes/%1").arg(attrName)},
+        {QStringLiteral("value"), QJsonArray{imageValue}}
+    };
+
+    const QJsonObject patchBodyObj{
+        {QStringLiteral("productType"), productType},
+        {QStringLiteral("patches"),     QJsonArray{patch}}
+    };
+    const QByteArray patchBodyBytes = QJsonDocument(patchBodyObj).toJson(QJsonDocument::Compact);
+
+    const QString patchPath = QStringLiteral("/listings/2021-08-01/items/%1/%2")
+                                  .arg(sellerId, sku);
+    QUrlQuery patchQuery;
+    patchQuery.addQueryItem(QStringLiteral("marketplaceIds"), marketplaceId);
+
+    QUrl patchUrl;
+    patchUrl.setScheme(QStringLiteral("https"));
+    patchUrl.setHost(endpoint);
+    patchUrl.setPath(patchPath);
+    patchUrl.setQuery(patchQuery);
+
+    co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
+    if (token.isEmpty()) {
+        m_lastError = QStringLiteral("No access token for marketplace %1").arg(marketplaceId);
+        co_return;
+    }
+
+    QNetworkRequest patchReq(patchUrl);
+    patchReq.setRawHeader("x-amz-access-token", token.toUtf8());
+    patchReq.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    patchReq.setRawHeader("accept", "application/json");
+
+    qDebug() << "AmazonCatalogApi: PATCH image" << patchUrl.toString()
+             << "slot:" << slotNumber << attrName << variantName
+             << "body:" << patchBodyBytes.left(200);
+    QNetworkReply* patchReply = _nam()->sendCustomRequest(patchReq, "PATCH", patchBodyBytes);
+    co_await qCoro(patchReply).waitForFinished();
+
+    const QByteArray patchData = patchReply->readAll();
+    const int patchStatus = patchReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QString requestId = rawHeaderCI(patchReply, "x-amzn-RequestId");
+    const QNetworkReply::NetworkError patchError = patchReply->error();
+    patchReply->deleteLater();
+
+    qDebug() << "AmazonCatalogApi: PATCH image HTTP" << patchStatus
+             << "RequestId:" << (requestId.isEmpty() ? QStringLiteral("(none)") : requestId)
+             << "response:" << QString::fromUtf8(patchData.left(300));
+
+    if (patchStatus >= 400 || patchError != QNetworkReply::NoError) {
+        m_lastError = QStringLiteral("HTTP %1 patching image for SKU %2: %3")
+                          .arg(patchStatus).arg(sku, QString::fromUtf8(patchData.left(300)));
+        qWarning() << "AmazonCatalogApi: image PATCH failed for" << sku << ":" << m_lastError;
+        const QString ts = QDateTime::currentDateTimeUtc().toString("yyyyMMdd'T'HHmmss'Z'");
+        const QString diagPath = QStringLiteral("/tmp/sp-api-img-patch-%1-%2.txt").arg(sku, ts);
+        QFile f(diagPath);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream s(&f);
+            s << "=== REQUEST ===\n"
+              << "PATCH " << patchUrl.toString() << "\n\n"
+              << "Request body:\n" << QString::fromUtf8(patchBodyBytes) << "\n\n"
+              << "=== RESPONSE ===\n"
+              << "HTTP " << patchStatus << "\n\n"
+              << QString::fromUtf8(patchData) << "\n";
+        }
+        co_return;
+    }
+
+    *success = true;
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
+// fetchAllFbaSkus — paginated FBA inventory → ASIN-to-SKU map
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonCatalogApi::fetchAllFbaSkus(QString marketplaceId,
+                                                    QHash<QString, QString>* asinToSku)
+{
+    asinToSku->clear();
+
+    const QString endpoint = endpointForMarketplace(marketplaceId);
+    const QString lwaReg   = lwaRegionForMarketplace(marketplaceId);
+
+    QString nextToken;
+    int pageCount = 0;
+    static const int kMaxPages = 100;
+
+    do {
+        QString token;
+        co_await _getAccessToken(lwaReg, &token);
+        if (token.isEmpty()) co_return;
+
+        QUrl url;
+        url.setScheme(QStringLiteral("https"));
+        url.setHost(endpoint);
+        url.setPath(QStringLiteral("/fba/inventory/v1/summaries"));
+
+        QUrlQuery q;
+        q.addQueryItem(QStringLiteral("granularityType"), QStringLiteral("Marketplace"));
+        q.addQueryItem(QStringLiteral("granularityId"),   marketplaceId);
+        q.addQueryItem(QStringLiteral("marketplaceIds"),  marketplaceId);
+        if (!nextToken.isEmpty())
+            q.addQueryItem(QStringLiteral("nextToken"), nextToken);
+        url.setQuery(q);
+
+        QNetworkRequest req(url);
+        req.setRawHeader("x-amz-access-token", token.toUtf8());
+        req.setRawHeader("accept", "application/json");
+
+        qDebug() << "AmazonCatalogApi: fetchAllFbaSkus page" << (pageCount + 1)
+                 << url.toString();
+        QNetworkReply* reply = _nam()->get(req);
+        co_await qCoro(reply).waitForFinished();
+
+        const QByteArray data = reply->readAll();
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        reply->deleteLater();
+
+        if (status != 200) {
+            qWarning() << "AmazonCatalogApi: fetchAllFbaSkus HTTP" << status
+                       << QString::fromUtf8(data.left(300));
+            break;
+        }
+
+        const QJsonObject root = QJsonDocument::fromJson(data).object();
+        const QJsonArray summaries = root.value(QStringLiteral("payload")).toObject()
+                                         .value(QStringLiteral("inventorySummaries")).toArray();
+        for (const QJsonValue& v : summaries) {
+            const QJsonObject obj = v.toObject();
+            const QString asin    = obj.value(QStringLiteral("asin")).toString();
+            const QString sku     = obj.value(QStringLiteral("sellerSku")).toString();
+            if (!asin.isEmpty() && !sku.isEmpty() && !asinToSku->contains(asin))
+                asinToSku->insert(asin, sku);
+        }
+
+        nextToken = root.value(QStringLiteral("pagination")).toObject()
+                        .value(QStringLiteral("nextToken")).toString();
+        ++pageCount;
+
+        qDebug() << "AmazonCatalogApi: fetchAllFbaSkus page" << pageCount
+                 << "got" << summaries.size() << "items, map size" << asinToSku->size()
+                 << (nextToken.isEmpty() ? "(last page)" : "(more pages)");
+
+    } while (!nextToken.isEmpty() && pageCount < kMaxPages);
+
+    qDebug() << "AmazonCatalogApi: fetchAllFbaSkus complete, pages=" << pageCount
+             << "total ASINs=" << asinToSku->size();
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
+// fetchAllSkusViaReport — Reports API GET_MERCHANT_LISTINGS_ALL_DATA
+// Works for both FBA and MFN listings.
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
+                                                           QHash<QString, QString>* asinToSku)
+{
+    asinToSku->clear();
+
+    const QString endpoint = endpointForMarketplace(marketplaceId);
+    const QString lwaReg   = lwaRegionForMarketplace(marketplaceId);
+
+    // --- Step 1: Create the report ---
+    QString token;
+    co_await _getAccessToken(lwaReg, &token);
+    if (token.isEmpty()) { co_return; }
+
+    {
+        QUrl url;
+        url.setScheme(QStringLiteral("https"));
+        url.setHost(endpoint);
+        url.setPath(QStringLiteral("/reports/2021-06-30/reports"));
+
+        QJsonObject body;
+        body[QStringLiteral("reportType")]    = QStringLiteral("GET_MERCHANT_LISTINGS_ALL_DATA");
+        body[QStringLiteral("marketplaceIds")] = QJsonArray{ marketplaceId };
+
+        QNetworkRequest req(url);
+        req.setRawHeader("x-amz-access-token", token.toUtf8());
+        req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+        qDebug() << "AmazonCatalogApi: requesting GET_MERCHANT_LISTINGS_ALL_DATA report for" << marketplaceId;
+        QNetworkReply* reply = _nam()->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+        co_await qCoro(reply).waitForFinished();
+
+        const QByteArray data = reply->readAll();
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        reply->deleteLater();
+
+        if (status != 202) {
+            m_lastError = QStringLiteral("Report creation failed: HTTP %1 — %2")
+                          .arg(status).arg(QString::fromUtf8(data.left(400)));
+            qWarning() << "AmazonCatalogApi:" << m_lastError;
+            co_return;
+        }
+
+        const QString reportId = QJsonDocument::fromJson(data).object()
+                                     .value(QStringLiteral("reportId")).toString();
+        if (reportId.isEmpty()) {
+            m_lastError = QStringLiteral("Report creation: no reportId in response — ")
+                          + QString::fromUtf8(data.left(300));
+            qWarning() << "AmazonCatalogApi:" << m_lastError;
+            co_return;
+        }
+
+        qDebug() << "AmazonCatalogApi: reportId =" << reportId;
+
+        // --- Step 2: Poll until DONE (max 3 minutes, 5-second intervals) ---
+        static const int kMaxPolls   = 36; // 36 × 5 s = 3 min
+        static const int kPollMs     = 5000;
+        QString reportDocumentId;
+
+        for (int poll = 0; poll < kMaxPolls; ++poll) {
+            // Wait 5 seconds between polls (first poll also waits — report is never instant)
+            QTimer timer;
+            timer.setSingleShot(true);
+            timer.start(kPollMs);
+            co_await qCoro(&timer).waitForTimeout();
+
+            co_await _getAccessToken(lwaReg, &token);
+            if (token.isEmpty()) { co_return; }
+
+            QUrl pollUrl;
+            pollUrl.setScheme(QStringLiteral("https"));
+            pollUrl.setHost(endpoint);
+            pollUrl.setPath(QStringLiteral("/reports/2021-06-30/reports/") + reportId);
+
+            QNetworkRequest pollReq(pollUrl);
+            pollReq.setRawHeader("x-amz-access-token", token.toUtf8());
+            pollReq.setRawHeader("accept", "application/json");
+
+            QNetworkReply* pollReply = _nam()->get(pollReq);
+            co_await qCoro(pollReply).waitForFinished();
+
+            const QByteArray pollData = pollReply->readAll();
+            const int pollStatus = pollReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            pollReply->deleteLater();
+
+            if (pollStatus != 200) {
+                qWarning() << "AmazonCatalogApi: report poll HTTP" << pollStatus
+                           << QString::fromUtf8(pollData.left(200));
+                continue;
+            }
+
+            const QJsonObject pollObj = QJsonDocument::fromJson(pollData).object();
+            const QString procStatus  = pollObj.value(QStringLiteral("processingStatus")).toString();
+            qDebug() << "AmazonCatalogApi: report poll" << (poll + 1)
+                     << "processingStatus =" << procStatus;
+
+            if (procStatus == QStringLiteral("DONE")) {
+                reportDocumentId = pollObj.value(QStringLiteral("reportDocumentId")).toString();
+                break;
+            }
+            if (procStatus == QStringLiteral("FATAL") || procStatus == QStringLiteral("CANCELLED")) {
+                m_lastError = QStringLiteral("Report processing failed: ") + procStatus;
+                qWarning() << "AmazonCatalogApi:" << m_lastError;
+                co_return;
+            }
+            // IN_QUEUE or IN_PROGRESS — keep polling
+        }
+
+        if (reportDocumentId.isEmpty()) {
+            m_lastError = QStringLiteral("Report did not complete within 3 minutes");
+            qWarning() << "AmazonCatalogApi:" << m_lastError;
+            co_return;
+        }
+
+        qDebug() << "AmazonCatalogApi: reportDocumentId =" << reportDocumentId;
+
+        // --- Step 3: Get the download URL ---
+        co_await _getAccessToken(lwaReg, &token);
+        if (token.isEmpty()) { co_return; }
+
+        QUrl docUrl;
+        docUrl.setScheme(QStringLiteral("https"));
+        docUrl.setHost(endpoint);
+        docUrl.setPath(QStringLiteral("/reports/2021-06-30/documents/") + reportDocumentId);
+
+        QNetworkRequest docReq(docUrl);
+        docReq.setRawHeader("x-amz-access-token", token.toUtf8());
+        docReq.setRawHeader("accept", "application/json");
+
+        QNetworkReply* docReply = _nam()->get(docReq);
+        co_await qCoro(docReply).waitForFinished();
+
+        const QByteArray docData = docReply->readAll();
+        const int docStatus = docReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        docReply->deleteLater();
+
+        if (docStatus != 200) {
+            m_lastError = QStringLiteral("Report document fetch failed: HTTP %1 — %2")
+                          .arg(docStatus).arg(QString::fromUtf8(docData.left(300)));
+            qWarning() << "AmazonCatalogApi:" << m_lastError;
+            co_return;
+        }
+
+        const QJsonObject docObj      = QJsonDocument::fromJson(docData).object();
+        const QString downloadUrl     = docObj.value(QStringLiteral("url")).toString();
+        const QString compression     = docObj.value(QStringLiteral("compressionAlgorithm")).toString();
+
+        if (downloadUrl.isEmpty()) {
+            m_lastError = QStringLiteral("Report document: no download URL — ")
+                          + QString::fromUtf8(docData.left(300));
+            qWarning() << "AmazonCatalogApi:" << m_lastError;
+            co_return;
+        }
+
+        // --- Step 4: Download the TSV (presigned S3, no auth header needed) ---
+        const QUrl dlUrlObj(downloadUrl);
+        QNetworkRequest dlReq(dlUrlObj);
+        QNetworkReply* dlReply = _nam()->get(dlReq);
+        co_await qCoro(dlReply).waitForFinished();
+
+        QByteArray tsvData = dlReply->readAll();
+        const int dlStatus = dlReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        dlReply->deleteLater();
+
+        if (dlStatus != 200) {
+            m_lastError = QStringLiteral("Report download failed: HTTP %1").arg(dlStatus);
+            qWarning() << "AmazonCatalogApi:" << m_lastError;
+            co_return;
+        }
+
+        if (compression == QStringLiteral("GZIP")) {
+            const QByteArray decompressed = gunzip(tsvData);
+            if (decompressed.isEmpty()) {
+                m_lastError = QStringLiteral("Report decompression failed (gzip inflate error)");
+                qWarning() << "AmazonCatalogApi:" << m_lastError;
+                co_return;
+            }
+            tsvData = decompressed;
+        }
+
+        // --- Step 5: Parse the TSV ---
+        // First line is the header; find seller-sku and asin1 column indices.
+        const QString text = QString::fromUtf8(tsvData);
+        const QStringList lines = text.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+
+        if (lines.isEmpty()) {
+            m_lastError = QStringLiteral("Report TSV is empty");
+            qWarning() << "AmazonCatalogApi:" << m_lastError;
+            co_return;
+        }
+
+        const QStringList headers = lines.at(0).split(QLatin1Char('\t'));
+        const int skuCol  = headers.indexOf(QStringLiteral("seller-sku"));
+        // Report format varies by region/type: some have "asin1", others "product-id"
+        int asinCol = headers.indexOf(QStringLiteral("asin1"));
+        if (asinCol < 0) asinCol = headers.indexOf(QStringLiteral("product-id"));
+        // "product-id-type" column: 1 = ASIN; absent means assume ASIN
+        const int typeCol = headers.indexOf(QStringLiteral("product-id-type"));
+
+        if (skuCol < 0 || asinCol < 0) {
+            m_lastError = QStringLiteral("Report TSV: could not find seller-sku/asin1 columns. Headers: ")
+                          + lines.at(0).left(300);
+            qWarning() << "AmazonCatalogApi:" << m_lastError;
+            co_return;
+        }
+
+        for (int i = 1; i < lines.size(); ++i) {
+            const QStringList cols = lines.at(i).split(QLatin1Char('\t'));
+            if (cols.size() <= qMax(skuCol, asinCol)) continue;
+            // Skip rows where product-id-type != 1 (ASIN) — e.g. UPC/EAN rows
+            if (typeCol >= 0 && typeCol < cols.size()
+                    && !cols.at(typeCol).trimmed().isEmpty()
+                    && cols.at(typeCol).trimmed() != QStringLiteral("1"))
+                continue;
+            const QString sku  = cols.at(skuCol).trimmed();
+            const QString asin = cols.at(asinCol).trimmed();
+            if (!sku.isEmpty() && !asin.isEmpty() && !asinToSku->contains(asin))
+                asinToSku->insert(asin, sku);
+        }
+
+        qDebug() << "AmazonCatalogApi: fetchAllSkusViaReport complete, total ASINs ="
+                 << asinToSku->size();
+    }
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
+// fetchListingProductType — GET /listings/2021-08-01/items/{sellerId}/{sku}
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonCatalogApi::fetchListingProductType(QString marketplaceId,
+                                                             QString sku,
+                                                             QString* productType)
+{
+    productType->clear();
+
+    const QString sellerId = sellerIdForMarketplace(marketplaceId);
+    if (sellerId.isEmpty()) {
+        qWarning() << "AmazonCatalogApi::fetchListingProductType: no seller ID for" << marketplaceId;
+        co_return;
+    }
+
+    const QString endpoint = endpointForMarketplace(marketplaceId);
+    const QString path = QStringLiteral("/listings/2021-08-01/items/%1/%2").arg(sellerId, sku);
+
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("marketplaceIds"), marketplaceId);
+    query.addQueryItem(QStringLiteral("includedData"), QStringLiteral("summaries"));
+
+    QUrl url;
+    url.setScheme(QStringLiteral("https"));
+    url.setHost(endpoint);
+    url.setPath(path);
+    url.setQuery(query);
+
+    QString token;
+    co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
+    if (token.isEmpty()) { co_return; }
+
+    QNetworkRequest req(url);
+    req.setRawHeader("x-amz-access-token", token.toUtf8());
+    req.setRawHeader("accept", "application/json");
+
+    qDebug() << "AmazonCatalogApi: fetchListingProductType GET" << url.toString();
+    QNetworkReply* reply = _nam()->get(req);
+    co_await qCoro(reply).waitForFinished();
+
+    const QByteArray data = reply->readAll();
+    const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    reply->deleteLater();
+
+    if (httpStatus != 200 || data.isEmpty()) {
+        qWarning() << "AmazonCatalogApi::fetchListingProductType: HTTP" << httpStatus
+                   << "for SKU" << sku;
+        co_return;
+    }
+
+    const QJsonArray summaries =
+        QJsonDocument::fromJson(data).object().value(QStringLiteral("summaries")).toArray();
+    if (summaries.isEmpty()) {
+        qWarning() << "AmazonCatalogApi::fetchListingProductType: no summaries in response for" << sku;
+        co_return;
+    }
+
+    *productType = summaries.first().toObject().value(QStringLiteral("productType")).toString();
+    qDebug() << "AmazonCatalogApi::fetchListingProductType: SKU" << sku
+             << "→ productType =" << *productType;
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
+// fetchAsinBySku — GET /listings/2021-08-01/items/{sellerId}/{sku}
+// Extracts summaries[0].asin. Falls back across regions if not found.
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonCatalogApi::fetchAsinBySku(QString marketplaceId,
+                                                    QString sku,
+                                                    QString* asin)
+{
+    asin->clear();
+
+    // Build the list of marketplaces to try: preferred first, then EU/NA/JP fallbacks.
+    QStringList marketplacesToTry;
+    marketplacesToTry << marketplaceId;
+    for (const QString &fallback : { QStringLiteral("A1F83G8C2ARO7P"),   // EU/UK
+                                      QStringLiteral("ATVPDKIKX0DER"),    // NA/US
+                                      QStringLiteral("A1VC38T7YXB528") }) // JP
+    {
+        if (!marketplacesToTry.contains(fallback))
+            marketplacesToTry << fallback;
+    }
+
+    for (const QString &mpId : marketplacesToTry) {
+        const QString sellerId = sellerIdForMarketplace(mpId);
+        if (sellerId.isEmpty()) {
+            qDebug() << "AmazonCatalogApi::fetchAsinBySku: no seller ID for"
+                     << mpId << "— skipping";
+            continue;
+        }
+
+        const QString endpoint = endpointForMarketplace(mpId);
+        const QString path = QStringLiteral("/listings/2021-08-01/items/%1/%2").arg(sellerId, sku);
+
+        QUrlQuery query;
+        query.addQueryItem(QStringLiteral("marketplaceIds"), mpId);
+        query.addQueryItem(QStringLiteral("includedData"), QStringLiteral("summaries"));
+
+        QUrl url;
+        url.setScheme(QStringLiteral("https"));
+        url.setHost(endpoint);
+        url.setPath(path);
+        url.setQuery(query);
+
+        QString token;
+        co_await _getAccessToken(lwaRegionForMarketplace(mpId), &token);
+        if (token.isEmpty()) { continue; }
+
+        QNetworkRequest req(url);
+        req.setRawHeader("x-amz-access-token", token.toUtf8());
+        req.setRawHeader("accept", "application/json");
+
+        qDebug() << "AmazonCatalogApi: fetchAsinBySku GET" << url.toString();
+        QNetworkReply* reply = _nam()->get(req);
+        co_await qCoro(reply).waitForFinished();
+
+        const QByteArray data = reply->readAll();
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        reply->deleteLater();
+
+        if (httpStatus != 200 || data.isEmpty()) {
+            qDebug() << "AmazonCatalogApi::fetchAsinBySku: HTTP" << httpStatus
+                     << "for SKU" << sku << "in" << mpId;
+            continue;
+        }
+
+        const QJsonArray summaries =
+            QJsonDocument::fromJson(data).object().value(QStringLiteral("summaries")).toArray();
+        if (summaries.isEmpty()) {
+            qDebug() << "AmazonCatalogApi::fetchAsinBySku: no summaries for"
+                     << sku << "in" << mpId;
+            continue;
+        }
+
+        const QString found =
+            summaries.first().toObject().value(QStringLiteral("asin")).toString();
+        if (!found.isEmpty()) {
+            *asin = found;
+            qDebug() << "AmazonCatalogApi::fetchAsinBySku: SKU" << sku
+                     << "→ ASIN =" << *asin << "(marketplace" << mpId << ")";
+            co_return;
+        }
+    }
+
+    qWarning() << "AmazonCatalogApi::fetchAsinBySku: SKU" << sku
+               << "not found in any region";
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
+// fetchSizeChartAttributeName — Product Type Definitions API + S3 schema
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonCatalogApi::fetchSizeChartAttributeName(QString marketplaceId,
+                                                                  QString productType,
+                                                                  QString* attrName)
+{
+    attrName->clear();
+
+    const QString endpoint = endpointForMarketplace(marketplaceId);
+    const QString path = QStringLiteral("/definitions/2020-09-01/productTypes/%1").arg(productType);
+
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("marketplaceIds"), marketplaceId);
+    query.addQueryItem(QStringLiteral("requirements"), QStringLiteral("LISTING"));
+
+    QUrl url;
+    url.setScheme(QStringLiteral("https"));
+    url.setHost(endpoint);
+    url.setPath(path);
+    url.setQuery(query);
+
+    QString token;
+    co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
+    if (token.isEmpty()) { co_return; }
+
+    QNetworkRequest req(url);
+    req.setRawHeader("x-amz-access-token", token.toUtf8());
+    req.setRawHeader("accept", "application/json");
+
+    qDebug() << "AmazonCatalogApi: fetchSizeChartAttributeName GET" << url.toString();
+    QNetworkReply* reply = _nam()->get(req);
+    co_await qCoro(reply).waitForFinished();
+
+    const QByteArray data = reply->readAll();
+    const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    reply->deleteLater();
+
+    if (httpStatus != 200 || data.isEmpty()) {
+        qWarning() << "AmazonCatalogApi::fetchSizeChartAttributeName: productTypes HTTP"
+                   << httpStatus << "for type" << productType;
+        co_return;
+    }
+
+    // Extract the S3 schema URL from schema.link.resource
+    const QString schemaUrl = QJsonDocument::fromJson(data).object()
+        .value(QStringLiteral("schema")).toObject()
+        .value(QStringLiteral("link")).toObject()
+        .value(QStringLiteral("resource")).toString();
+
+    if (schemaUrl.isEmpty()) {
+        qWarning() << "AmazonCatalogApi::fetchSizeChartAttributeName: no schema URL for"
+                   << productType;
+        co_return;
+    }
+
+    // Download the JSON Schema from S3 (presigned URL — no auth header needed)
+    const QUrl schemaUrlObj(schemaUrl);
+    QNetworkRequest schemaReq(schemaUrlObj);
+    qDebug() << "AmazonCatalogApi: downloading product type schema from S3";
+    QNetworkReply* schemaReply = _nam()->get(schemaReq);
+    co_await qCoro(schemaReply).waitForFinished();
+
+    const QByteArray schemaData = schemaReply->readAll();
+    const int schemaStatus = schemaReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    schemaReply->deleteLater();
+
+    if (schemaStatus != 200 || schemaData.isEmpty()) {
+        qWarning() << "AmazonCatalogApi::fetchSizeChartAttributeName: schema download HTTP"
+                   << schemaStatus;
+        co_return;
+    }
+
+    // Save raw schema to /tmp for manual inspection (one file per marketplace)
+    const QString diagPath = QStringLiteral("/tmp/sp-api-schema-%1-%2.json").arg(productType, marketplaceId);
+    {
+        QFile sf(diagPath);
+        if (sf.open(QIODevice::WriteOnly))
+            sf.write(schemaData);
+    }
+    qDebug() << "AmazonCatalogApi: schema for" << productType << "saved to" << diagPath;
+
+    const QJsonObject root = QJsonDocument::fromJson(schemaData).object();
+
+    // Collect the set of attribute property objects to search, trying several
+    // schema layouts that Amazon uses (plain, wrapped in allOf, no "attributes" wrapper):
+    //   1. properties.attributes.properties   (most common for writable listing attrs)
+    //   2. properties                          (some types skip the "attributes" wrapper)
+    //   3. allOf[n].properties.attributes.properties
+    //   4. allOf[n].properties
+    QList<QJsonObject> candidates;
+
+    const QJsonObject topProps = root.value(QStringLiteral("properties")).toObject();
+    const QJsonObject attrNode = topProps.value(QStringLiteral("attributes")).toObject();
+
+    // Path 1
+    const QJsonObject path1 = attrNode.value(QStringLiteral("properties")).toObject();
+    if (!path1.isEmpty()) candidates << path1;
+
+    // Path 2
+    if (!topProps.isEmpty()) candidates << topProps;
+
+    // Path 3 + 4 — iterate allOf array
+    const QJsonArray allOf = root.value(QStringLiteral("allOf")).toArray();
+    for (const QJsonValue &v : allOf) {
+        const QJsonObject entry = v.toObject();
+        const QJsonObject ep = entry.value(QStringLiteral("properties")).toObject();
+        const QJsonObject ea = ep.value(QStringLiteral("attributes")).toObject();
+        const QJsonObject eap = ea.value(QStringLiteral("properties")).toObject();
+        if (!eap.isEmpty()) candidates << eap;
+        if (!ep.isEmpty())  candidates << ep;
+    }
+
+    // Helper: find first key containing "size_chart" then "size"+"chart"
+    auto searchSizeChart = [](const QJsonObject &props) -> QString {
+        for (auto it = props.constBegin(); it != props.constEnd(); ++it) {
+            if (it.key().contains(QStringLiteral("size_chart"), Qt::CaseInsensitive))
+                return it.key();
+        }
+        for (auto it = props.constBegin(); it != props.constEnd(); ++it) {
+            const QString k = it.key().toLower();
+            if (k.contains(QLatin1String("size")) && k.contains(QLatin1String("chart")))
+                return it.key();
+        }
+        return {};
+    };
+
+    // Also collect all "size"-related keys for diagnostics
+    QStringList sizeKeys;
+    for (const QJsonObject &props : candidates) {
+        for (auto it = props.constBegin(); it != props.constEnd(); ++it) {
+            const QString k = it.key().toLower();
+            if (k.contains(QLatin1String("size")) && !sizeKeys.contains(it.key()))
+                sizeKeys << it.key();
+        }
+    }
+    qDebug() << "AmazonCatalogApi::fetchSizeChartAttributeName: size-related attrs for"
+             << productType << ":" << sizeKeys;
+
+    for (const QJsonObject &props : candidates) {
+        const QString found = searchSizeChart(props);
+        if (!found.isEmpty()) {
+            *attrName = found;
+            qDebug() << "AmazonCatalogApi::fetchSizeChartAttributeName: found" << *attrName;
+            co_return;
+        }
+    }
+
+    qWarning() << "AmazonCatalogApi::fetchSizeChartAttributeName: no size chart attr for"
+               << productType << "in" << marketplaceId
+               << "— schema saved to" << diagPath
+               << "— size-related keys:" << sizeKeys;
     co_return;
 }

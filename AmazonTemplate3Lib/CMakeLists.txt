@@ -13,6 +13,7 @@ include(sizecategories/sizecategories.cmake)
 
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core Widgets Network)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Widgets Network)
+find_package(ZLIB REQUIRED)
 
 # Compile and install QXlsx
 #sudo apt-get install libxkbcommon-dev
@@ -43,6 +44,8 @@ add_library(AmazonTemplate3Lib STATIC
   aplus/APlusContent.cpp
   aplus/APlusTreeModel.h
   aplus/APlusTreeModel.cpp
+  aplus/APlusWorkflow.h
+  aplus/APlusWorkflow.cpp
   Attribute.h
   Attribute.cpp
   TemplateFiller.h
@@ -77,6 +80,7 @@ target_link_libraries(AmazonTemplate3Lib PRIVATE
     Qt${QT_VERSION_MAJOR}::Widgets
     Qt${QT_VERSION_MAJOR}::Network
     Qt${QT_VERSION_MAJOR}::Core
+    ZLIB::ZLIB
     PUBLIC
     QXlsx::QXlsx
     QCoro::Network
@@ -107,6 +111,8 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   aplus/APlusContent.cpp
   aplus/APlusTreeModel.h
   aplus/APlusTreeModel.cpp
+  aplus/APlusWorkflow.h
+  aplus/APlusWorkflow.cpp
   Attribute.h
   Attribute.cpp
   TemplateFiller.h
@@ -135,6 +141,7 @@ target_link_libraries(AmazonTemplate3Lib_Tests PUBLIC
     Qt${QT_VERSION_MAJOR}::Gui
     Qt${QT_VERSION_MAJOR}::Network
     Qt${QT_VERSION_MAJOR}::Core
+    ZLIB::ZLIB
     QXlsx::QXlsx
     QCoro::Network
 )

@@ -14,6 +14,8 @@
 #include "AbstractCli.h"
 #include "aplus/APlusContent.h"
 #include "aplus/APlusTreeModel.h"
+#include "aplus/APlusWorkflow.h"
+#include "SizeRangeWidget.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class PaneSizing; }
@@ -51,10 +53,11 @@ private slots:
     void onGenSizeTablesClicked();
     void onMakeEditableToggled(bool checked);
     void updateButtonStates();
-    void onSizeModeChanged();
     void onGroupImageSelected(int row);
-    void onUploadSizeTableClicked();
+    void onUploadSizeImageClicked();
     void onVariantImageSelected(int row);
+    void onOpenSizeTableFolderClicked();
+    void onAddSkusFromTemplateClicked();
 
     // A+ content slots
     void onAplusGenerateAll();
@@ -67,6 +70,11 @@ private slots:
     void onAplusSelectionChanged(const QModelIndex &current, const QModelIndex &previous);
 
 private:
+    struct AsinSku {
+        QString asin;
+        QString sku;
+    };
+
     struct MeasurementWidgets {
         QString        fieldId;
         QDoubleSpinBox *refSpinBox   = nullptr;
@@ -84,10 +92,13 @@ private:
 
     QDir                m_workingDir;
     QDir                m_productWorkingDir;
+    QString              m_productType;
+    QString              m_productTitle;
     QStringList         m_variantImagePaths;
     QString             m_mainImageLocalPath;
     QList<AbstractCli *>  m_availableClis;
     QNetworkAccessManager *m_imageNam = nullptr;
+    QList<QPair<QString, QStringList>> m_colorVariants;
 
     // A+ content state
     std::unique_ptr<APlusContent> m_aplusContent;
@@ -102,9 +113,17 @@ private:
     void _loadProductSettings();
     void _populateSizeRangeCombos();
     void _tryGuessSizeRange();
+    void _tryGuessBrandRangeFromTitle();
     void _rebuildMeasurementForm();
     const AbstractSizeCategory* _currentCategory() const;
-    QCoro::Task<void> _uploadSizeChart(QStringList marketplaceIds, QString productType);
+    QCoro::Task<void> _uploadSizeImage(int imageIndex);
+    QCoro::Task<void> _saveToSizeTableFolder();
+    QCoro::Task<void> _addSkusFromTemplate();
+    // Fills missing SKUs: settings.ini → Reports API → manual dialog.
+    // Sets *cancelled = true if the user dismissed the manual entry dialog.
+    QCoro::Task<void> _resolveSkus(QList<AsinSku> &items,
+                                   const QString &marketplaceId,
+                                   bool *cancelled);
     void _downloadMainImage(const QString &url, const QString &asin);
     void _downloadVariantImages(const QList<QPair<QString, QStringList>> &colorImages);
     void _runCliPrompt(const QString &executable, const QStringList &args,
@@ -141,6 +160,13 @@ private:
     void    _aplusPushImage(const QImage &img, const QString &elementId,
                             const QString &displayName, APlusElementType type);
     void    _aplusPushSizeChart();
+
+    // A+ workflow helpers
+    void           _initWorkflowCombo();
+    void           _loadWorkflowPrompts();
+    void           _rebuildPromptTabs();
+    APlusWorkflow *_currentWorkflow() const;
+    QStringList    _stepInstructions() const;
 };
 
 #endif

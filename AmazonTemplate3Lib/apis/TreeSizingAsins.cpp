@@ -265,6 +265,9 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
         ParentItem p;
         p.asin = family.parentAsin;
         p.sku  = family.parentSku;
+        // Regex shared across children: "XL=42", "M=10", etc.
+        static const QRegularExpression kSizeRe(QStringLiteral(R"(([A-Z]{1,3})\s*=\s*\d+)"));
+
         for (const auto& c : family.children) {
             ChildItem ci;
             ci.asin         = c.asin;
@@ -273,6 +276,15 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
             ci.color        = c.color;
             ci.title        = c.title;
             ci.hasSizeTable = c.hasSizeTable;
+
+            // If the Amazon catalog API didn't return a size attribute, try to
+            // extract it from the title (e.g. "Abaya… XL=42" → "XL").
+            if (ci.size.isEmpty() && !ci.title.isEmpty()) {
+                const auto m = kSizeRe.match(ci.title);
+                if (m.hasMatch())
+                    ci.size = m.captured(1);
+            }
+
             p.children.append(ci);
         }
         _applyDatesToFamily(p);
@@ -293,11 +305,15 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
             // by color naturally collapses them to one entry.
             QList<QPair<QString, QStringList>> colorImages;
             QSet<QString> seenColors;
+            QSet<QString> seenMainUrls;
             for (const auto& c : family.children) {
                 if (c.allImageUrls.isEmpty()) continue;
-                const QString key = c.color.toLower();
-                if (seenColors.contains(key)) continue;
-                seenColors.insert(key);
+                const QString colorKey = c.color.toLower();
+                const QString mainUrl  = c.mainImageUrl;
+                if (seenColors.contains(colorKey)) continue;
+                if (!mainUrl.isEmpty() && seenMainUrls.contains(mainUrl)) continue;
+                seenColors.insert(colorKey);
+                if (!mainUrl.isEmpty()) seenMainUrls.insert(mainUrl);
                 colorImages.append({c.color, c.allImageUrls});
             }
             if (!colorImages.isEmpty())

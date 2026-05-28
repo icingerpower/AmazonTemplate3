@@ -5,6 +5,7 @@
 #include <QString>
 #include <QList>
 #include <QMap>
+#include <QHash>
 #include <QDateTime>
 #include <QByteArray>
 #include <QStringList>
@@ -73,10 +74,12 @@ public:
     // GCC 13 ICE workaround: params passed by value.
     QCoro::Task<void> checkAsinExists(QString asin, QString marketplaceId, bool* out);
 
-    // PATCH size_chart_display for a single SKU via the Listings Items API.
+    // PATCH the size chart attribute for a single SKU via the Listings Items API.
     // headerCells: full header row — first cell is the label-column header (usually ""),
     //              remaining cells are size labels (e.g. "", "S", "M", "L").
     // dataRows: each QStringList has label in col 0, then one value per size column.
+    // sizeChartAttr: attribute name to PATCH (e.g. "size_chart_display"). If empty,
+    //                defaults to "size_chart_display".
     // Sets *success = true on HTTP 200.
     // GCC 13 ICE workaround: all non-trivially-destructible params passed by value.
     QCoro::Task<void> patchListingSizeChart(QString marketplaceId,
@@ -84,7 +87,59 @@ public:
                                             QString productType,
                                             QStringList headerCells,
                                             QList<QStringList> dataRows,
-                                            bool* success);
+                                            bool* success,
+                                            QString sizeChartAttr = {});
+
+    // Upload a JPEG image to a listing's additional image slot via the SP-API
+    // Uploads API + Listings Items PATCH.
+    // imageIndex: -1 = append at end (auto-detects first empty slot),
+    //             -2 = replace last (auto-detects last used slot),
+    //             >= 0 = replace at that 0-based slot (0 → PT01 / other_product_image_locator_1).
+    // GCC 13 ICE workaround: all non-trivially-destructible params passed by value.
+    QCoro::Task<void> patchListingImage(QString marketplaceId,
+                                        QString sku,
+                                        QString productType,
+                                        QByteArray jpegData,
+                                        int imageIndex,
+                                        bool* success);
+
+    // Fetch ALL FBA inventory items for a marketplace, filling *asinToSku with
+    // ASIN → sellerSku pairs. Handles pagination automatically.
+    // FBA items only; MFN items will not appear.
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> fetchAllFbaSkus(QString marketplaceId,
+                                      QHash<QString, QString>* asinToSku);
+
+    // Fetch ALL listings (FBA + MFN) via the Reports API GET_MERCHANT_LISTINGS_ALL_DATA.
+    // Requests the report, polls until ready (up to ~3 min), downloads and parses the TSV.
+    // Fills *asinToSku with ASIN → sellerSku pairs.
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> fetchAllSkusViaReport(QString marketplaceId,
+                                            QHash<QString, QString>* asinToSku);
+
+    // Retrieve the productType of a seller listing via the Listings Items API summaries.
+    // *productType is empty on error or when the listing is not found.
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> fetchListingProductType(QString marketplaceId,
+                                              QString sku,
+                                              QString* productType);
+
+    // Retrieve the ASIN for a seller listing given its SKU via the Listings Items API.
+    // Tries marketplaceId first; falls back to EU, NA, JP if not found.
+    // *asin is empty on error or when the listing is not found in any region.
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> fetchAsinBySku(QString marketplaceId,
+                                     QString sku,
+                                     QString* asin);
+
+    // Query the Product Type Definitions API to find the name of the size chart
+    // attribute for the given productType (e.g. "size_chart_display" for SHIRT).
+    // Downloads and searches the JSON Schema from the S3 URL returned by the API.
+    // *attrName is empty when no size chart attribute exists for that product type.
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> fetchSizeChartAttributeName(QString marketplaceId,
+                                                   QString productType,
+                                                   QString* attrName);
 
 #ifdef AMAZONCATALOGAPI_UNIT_TESTS
     // Mock is called instead of real HTTP. Receives the path
@@ -152,6 +207,10 @@ private:
     QString   m_accessTokenJp;   QDateTime m_accessTokenExpiryJp;
 
     QNetworkAccessManager* m_nam = nullptr;
+
+    // Rate-limiting: track when the last catalog GET was sent so we can
+    // insert a short pause before the next one and stay under Amazon's quota.
+    QDateTime m_lastRequestTime;
 
     QString m_lastError;
 

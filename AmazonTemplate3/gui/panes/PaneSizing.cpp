@@ -1,9 +1,10 @@
 // GCC 13 ICE workaround: same pragma as AmazonCatalogApi.cpp — needed because
-// _uploadSizeChart is a coroutine with non-trivially-destructible frame locals.
+// some coroutines here have non-trivially-destructible frame locals.
 #pragma GCC optimize("O1")
 #include "PaneSizing.h"
 #include "ui_PaneSizing.h"
 #include "MiddleTruncateDelegate.h"
+#include "SizeRangeWidget.h"
 #include "SizeTableGenerator.h"
 #include "SettingsTable.h"
 #include "apis/AmazonCatalogApi.h"
@@ -25,15 +26,22 @@
 #include <QRadioButton>
 #include <QStandardItem>
 #include <QListWidget>
+#include <QListView>
+#include <QStringListModel>
+#include <QTableWidget>
 #include <QDialog>
 #include <QComboBox>
 #include <QLineEdit>
 #include <QDialogButtonBox>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QProgressBar>
 #include <QTimer>
 #include <QTextEdit>
 #include <QProgressBar>
 #include <QFontDatabase>
 #include <QGuiApplication>
+#include <QCoreApplication>
 #include <QClipboard>
 
 #include "../../common/workingdirectory/WorkingDirectoryManager.h"
@@ -50,6 +58,7 @@
 #include <QJsonObject>
 #include <QPointer>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QUrl>
 #include <QButtonGroup>
@@ -58,7 +67,9 @@
 #include <QItemSelectionModel>
 #include <QDateTime>
 #include <QDir>
+#include <QBuffer>
 #include <QSet>
+#include <xlsxdocument.h>
 
 PaneSizing::PaneSizing(QWidget *parent)
     : QWidget(parent)
@@ -89,28 +100,16 @@ PaneSizing::PaneSizing(QWidget *parent)
     connect(ui->comboBoxSizeType,
             QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &PaneSizing::onSizeTypeChanged);
-    connect(ui->comboBoxSizeFrom,
-            QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &PaneSizing::updateButtonStates);
-    connect(ui->comboBoxSizeTo,
-            QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &PaneSizing::updateButtonStates);
-    connect(ui->comboBoxLetterSizeFrom,
-            QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &PaneSizing::updateButtonStates);
-    connect(ui->comboBoxLetterSizeTo,
-            QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &PaneSizing::updateButtonStates);
+    connect(ui->sizeRangeMain,  &SizeRangeWidget::changed, this, &PaneSizing::updateButtonStates);
+    connect(ui->sizeRangeBrand, &SizeRangeWidget::changed, this, &PaneSizing::updateButtonStates);
     connect(ui->buttoGenSizeTables, &QPushButton::clicked,
             this, &PaneSizing::onGenSizeTablesClicked);
     connect(ui->buttonMakeEditable, &QPushButton::toggled,
             this, &PaneSizing::onMakeEditableToggled);
-    connect(ui->buttonUploadSizeTable, &QPushButton::clicked,
-            this, &PaneSizing::onUploadSizeTableClicked);
-
-    connect(ui->radioButton,   &QRadioButton::toggled, this, &PaneSizing::onSizeModeChanged);
-    connect(ui->radioButton_2, &QRadioButton::toggled, this, &PaneSizing::onSizeModeChanged);
-    connect(ui->radioButton_3, &QRadioButton::toggled, this, &PaneSizing::onSizeModeChanged);
+    connect(ui->buttonUploadImageSize, &QPushButton::clicked,
+            this, &PaneSizing::onUploadSizeImageClicked);
+    connect(ui->radioButtonReplaceImageAtIndex, &QRadioButton::toggled,
+            ui->spinBoxImagePos, &QSpinBox::setEnabled);
 
     connect(ui->listWidgetSizeGroups, &QListWidget::currentRowChanged,
             this, &PaneSizing::onGroupImageSelected);
@@ -118,47 +117,44 @@ PaneSizing::PaneSizing(QWidget *parent)
     connect(ui->listWidgetImages, &QListWidget::currentRowChanged,
             this, &PaneSizing::onVariantImageSelected);
 
-    auto makePromptSaver = [this](QTextEdit* editor, const QString& key) {
-        connect(editor, &QTextEdit::textChanged, this, [this, editor, key]() {
-            QTimer::singleShot(2000, this, [this, editor, key]() {
+    auto makePromptSaver = [this](QTextEdit* editor, int step) {
+        connect(editor, &QTextEdit::textChanged, this, [this, editor, step]() {
+            QTimer::singleShot(2000, this, [this, editor, step]() {
+                APlusWorkflow *wf = _currentWorkflow();
+                if (!wf) return;
+                const QString key = QStringLiteral("aplus/") + wf->id()
+                                  + QStringLiteral("/step") + QString::number(step);
                 auto s = WorkingDirectoryManager::instance()->settings();
                 const QString text = editor->toPlainText();
-                if (text.isEmpty())
-                    s->remove(key);
-                else
-                    s->setValue(key, text);
+                if (text.isEmpty()) s->remove(key);
+                else                s->setValue(key, text);
             });
         });
     };
-    makePromptSaver(ui->textEditPrompt_01, QStringLiteral("aplusPromptDesktop"));
-    makePromptSaver(ui->textEditPrompt_02, QStringLiteral("aplusPromptMobile"));
-    makePromptSaver(ui->textEditFaqPrompt, QStringLiteral("aplusPromptFaq"));
+    makePromptSaver(ui->textEditPrompt_01, 0);
+    makePromptSaver(ui->textEditPrompt_02, 1);
+    makePromptSaver(ui->textEditPrompt_03, 2);
 
-    {
-        auto s = WorkingDirectoryManager::instance()->settings();
-        auto loadPrompt = [&](QTextEdit *ed, const QString &key, const QString &legacyKey = {}) {
-            ed->blockSignals(true);
-            QString val = s->value(key).toString();
-            if (val.isEmpty() && !legacyKey.isEmpty())
-                val = s->value(legacyKey).toString();
-            ed->setPlainText(val);
-            ed->blockSignals(false);
-        };
-        loadPrompt(ui->textEditPrompt_01, QStringLiteral("aplusPromptDesktop"),
-                                          QStringLiteral("aplusPromptOneColor"));
-        loadPrompt(ui->textEditPrompt_02, QStringLiteral("aplusPromptMobile"),
-                                          QStringLiteral("aplusPromptMultipleColors"));
-        loadPrompt(ui->textEditFaqPrompt, QStringLiteral("aplusPromptFaq"));
-    }
+    connect(ui->textEditFaqPrompt, &QTextEdit::textChanged, this, [this]() {
+        QTimer::singleShot(2000, this, [this]() {
+            auto s = WorkingDirectoryManager::instance()->settings();
+            const QString text = ui->textEditFaqPrompt->toPlainText();
+            if (text.isEmpty()) s->remove(QStringLiteral("aplusPromptFaq"));
+            else                s->setValue(QStringLiteral("aplusPromptFaq"), text);
+        });
+    });
 
     connect(ui->buttonCopyPrompt, &QPushButton::clicked, this, [this]() {
-        QTextEdit *editor = (ui->tabWidgetPrompt_01->currentIndex() == 0)
-                          ? ui->textEditPrompt_01
-                          : ui->textEditPrompt_02;
+        const int idx = ui->tabWidgetPrompt_01->currentIndex();
+        QTextEdit *editor = (idx == 0) ? ui->textEditPrompt_01
+                          : (idx == 1) ? ui->textEditPrompt_02
+                          : (idx == 2) ? ui->textEditPrompt_03
+                          : ui->textEditFaqPrompt;
         QGuiApplication::clipboard()->setText(editor->toPlainText());
     });
 
     m_imageNam = new QNetworkAccessManager(this);
+    _initWorkflowCombo();
 
     // --- A+ content wiring ---
     connect(ui->buttonAplusAddImageSlot, &QPushButton::clicked,
@@ -213,11 +209,15 @@ PaneSizing::PaneSizing(QWidget *parent)
             QDesktopServices::openUrl(QUrl::fromLocalFile(dir.absolutePath()));
     });
 
+    connect(ui->buttonOpenSizeTableFolder, &QPushButton::clicked,
+            this, &PaneSizing::onOpenSizeTableFolderClicked);
+    connect(ui->buttonAddSkusFromTemplate, &QPushButton::clicked,
+            this, &PaneSizing::onAddSkusFromTemplateClicked);
+
     ui->treeViewAsins->setItemDelegateForColumn(
         TreeSizingAsins::Title, new MiddleTruncateDelegate(this));
 
     _rebuildMeasurementForm();
-    onSizeModeChanged();
     updateButtonStates();
 }
 
@@ -295,6 +295,87 @@ static QString simplifyForDirName(const QString &s)
     return result.left(60);
 }
 
+// Read unique SKU values from a listing template xlsx. Looks in the first
+// 10 rows / 500 cols for a header matching seller_sku / item_sku / sku
+// (case-insensitive). Data starts headerRow + 2 to skip the
+// required/optional markers row. Stops at the first empty cell.
+static QStringList readSkusFromXlsx(const QString &path)
+{
+    QStringList result;
+    QXlsx::Document doc(path);
+    if (!doc.load())
+        return result;
+
+    const QStringList skuHeaders = {
+        QStringLiteral("seller_sku"),
+        QStringLiteral("item_sku"),
+        QStringLiteral("sku"),
+    };
+
+    int skuCol = -1;
+    int headerRow = -1;
+    for (int row = 1; row <= 10 && skuCol < 0; ++row) {
+        for (int col = 1; col <= 500; ++col) {
+            const QVariant v = doc.read(row, col);
+            if (!v.isValid()) continue;
+            const QString s = v.toString().trimmed();
+            for (const QString &h : skuHeaders) {
+                if (s.compare(h, Qt::CaseInsensitive) == 0) {
+                    skuCol = col;
+                    headerRow = row;
+                    break;
+                }
+            }
+            if (skuCol > 0) break;
+        }
+    }
+
+    if (skuCol < 0)
+        return result;
+
+    const int firstDataRow = headerRow + 2; // skip required/optional markers row
+    for (int row = firstDataRow; row <= 10000; ++row) {
+        const QVariant v = doc.read(row, skuCol);
+        if (!v.isValid()) break;
+        const QString s = v.toString().trimmed();
+        if (s.isEmpty()) break;
+        if (!result.contains(s))
+            result << s;
+    }
+    return result;
+}
+
+// Resolve the first marketplace ID matching a country code from the
+// listWidgetCountries widget. Falls back to UK (A1F83G8C2ARO7P) if no entry
+// matches a known country code.
+static QString firstMarketplaceIdFromCountryList(QListWidget *listWidget)
+{
+    static const QHash<QString, QString> kCodeToMp = {
+        {QStringLiteral("fr"), QStringLiteral("A13V1IB3VIYZZH")},
+        {QStringLiteral("de"), QStringLiteral("A1PA6795UKMFR9")},
+        {QStringLiteral("it"), QStringLiteral("APJ6JRA9NG5V4")},
+        {QStringLiteral("es"), QStringLiteral("A1RKKUPIHCS9HS")},
+        {QStringLiteral("uk"), QStringLiteral("A1F83G8C2ARO7P")},
+        {QStringLiteral("nl"), QStringLiteral("A1805IZSGTT6HS")},
+        {QStringLiteral("se"), QStringLiteral("A2NODRKZP88ZB9")},
+        {QStringLiteral("pl"), QStringLiteral("A1C3SOZRARQ6R3")},
+        {QStringLiteral("be"), QStringLiteral("AMEN7PMS3EDWL")},
+        {QStringLiteral("ie"), QStringLiteral("A28R8C7NBKEWEA")},
+        {QStringLiteral("tr"), QStringLiteral("A33AVAJ2PDY3EV")},
+        {QStringLiteral("us"), QStringLiteral("ATVPDKIKX0DER")},
+        {QStringLiteral("ca"), QStringLiteral("A2EUQ1WTGCTBG2")},
+        {QStringLiteral("mx"), QStringLiteral("A1AM78C64UM0Y8")},
+        {QStringLiteral("jp"), QStringLiteral("A1VC38T7YXB528")},
+    };
+    for (int i = 0; i < listWidget->count(); ++i) {
+        const QString code = listWidget->item(i)->text()
+                                 .trimmed().toLower().split(QLatin1Char(' ')).first();
+        const QString mp = kCodeToMp.value(code);
+        if (!mp.isEmpty()) return mp;
+    }
+    return QStringLiteral("A1F83G8C2ARO7P"); // fallback: UK
+}
+
 QDir PaneSizing::_resolveProductDir(const QString &asin, const QString &title)
 {
     if (!m_workingDir.exists())
@@ -326,23 +407,12 @@ void PaneSizing::_saveProductSettings()
     s.setValue(QStringLiteral("sizing/type"),
                cat ? cat->displayName() : ui->comboBoxSizeType->currentText());
 
-    QString mode, from, to;
-    if (ui->radioButton_2->isChecked()) {
-        mode = QStringLiteral("letters");
-        from = ui->comboBoxLetterSizeFrom->currentText();
-        to   = ui->comboBoxLetterSizeTo->currentText();
-    } else if (ui->radioButton_3->isChecked()) {
-        mode = QStringLiteral("height");
-        from = ui->comboBoxHeightFrom->currentText();
-        to   = ui->comboBoxHeightTo->currentText();
-    } else {
-        mode = QStringLiteral("numbers");
-        from = ui->comboBoxSizeFrom->currentText();
-        to   = ui->comboBoxSizeTo->currentText();
-    }
-    s.setValue(QStringLiteral("sizing/mode"), mode);
-    s.setValue(QStringLiteral("sizing/from"), from);
-    s.setValue(QStringLiteral("sizing/to"),   to);
+    s.setValue(QStringLiteral("sizing/mode"), ui->sizeRangeMain->mode());
+    s.setValue(QStringLiteral("sizing/from"), ui->sizeRangeMain->from());
+    s.setValue(QStringLiteral("sizing/to"),   ui->sizeRangeMain->to());
+    s.setValue(QStringLiteral("sizing/brandMode"), ui->sizeRangeBrand->mode());
+    s.setValue(QStringLiteral("sizing/brandFrom"), ui->sizeRangeBrand->from());
+    s.setValue(QStringLiteral("sizing/brandTo"),   ui->sizeRangeBrand->to());
 
     const QString mPrefix = QStringLiteral("sizing/measurements/");
     for (const auto &w : m_measurementWidgets) {
@@ -371,28 +441,19 @@ void PaneSizing::_loadProductSettings()
     if (typeIdx >= 0)
         ui->comboBoxSizeType->setCurrentIndex(typeIdx);
 
-    // Restore mode radio button.
     const QString mode = s.value(QStringLiteral("sizing/mode")).toString();
-    if (mode == QStringLiteral("letters"))
-        ui->radioButton_2->setChecked(true);
-    else if (mode == QStringLiteral("height"))
-        ui->radioButton_3->setChecked(true);
-    else
-        ui->radioButton->setChecked(true);
-
-    // Restore from/to values.
     const QString from = s.value(QStringLiteral("sizing/from")).toString();
     const QString to   = s.value(QStringLiteral("sizing/to")).toString();
-    if (mode == QStringLiteral("letters")) {
-        ui->comboBoxLetterSizeFrom->setCurrentText(from);
-        ui->comboBoxLetterSizeTo->setCurrentText(to);
-    } else if (mode == QStringLiteral("height")) {
-        ui->comboBoxHeightFrom->setCurrentText(from);
-        ui->comboBoxHeightTo->setCurrentText(to);
-    } else {
-        ui->comboBoxSizeFrom->setCurrentText(from);
-        ui->comboBoxSizeTo->setCurrentText(to);
-    }
+    ui->sizeRangeMain->setMode(mode);
+    if (!from.isEmpty()) ui->sizeRangeMain->setFrom(from);
+    if (!to.isEmpty())   ui->sizeRangeMain->setTo(to);
+
+    const QString brandMode = s.value(QStringLiteral("sizing/brandMode"), QStringLiteral("letters")).toString();
+    const QString brandFrom = s.value(QStringLiteral("sizing/brandFrom")).toString();
+    const QString brandTo   = s.value(QStringLiteral("sizing/brandTo")).toString();
+    ui->sizeRangeBrand->setMode(brandMode);
+    if (!brandFrom.isEmpty()) ui->sizeRangeBrand->setFrom(brandFrom);
+    if (!brandTo.isEmpty())   ui->sizeRangeBrand->setTo(brandTo);
 
     // Override measurement spinbox values with the product-specific ones.
     // These take priority over the generic category defaults restored by
@@ -429,6 +490,12 @@ void PaneSizing::_ensureModel(const QDir &dir)
 
     connect(m_treeModel.get(), &QAbstractItemModel::modelReset,
             this, [this]() {
+                m_productType.clear();
+                // m_productTitle is intentionally NOT cleared here: attributesFetched
+                // fires before modelReset (before endResetModel), so m_productTitle
+                // already holds the current product's title when this lambda runs.
+                // We need it for _tryGuessBrandRangeFromTitle() below, which must
+                // run after the model is populated (i.e. after endResetModel).
                 ui->listWidgetCountries->clear();
                 ui->treeViewAsins->expandAll();
                 updateButtonStates();
@@ -454,6 +521,11 @@ void PaneSizing::_ensureModel(const QDir &dir)
                         }
                     }
                 }
+
+                // Brand range guess runs here (not in attributesFetched) so that
+                // the tree model is fully populated and all child titles are scannable.
+                if (!ui->sizeRangeBrand->isRangeSelected())
+                    _tryGuessBrandRangeFromTitle();
             });
 
     connect(m_treeModel.get(), &TreeSizingAsins::variantImagesFetched,
@@ -469,6 +541,7 @@ void PaneSizing::_ensureModel(const QDir &dir)
             this, [this](const QStringList& bullets, const QStringList& materials,
                          const QString& mainImageUrl, const QString& asin,
                          const QString& title) {
+                m_productTitle = title;
                 QString text;
                 if (!bullets.isEmpty()) {
                     text += tr("Bullet points:\n");
@@ -487,6 +560,8 @@ void PaneSizing::_ensureModel(const QDir &dir)
                     m_productWorkingDir = _resolveProductDir(asin, title);
                     ui->lineEditSubWorkingDir->setText(m_productWorkingDir.absolutePath());
                     _loadProductSettings();
+                    // Brand range guess is deferred to the modelReset handler, which
+                    // fires after endResetModel() when all child rows are available.
                 }
 
                 if (!mainImageUrl.isEmpty() && !asin.isEmpty())
@@ -496,29 +571,21 @@ void PaneSizing::_ensureModel(const QDir &dir)
 
 void PaneSizing::updateButtonStates()
 {
-    const bool hasAsins   = m_treeModel && m_treeModel->rowCount() > 0;
-    const bool typeOk     = ui->comboBoxSizeType->currentIndex() > 0;
-    const bool useNumbers = ui->radioButton->isChecked();
-    const bool useLetters = ui->radioButton_2->isChecked();
-    const bool fromOk = useNumbers ? ui->comboBoxSizeFrom->currentIndex() >= 0
-                      : useLetters ? ui->comboBoxLetterSizeFrom->currentIndex() >= 0
-                      :              ui->comboBoxHeightFrom->currentIndex() >= 0;
-    const bool toOk   = useNumbers ? ui->comboBoxSizeTo->currentIndex() >= 0
-                      : useLetters ? ui->comboBoxLetterSizeTo->currentIndex() >= 0
-                      :              ui->comboBoxHeightTo->currentIndex() >= 0;
+    const bool hasAsins = m_treeModel && m_treeModel->rowCount() > 0;
+    const bool typeOk   = ui->comboBoxSizeType->currentIndex() > 0;
+    const bool rangeOk  = ui->sizeRangeMain->isRangeSelected();
 
     ui->comboBoxSizeType->setEnabled(hasAsins);
-    ui->comboBoxSizeFrom->setEnabled(hasAsins && typeOk && useNumbers);
-    ui->comboBoxSizeTo->setEnabled(hasAsins && typeOk && useNumbers);
-    ui->buttoGenSizeTables->setEnabled(hasAsins && typeOk && fromOk && toOk);
+    ui->buttoGenSizeTables->setEnabled(hasAsins && typeOk && rangeOk);
 
     ui->toolBoxSizing->setEnabled(m_generatedSuccessfully);
     ui->buttonMakeEditable->setEnabled(m_generatedSuccessfully);
-    ui->buttonUploadSizeTable->setEnabled(m_generatedSuccessfully && hasAsins);
 
     // A+ generate: enabled when a product dir is loaded
     const bool hasProduct = m_productWorkingDir.exists();
     ui->buttonAplusGenerate->setEnabled(hasProduct);
+    ui->buttonOpenSizeTableFolder->setEnabled(hasProduct);
+    ui->buttonAddSkusFromTemplate->setEnabled(hasProduct);
 }
 
 void PaneSizing::onSizeTypeChanged(int index)
@@ -539,52 +606,13 @@ const AbstractSizeCategory* PaneSizing::_currentCategory() const
 
 void PaneSizing::_populateSizeRangeCombos()
 {
-    ui->comboBoxSizeFrom->clear();
-    ui->comboBoxSizeTo->clear();
-
     const auto *cat = _currentCategory();
     if (!cat)
         return;
 
-    const QStringList keys = cat->referenceKeys();
-    ui->comboBoxSizeFrom->addItems(keys);
-    ui->comboBoxSizeTo->addItems(keys);
-
-    ui->comboBoxSizeFrom->setCurrentIndex(-1);
-    ui->comboBoxSizeTo->setCurrentIndex(-1);
-
+    ui->sizeRangeMain->setCategory(cat);
+    ui->sizeRangeBrand->setCategory(cat);
     _tryGuessSizeRange();
-
-    const bool isHeightBased = cat && cat->referenceKey() == QStringLiteral("HEIGHT");
-    const bool hasLetters    = cat && !cat->letterSizes().isEmpty();
-
-    ui->radioButton->setEnabled(!isHeightBased);
-    ui->radioButton_2->setEnabled(hasLetters);
-    ui->radioButton_3->setEnabled(isHeightBased);
-
-    ui->comboBoxLetterSizeFrom->clear();
-    ui->comboBoxLetterSizeTo->clear();
-    if (hasLetters) {
-        ui->comboBoxLetterSizeFrom->addItems(cat->letterSizes());
-        ui->comboBoxLetterSizeTo->addItems(cat->letterSizes());
-        ui->comboBoxLetterSizeFrom->setCurrentIndex(-1);
-        ui->comboBoxLetterSizeTo->setCurrentIndex(-1);
-    }
-
-    ui->comboBoxHeightFrom->clear();
-    ui->comboBoxHeightTo->clear();
-    if (isHeightBased) {
-        ui->comboBoxHeightFrom->addItems(cat->referenceKeys());
-        ui->comboBoxHeightTo->addItems(cat->referenceKeys());
-        ui->comboBoxHeightFrom->setCurrentIndex(-1);
-        ui->comboBoxHeightTo->setCurrentIndex(-1);
-        ui->radioButton_3->setChecked(true);
-    } else if (ui->radioButton_3->isChecked()) {
-        ui->radioButton->setChecked(true);
-    }
-    if (!hasLetters && ui->radioButton_2->isChecked())
-        ui->radioButton->setChecked(true);
-    onSizeModeChanged();
 }
 
 void PaneSizing::_tryGuessSizeRange()
@@ -608,11 +636,7 @@ void PaneSizing::_tryGuessSizeRange()
         }
     }
 
-    const auto [minKey, maxKey] = cat->guessRange(rawSizes);
-    if (!minKey.isEmpty()) {
-        ui->comboBoxSizeFrom->setCurrentText(minKey);
-        ui->comboBoxSizeTo->setCurrentText(maxKey.isEmpty() ? minKey : maxKey);
-    }
+    ui->sizeRangeMain->guessRange(rawSizes);
 }
 
 void PaneSizing::_rebuildMeasurementForm()
@@ -691,20 +715,6 @@ void PaneSizing::_rebuildMeasurementForm()
     }
 }
 
-void PaneSizing::onSizeModeChanged()
-{
-    const bool useNumbers = ui->radioButton->isChecked();
-    const bool useLetters = ui->radioButton_2->isChecked();
-    const bool useHeight  = ui->radioButton_3->isChecked();
-    ui->comboBoxSizeFrom->setEnabled(useNumbers);
-    ui->comboBoxSizeTo->setEnabled(useNumbers);
-    ui->comboBoxLetterSizeFrom->setEnabled(useLetters);
-    ui->comboBoxLetterSizeTo->setEnabled(useLetters);
-    ui->comboBoxHeightFrom->setEnabled(useHeight);
-    ui->comboBoxHeightTo->setEnabled(useHeight);
-    updateButtonStates();
-}
-
 void PaneSizing::onGenSizeTablesClicked()
 {
     m_generatedSuccessfully = false;
@@ -714,14 +724,14 @@ void PaneSizing::onGenSizeTablesClicked()
         updateButtonStates();
         return;
     }
-    const bool useLetters = ui->radioButton_2->isChecked();
+    const bool useLetters = ui->sizeRangeMain->mode() == QLatin1String("letters");
+    const bool useHeight  = ui->sizeRangeMain->mode() == QLatin1String("height");
     QString keyFrom, keyTo;
     QStringList letterHeaders;
 
-    const bool useHeight  = ui->radioButton_3->isChecked();
     if (useLetters) {
-        const QString lFrom = ui->comboBoxLetterSizeFrom->currentText();
-        const QString lTo   = ui->comboBoxLetterSizeTo->currentText();
+        const QString lFrom = ui->sizeRangeMain->from();
+        const QString lTo   = ui->sizeRangeMain->to();
         keyFrom = cat->letterToKey(lFrom);
         keyTo   = cat->letterToKey(lTo);
         const QStringList allLetters = cat->letterSizes();
@@ -730,11 +740,11 @@ void PaneSizing::onGenSizeTablesClicked()
         if (fi > ti) std::swap(fi, ti);
         letterHeaders = allLetters.mid(fi, ti - fi + 1);
     } else if (useHeight) {
-        keyFrom = ui->comboBoxHeightFrom->currentText();
-        keyTo   = ui->comboBoxHeightTo->currentText();
+        keyFrom = ui->sizeRangeMain->from();
+        keyTo   = ui->sizeRangeMain->to();
     } else {
-        keyFrom = ui->comboBoxSizeFrom->currentText();
-        keyTo   = ui->comboBoxSizeTo->currentText();
+        keyFrom = ui->sizeRangeMain->from();
+        keyTo   = ui->sizeRangeMain->to();
     }
 
     QMap<QString, MeasurementInput> measurements;
@@ -772,6 +782,8 @@ void PaneSizing::onGenSizeTablesClicked()
         ui->labelGeneratedImage->setAlignment(Qt::AlignTop | Qt::AlignLeft);
 
         m_generatedSuccessfully = true;
+
+        _saveToSizeTableFolder();
 
         _saveProductSettings();
 
@@ -872,65 +884,37 @@ void PaneSizing::onAddFromTemplateClicked()
     m_treeModel->load(path);
 }
 
-void PaneSizing::onUploadSizeTableClicked()
+void PaneSizing::onOpenSizeTableFolderClicked()
 {
-    if (!m_generatedSuccessfully || !m_sizeTableModel)
+    const QString sizeTablePath = m_productWorkingDir.filePath(QStringLiteral("size-table"));
+    if (QFileInfo::exists(sizeTablePath))
+        QDesktopServices::openUrl(QUrl::fromLocalFile(sizeTablePath));
+    else if (m_productWorkingDir.exists())
+        QDesktopServices::openUrl(QUrl::fromLocalFile(m_productWorkingDir.absolutePath()));
+    else
+        QMessageBox::information(this, tr("Size-table folder"),
+                                 tr("Load a product first."));
+}
+
+void PaneSizing::onAddSkusFromTemplateClicked()
+{
+    _addSkusFromTemplate();
+}
+
+void PaneSizing::onUploadSizeImageClicked()
+{
+    if (m_groupImages.isEmpty())
         return;
 
-    static const QHash<QString, QString> kCodeToMarketplace = {
-        {"fr", "A13V1IB3VIYZZH"}, {"de", "A1PA6795UKMFR9"},
-        {"it", "APJ6JRA9NG5V4"},  {"es", "A1RKKUPIHCS9HS"},
-        {"uk", "A1F83G8C2ARO7P"}, {"nl", "A1805IZSGTT6HS"},
-        {"se", "A2NODRKZP88ZB9"}, {"pl", "A1C3SOZRARQ6R3"},
-        {"be", "AMEN7PMS3EDWL"},  {"ie", "A28R8C7NBKEWEA"},
-        {"tr", "A33AVAJ2PDY3EV"}, {"us", "ATVPDKIKX0DER"},
-        {"ca", "A2EUQ1WTGCTBG2"}, {"mx", "A1AM78C64UM0Y8"},
-        {"jp", "A1VC38T7YXB528"},
-    };
+    int imageIndex;
+    if (ui->radioButtonAppendImage->isChecked())
+        imageIndex = -1;
+    else if (ui->radioButtonReplaceLastImage->isChecked())
+        imageIndex = -2;
+    else
+        imageIndex = ui->spinBoxImagePos->value();
 
-    QStringList availableCodes, marketplaceIds;
-    for (int i = 0; i < ui->listWidgetCountries->count(); ++i) {
-        const QString text = ui->listWidgetCountries->item(i)->text().trimmed();
-        if (text.contains(QLatin1String("(missing)")))
-            continue;
-        const QString mpId = kCodeToMarketplace.value(text.toLower());
-        if (!mpId.isEmpty()) {
-            availableCodes << text.toUpper();
-            marketplaceIds << mpId;
-        }
-    }
-
-    if (marketplaceIds.isEmpty()) {
-        QMessageBox::warning(this, tr("Upload"), tr("No available marketplaces found."));
-        return;
-    }
-
-    QDialog dlg(this);
-    dlg.setWindowTitle(tr("Upload Size Chart"));
-    auto *layout = new QVBoxLayout(&dlg);
-
-    layout->addWidget(new QLabel(
-        tr("Marketplaces: %1").arg(availableCodes.join(QStringLiteral(", "))), &dlg));
-
-    auto *ptLabel = new QLabel(tr("Product type (e.g. SHIRT, SHOES, PANTS):"), &dlg);
-    auto *ptEdit  = new QLineEdit(&dlg);
-    ptEdit->setPlaceholderText(QStringLiteral("SHIRT"));
-
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-
-    layout->addWidget(ptLabel);
-    layout->addWidget(ptEdit);
-    layout->addWidget(buttons);
-
-    if (dlg.exec() != QDialog::Accepted)
-        return;
-    const QString productType = ptEdit->text().trimmed().toUpper();
-    if (productType.isEmpty())
-        return;
-
-    _uploadSizeChart(marketplaceIds, productType);
+    _uploadSizeImage(imageIndex);
 }
 
 static QString colorToFileSegment(const QString &color)
@@ -951,6 +935,8 @@ void PaneSizing::_downloadVariantImages(const QList<QPair<QString, QStringList>>
 {
     if (!m_productWorkingDir.exists() || colorImages.isEmpty())
         return;
+
+    m_colorVariants = colorImages;
 
     ui->listWidgetImages->clear();
     m_variantImagePaths.clear();
@@ -1238,6 +1224,94 @@ void PaneSizing::_aplusPushSizeChart()
     _refreshSizeGroupList();
 }
 
+// --- A+ workflow helpers -----------------------------------------------------
+
+void PaneSizing::_initWorkflowCombo()
+{
+    for (APlusWorkflow *wf : APlusWorkflow::all())
+        ui->comboBoxWorkflow->addItem(wf->name(), wf->id());
+
+    const QString savedId = WorkingDirectoryManager::instance()->settings()
+        ->value(QStringLiteral("aplusWorkflow")).toString();
+    const int idx = ui->comboBoxWorkflow->findData(savedId);
+    ui->comboBoxWorkflow->setCurrentIndex(idx >= 0 ? idx : 0);
+
+    _rebuildPromptTabs();
+    _loadWorkflowPrompts();
+
+    connect(ui->comboBoxWorkflow,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+                APlusWorkflow *wf = _currentWorkflow();
+                if (wf)
+                    WorkingDirectoryManager::instance()->settings()
+                        ->setValue(QStringLiteral("aplusWorkflow"), wf->id());
+                _rebuildPromptTabs();
+                _loadWorkflowPrompts();
+            });
+}
+
+void PaneSizing::_rebuildPromptTabs()
+{
+    APlusWorkflow *wf = _currentWorkflow();
+    if (!wf) return;
+    ui->tabWidgetPrompt_01->setTabText(0, wf->stepName(0));
+    ui->tabWidgetPrompt_01->setTabText(1, wf->stepName(1));
+    const bool hasStep2 = wf->stepCount() >= 3;
+    ui->tabWidgetPrompt_01->setTabVisible(2, hasStep2);
+    if (hasStep2)
+        ui->tabWidgetPrompt_01->setTabText(2, wf->stepName(2));
+    // FAQ is always the last tab; its title is set in the .ui file.
+}
+
+void PaneSizing::_loadWorkflowPrompts()
+{
+    APlusWorkflow *wf = _currentWorkflow();
+    if (!wf) return;
+    auto s = WorkingDirectoryManager::instance()->settings();
+    const QString prefix = QStringLiteral("aplus/") + wf->id() + QStringLiteral("/");
+
+    auto load = [&](QTextEdit *ed, int step, const QString &legacyKey = {}) {
+        ed->blockSignals(true);
+        QString val = s->value(prefix + QStringLiteral("step") + QString::number(step)).toString();
+        if (val.isEmpty() && !legacyKey.isEmpty())
+            val = s->value(legacyKey).toString();
+        ed->setPlainText(val);
+        ed->blockSignals(false);
+    };
+
+    if (wf->id() == QStringLiteral("generic")) {
+        load(ui->textEditPrompt_01, 0, QStringLiteral("aplusPromptDesktop"));
+        load(ui->textEditPrompt_02, 1, QStringLiteral("aplusPromptMobile"));
+    } else {
+        load(ui->textEditPrompt_01, 0);
+        load(ui->textEditPrompt_02, 1);
+        load(ui->textEditPrompt_03, 2);
+    }
+
+    {
+        ui->textEditFaqPrompt->blockSignals(true);
+        ui->textEditFaqPrompt->setPlainText(
+            s->value(QStringLiteral("aplusPromptFaq")).toString());
+        ui->textEditFaqPrompt->blockSignals(false);
+    }
+}
+
+APlusWorkflow *PaneSizing::_currentWorkflow() const
+{
+    return APlusWorkflow::findById(
+        ui->comboBoxWorkflow->currentData().toString());
+}
+
+QStringList PaneSizing::_stepInstructions() const
+{
+    return {
+        ui->textEditPrompt_01->toPlainText().trimmed(),
+        ui->textEditPrompt_02->toPlainText().trimmed(),
+        ui->textEditPrompt_03->toPlainText().trimmed(),
+    };
+}
+
 using TaskStartFn = std::function<void(int, int, const QString &)>;
 using TaskDoneFn  = std::function<void(int, int, const QString &, CliRunResult)>;
 
@@ -1418,52 +1492,100 @@ void PaneSizing::onAplusGenerateAll()
     }
     const QString description = ui->textEditAttributes->toPlainText().trimmed();
 
-    const QString imgHint = m_mainImageLocalPath.isEmpty() ? QString{}
-        : tr("A product photo is available in the working directory as \"%1\". "
-             "You may use it as reference.\n\n")
-          .arg(QFileInfo(m_mainImageLocalPath).fileName());
+    APlusWorkflow *workflow = _currentWorkflow();
+    if (!workflow) {
+        QMessageBox::warning(this, tr("Generate All"), tr("No workflow selected."));
+        return;
+    }
 
-    const QString base = tr("Product:\n") + description + QStringLiteral("\n\n") + imgHint;
     const QString workDir = m_productWorkingDir.exists()
                           ? m_productWorkingDir.absolutePath() : QString{};
+    const QString faqInstructions = ui->textEditFaqPrompt->toPlainText().trimmed();
 
-    const QString desktopInstructions = ui->textEditPrompt_01->toPlainText().trimmed();
-    const QString mobileInstructions  = ui->textEditPrompt_02->toPlainText().trimmed();
-    const QString faqInstructions     = ui->textEditFaqPrompt->toPlainText().trimmed();
+    // Collect colors from m_colorVariants (focus = first entry)
+    QStringList colors;
+    for (const auto &[color, urls] : std::as_const(m_colorVariants))
+        if (!color.isEmpty())
+            colors << color;
+    const QString focusColor = colors.isEmpty() ? QString{} : colors.first();
 
-    auto buildImagePrompt = [&](const QString &instructions, const QString &spec) -> QString {
-        QString p = base;
-        if (!instructions.isEmpty())
-            p += tr("Instructions:\n") + instructions + QStringLiteral("\n\n");
-        p += spec;
-        return p;
-    };
+    // Build main image hint (used by the workflow's preamble + by FAQ prompt below)
+    const QString mainImageHint = m_mainImageLocalPath.isEmpty() ? QString{}
+        : tr("A product photo is available in the working directory as \"%1\". "
+             "You may use it as reference.")
+          .arg(QFileInfo(m_mainImageLocalPath).fileName());
 
-    QString desktopPrompt = buildImagePrompt(desktopInstructions,
-        tr("Generate a professional Amazon A+ desktop marketing image "
-           "(970x600 px, landscape). Save as desktop.png in the current directory."));
-    QString mobilePrompt = buildImagePrompt(mobileInstructions,
-        tr("Generate a professional Amazon A+ mobile marketing image "
-           "(600x600 px, square). Save as mobile.png in the current directory."));
-    QString faqPrompt = base;
+    const QStringList stepInstrs = _stepInstructions();
+
+    // Build all image slot specs from the workflow.
+    const QList<ImageSlotSpec> slotSpecs = workflow->buildSlots(
+        m_aplusContent.get(), colors, focusColor,
+        description, mainImageHint, stepInstrs);
+
+    // Ensure all destination element directories exist for the planned slots.
+    for (const ImageSlotSpec &spec : slotSpecs)
+        m_aplusContent->dir().mkpath(spec.elementId);
+    if (m_aplusModel) { m_aplusModel->rebuild(); _rebuildAplusMenu(); }
+
+    // Build FAQ prompt (independent of the workflow image specs)
+    const QString imgHintWithGap = mainImageHint.isEmpty()
+        ? QString{}
+        : mainImageHint + QStringLiteral("\n\n");
+    QString faqPrompt = tr("Product:\n") + description + QStringLiteral("\n\n") + imgHintWithGap;
     if (!faqInstructions.isEmpty())
         faqPrompt += tr("Instructions:\n") + faqInstructions + QStringLiteral("\n\n");
     faqPrompt += tr("Generate a concise, engaging Amazon A+ Content FAQ section for "
                     "this product in English. Output as a list of question/answer pairs in plain text.");
 
-    // --- 3-tab prompt review dialog ---
+    // --- Prompt review dialog ---
+    // For clothing: show one representative prompt per workflow step (desktop only).
+    // For generic: show desktop + mobile of the first slot, same as before.
+    QString groupShotPreview, perColorPreview, detailPreview;
+    for (const ImageSlotSpec &spec : slotSpecs) {
+        if (spec.elementId == QStringLiteral("image_group") && groupShotPreview.isEmpty())
+            groupShotPreview = spec.desktopPrompt;
+        else if (spec.elementId.startsWith(QStringLiteral("image_color_")) && perColorPreview.isEmpty())
+            perColorPreview = spec.desktopPrompt;
+        else if (spec.elementId == QStringLiteral("image_detail") && detailPreview.isEmpty())
+            detailPreview = spec.desktopPrompt;
+    }
+    const int imageSlotCount = slotSpecs.size();
+
     QDialog reviewDlg(this);
     reviewDlg.setWindowTitle(tr("Review prompts — %1").arg(cli->getName()));
     reviewDlg.resize(750, 520);
     auto *dlgLayout = new QVBoxLayout(&reviewDlg);
+
+    const QString summary = tr("Will generate %1 image slot(s) × 2 (desktop + mobile) = %2 images, plus FAQ.")
+        .arg(imageSlotCount).arg(imageSlotCount * 2);
+    dlgLayout->addWidget(new QLabel(summary, &reviewDlg));
+
     auto *tabs = new QTabWidget(&reviewDlg);
-    auto *desktopEdit = new QTextEdit(); desktopEdit->setPlainText(desktopPrompt);
-    auto *mobileEdit  = new QTextEdit(); mobileEdit->setPlainText(mobilePrompt);
-    auto *faqEdit     = new QTextEdit(); faqEdit->setPlainText(faqPrompt);
-    tabs->addTab(desktopEdit, tr("Desktop image"));
-    tabs->addTab(mobileEdit,  tr("Mobile image"));
-    tabs->addTab(faqEdit,     tr("FAQ"));
+    if (workflow->id() == QStringLiteral("clothing")) {
+        if (!groupShotPreview.isEmpty()) {
+            auto *ed = new QTextEdit(); ed->setPlainText(groupShotPreview);
+            tabs->addTab(ed, tr("Group Shot (example)"));
+        }
+        if (!perColorPreview.isEmpty()) {
+            auto *ed = new QTextEdit(); ed->setPlainText(perColorPreview);
+            tabs->addTab(ed, tr("Per-Color (example)"));
+        }
+        if (!detailPreview.isEmpty()) {
+            auto *ed = new QTextEdit(); ed->setPlainText(detailPreview);
+            tabs->addTab(ed, tr("Detail / Fabric"));
+        }
+    } else {
+        if (!slotSpecs.isEmpty()) {
+            auto *desktopEdit = new QTextEdit(); desktopEdit->setPlainText(slotSpecs.first().desktopPrompt);
+            auto *mobileEdit  = new QTextEdit(); mobileEdit->setPlainText(slotSpecs.first().mobilePrompt);
+            tabs->addTab(desktopEdit, tr("Desktop image"));
+            tabs->addTab(mobileEdit,  tr("Mobile image"));
+        }
+    }
+    auto *faqEdit = new QTextEdit(); faqEdit->setPlainText(faqPrompt);
+    tabs->addTab(faqEdit, tr("FAQ"));
     dlgLayout->addWidget(tabs);
+
     auto *btns = new QDialogButtonBox(&reviewDlg);
     btns->addButton(tr("Generate All"), QDialogButtonBox::AcceptRole);
     btns->addButton(QDialogButtonBox::Cancel);
@@ -1474,9 +1596,8 @@ void PaneSizing::onAplusGenerateAll()
     if (reviewDlg.exec() != QDialog::Accepted)
         return;
 
-    const QString finalDesktop = desktopEdit->toPlainText();
-    const QString finalMobile  = mobileEdit->toPlainText();
-    const QString finalFaq     = faqEdit->toPlainText();
+    // FAQ prompt may have been edited by the user in the dialog.
+    const QString finalFaq = faqEdit->toPlainText();
 
     // Collect unique non-English target languages from available countries
     QList<QPair<QString,QString>> targetLangs; // (countryCode, "French" / "German" / ...)
@@ -1495,26 +1616,13 @@ void PaneSizing::onAplusGenerateAll()
     // --- Build sequential task list ---
     QList<CliTask> tasks;
 
-    // Auto-create default image slots if none exist yet.
-    {
-        int imgCount = 0;
-        for (const APlusElement &el : m_aplusContent->elements())
-            if (el.type == APlusElementType::Image) ++imgCount;
-        if (imgCount == 0) {
-            for (int i = 0; i < 2; ++i)
-                m_aplusContent->ensureImageElement(i);
-            if (m_aplusModel) { m_aplusModel->rebuild(); _rebuildAplusMenu(); }
-        }
-    }
-
     // Accumulates absolute paths of every image file produced, for the assessment step.
     auto generatedImages = QSharedPointer<QStringList>::create();
 
-    // One desktop + mobile task pair per image slot
-    for (const APlusElement &el : m_aplusContent->elements()) {
-        if (el.type != APlusElementType::Image) continue;
-
-        const QString elemId = el.id;
+    // One desktop + mobile task pair per workflow slot
+    for (const ImageSlotSpec &spec : slotSpecs) {
+        const QString elemId = spec.elementId;
+        const QString displayName = spec.displayName;
         const QDir elemDir(m_aplusContent->dir().filePath(elemId));
         elemDir.mkpath(QStringLiteral("."));
         const QString elemWorkDir = elemDir.absolutePath();
@@ -1523,8 +1631,8 @@ void PaneSizing::onAplusGenerateAll()
         auto beforeSnap = QSharedPointer<QStringList>::create();
 
         CliTask desktopTask;
-        desktopTask.label   = tr("Desktop image — %1").arg(el.displayName);
-        desktopTask.prompt  = finalDesktop;
+        desktopTask.label   = tr("Desktop image — %1").arg(displayName);
+        desktopTask.prompt  = spec.desktopPrompt;
         desktopTask.workDir = elemWorkDir;
         desktopTask.onBefore = [beforeSnap, elemDir]() {
             *beforeSnap = elemDir.entryList({QStringLiteral("*.png"),
@@ -1554,14 +1662,14 @@ void PaneSizing::onAplusGenerateAll()
         tasks.append(desktopTask);
 
         CliTask mobileTask;
-        mobileTask.label   = tr("Mobile image — %1").arg(el.displayName);
-        mobileTask.prompt  = finalMobile;
+        mobileTask.label   = tr("Mobile image — %1").arg(displayName);
+        mobileTask.prompt  = spec.mobilePrompt;
         mobileTask.workDir = elemWorkDir;
         mobileTask.onBefore = [beforeSnap, elemDir]() {
             *beforeSnap = elemDir.entryList({QStringLiteral("*.png"),
                 QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files);
         };
-        mobileTask.onDone = [this, elemDir, beforeSnap, filePair, elemId, el,
+        mobileTask.onDone = [this, elemDir, beforeSnap, filePair, elemId, displayName,
                               generatedImages](CliRunResult r) {
             const QString preferred = elemDir.filePath(QStringLiteral("mobile.png"));
             if (QFileInfo::exists(preferred)) {
@@ -1588,7 +1696,7 @@ void PaneSizing::onAplusGenerateAll()
             ver.generated   = QDateTime::currentDateTime();
             ver.desktopFile = aplusDir.relativeFilePath(filePair->first);
             ver.mobileFile  = aplusDir.relativeFilePath(filePair->second);
-            m_aplusContent->pushVersion(elemId, APlusElementType::Image, el.displayName, ver);
+            m_aplusContent->pushVersion(elemId, APlusElementType::Image, displayName, ver);
             if (m_aplusModel) m_aplusModel->rebuild();
         };
         tasks.append(mobileTask);
@@ -2651,72 +2759,681 @@ void PaneSizing::_runCliPrompt(const QString &executable, const QStringList &arg
     }
 }
 
-QCoro::Task<void> PaneSizing::_uploadSizeChart(QStringList marketplaceIds, QString productType)
+void PaneSizing::_tryGuessBrandRangeFromTitle()
 {
-    // Build header row: blank label cell + size column labels from horizontal header
-    QStringList headerCells;
-    headerCells << QString{};
-    for (int c = 1; c < m_sizeTableModel->columnCount(); ++c) {
-        auto *hItem = m_sizeTableModel->horizontalHeaderItem(c);
-        headerCells << (hItem ? hItem->text() : QString::number(c));
-    }
+    const auto *cat = _currentCategory();
+    if (!cat || cat->letterSizes().isEmpty())
+        return;
 
-    // Build data rows from the model
-    QList<QStringList> dataRows;
-    for (int r = 0; r < m_sizeTableModel->rowCount(); ++r) {
-        QStringList row;
-        for (int c = 0; c < m_sizeTableModel->columnCount(); ++c) {
-            auto *it = m_sizeTableModel->item(r, c);
-            row << (it ? it->text() : QString{});
-        }
-        dataRows << row;
-    }
+    // Scan all available title strings for "LETTER=NUMBER" patterns (e.g. "S=8", "M=10").
+    // Check parent title first, then every child variant title in the tree.
+    static const QRegularExpression re(QStringLiteral(R"(([A-Z]{1,3})\s*=\s*(\d+))"));
 
-    // Collect all child SKUs from the tree model
-    QStringList skus;
+    QStringList titlesToScan;
+    if (!m_productTitle.isEmpty())
+        titlesToScan << m_productTitle;
     if (m_treeModel) {
         for (int i = 0; i < m_treeModel->rowCount(); ++i) {
-            const QModelIndex parentIdx = m_treeModel->index(i, 0);
-            for (int j = 0; j < m_treeModel->rowCount(parentIdx); ++j) {
-                const QModelIndex skuIdx =
-                    m_treeModel->index(j, TreeSizingAsins::SKU, parentIdx);
-                const QString sku =
-                    m_treeModel->data(skuIdx, Qt::DisplayRole).toString().trimmed();
-                if (!sku.isEmpty())
-                    skus << sku;
+            const QModelIndex parent = m_treeModel->index(i, 0);
+            for (int j = 0; j < m_treeModel->rowCount(parent); ++j) {
+                const QString t = m_treeModel->data(
+                    m_treeModel->index(j, TreeSizingAsins::Title, parent),
+                    Qt::DisplayRole).toString().trimmed();
+                if (!t.isEmpty())
+                    titlesToScan << t;
             }
         }
     }
 
-    if (skus.isEmpty()) {
-        QMessageBox::warning(this, tr("Upload"), tr("No SKUs found in the tree."));
+    // Build letter→order map from the category so we can sort letters correctly
+    const QStringList catLetters = cat->letterSizes();
+    auto letterRank = [&](const QString &l) { return catLetters.indexOf(l); };
+
+    // Collect unique letters found across all titles; only keep those known to the category
+    QSet<QString> foundLetters;
+    for (const QString &title : std::as_const(titlesToScan)) {
+        auto it = re.globalMatch(title);
+        while (it.hasNext()) {
+            const auto m = it.next();
+            const QString letter = m.captured(1);
+            if (letterRank(letter) >= 0)
+                foundLetters.insert(letter);
+        }
+    }
+
+    if (!foundLetters.isEmpty()) {
+        // Sort by category order and take the first/last
+        QStringList sorted(foundLetters.begin(), foundLetters.end());
+        std::sort(sorted.begin(), sorted.end(),
+                  [&](const QString &a, const QString &b) {
+                      return letterRank(a) < letterRank(b);
+                  });
+        ui->sizeRangeBrand->setMode(QStringLiteral("letters"));
+        ui->sizeRangeBrand->setFrom(sorted.first());
+        ui->sizeRangeBrand->setTo(sorted.last());
+        return;
+    }
+
+    // Fallback: no X=N patterns found — infer the letter range from the number of
+    // size columns in the current main range (lower letter = lower size).
+    if (!ui->sizeRangeMain->isRangeSelected())
+        return;
+    const QStringList mainKeys = cat->referenceKeys();
+    const int fi = mainKeys.indexOf(ui->sizeRangeMain->from());
+    const int ti = mainKeys.indexOf(ui->sizeRangeMain->to());
+    if (fi < 0 || ti < 0)
+        return;
+    const int nCols = qAbs(ti - fi) + 1;
+    if (nCols > catLetters.size())
+        return;
+    ui->sizeRangeBrand->setMode(QStringLiteral("letters"));
+    ui->sizeRangeBrand->setFrom(catLetters.first());
+    ui->sizeRangeBrand->setTo(catLetters.value(nCols - 1));
+}
+
+QCoro::Task<void> PaneSizing::_saveToSizeTableFolder()
+{
+    if (!m_productWorkingDir.exists() || !m_sizeTableModel)
+        co_return;
+
+    // Collect child ASINs from tree model
+    QStringList childAsins;
+    if (m_treeModel) {
+        for (int i = 0; i < m_treeModel->rowCount(); ++i) {
+            const QModelIndex parentIdx = m_treeModel->index(i, 0);
+            for (int j = 0; j < m_treeModel->rowCount(parentIdx); ++j) {
+                const QString asin = m_treeModel->data(
+                    m_treeModel->index(j, TreeSizingAsins::ASIN, parentIdx),
+                    Qt::DisplayRole).toString().trimmed();
+                if (!asin.isEmpty())
+                    childAsins << asin;
+            }
+        }
+    }
+
+    // --- Determine product type ---
+    // First check settings.ini (cached from previous run)
+    if (m_productType.isEmpty() && m_productWorkingDir.exists()) {
+        QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                     QSettings::IniFormat);
+        m_productType = ps.value(QStringLiteral("sizing/productType")).toString();
+    }
+
+    // Try API if still empty and we can find a SKU
+    if (m_productType.isEmpty() && !childAsins.isEmpty() && m_productWorkingDir.exists()) {
+        // Look for a cached SKU in settings.ini
+        QString sku;
+        QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                     QSettings::IniFormat);
+        for (const QString &asin : childAsins) {
+            sku = ps.value(QStringLiteral("sizing/skus/") + asin).toString();
+            if (!sku.isEmpty()) break;
+        }
+
+        if (!sku.isEmpty()) {
+            const QString mpId = firstMarketplaceIdFromCountryList(ui->listWidgetCountries);
+
+            co_await m_api->fetchListingProductType(mpId, sku, &m_productType);
+
+            if (!m_productType.isEmpty()) {
+                ps.setValue(QStringLiteral("sizing/productType"), m_productType);
+            }
+        }
+    }
+
+    // If still empty, ask the user
+    if (m_productType.isEmpty()) {
+        bool ok = false;
+        const QString entered = QInputDialog::getText(
+            this, tr("Product Type"),
+            tr("Enter the Amazon product type (e.g. DRESS, SHIRT, SHOES):"),
+            QLineEdit::Normal, {}, &ok);
+        if (!ok || entered.trimmed().isEmpty())
+            co_return;
+        m_productType = entered.trimmed().toUpper();
+        if (m_productWorkingDir.exists()) {
+            QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                         QSettings::IniFormat);
+            ps.setValue(QStringLiteral("sizing/productType"), m_productType);
+        }
+    }
+
+    // --- Get/ask for the template for this product type ---
+    auto wdSettings = WorkingDirectoryManager::instance()->settings();
+    const QString templateKey = QStringLiteral("productTypeTemplates/") + m_productType;
+    QString templatePath = wdSettings->value(templateKey).toString();
+
+    if (templatePath.isEmpty() || !QFileInfo::exists(templatePath)) {
+        templatePath = QFileDialog::getOpenFileName(
+            this,
+            tr("Select template for product type \"%1\"").arg(m_productType),
+            {}, tr("Excel (*.xlsx)"));
+        if (templatePath.isEmpty())
+            co_return;
+        wdSettings->setValue(templateKey, templatePath);
+    }
+
+    // --- Create size-table/ folder ---
+    m_productWorkingDir.mkpath(QStringLiteral("size-table"));
+    const QString sizeTablePath = m_productWorkingDir.filePath(QStringLiteral("size-table"));
+
+    // --- Write asin.txt ---
+    if (!childAsins.isEmpty()) {
+        QFile f(sizeTablePath + QStringLiteral("/asin.txt"));
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text))
+            f.write(childAsins.join(QLatin1Char('\n')).toUtf8());
+    }
+
+    // --- Fill template and save ---
+    QXlsx::Document doc(templatePath);
+    if (!doc.load()) {
+        QMessageBox::warning(this, tr("Template error"),
+                             tr("Could not open template file:\n%1").arg(templatePath));
         co_return;
     }
 
+    // Detect template type and fill:
+    //
+    // Type A – Amazon listing template: has "external_product_id" / "asin" column header.
+    //          Write child ASINs into that column.
+    // Type B – Amazon size chart template: has "ROW" markers in column A, data starts at
+    //          column C (BrandSize). Transpose the size table model: each size column (one
+    //          size) becomes one ROW, country-group values mapped to the correct data column
+    //          via the template's COLUMN_HEADERS_STANDARD_DIMENSION_NAME row.
+
+    // Scan first 10 rows for an ASIN column header (Type A detection)
+    int asinCol    = -1;
+    int asinHdrRow = -1;
+    for (int row = 1; row <= 10 && asinCol < 0; ++row) {
+        for (int col = 1; col <= 500; ++col) {
+            const QVariant v = doc.read(row, col);
+            if (!v.isValid()) continue;
+            const QString s = v.toString().trimmed();
+            if (s.compare(QStringLiteral("external_product_id"), Qt::CaseInsensitive) == 0 ||
+                s.compare(QStringLiteral("asin"), Qt::CaseInsensitive) == 0) {
+                asinCol    = col;
+                asinHdrRow = row;
+                break;
+            }
+        }
+    }
+
+    if (asinCol > 0) {
+        // Listing template: write child ASINs, skip the required/optional markers row
+        const int firstDataRow = asinHdrRow + 2;
+        for (int i = 0; i < childAsins.size(); ++i)
+            doc.write(firstDataRow + i, asinCol, childAsins.at(i));
+
+    } else if (m_sizeTableModel) {
+        // Size chart template (Type B): fill ROW rows with transposed size table data.
+
+        // Template-column → model-row label fragments mapping.
+        // Maps the template's standard dimension name (e.g. "FrSize") to fragments
+        // that appear in the model's row label (e.g. "FR/BE/ES/TR" contains "FR").
+        static const QList<QPair<QString, QStringList>> kColMap = {
+            // Country-equivalent size columns
+            {QStringLiteral("FrSize"),           {QStringLiteral("FR"), QStringLiteral("BE")}},
+            {QStringLiteral("UkSize"),           {QStringLiteral("UK"), QStringLiteral("GB")}},
+            {QStringLiteral("ItSize"),           {QStringLiteral("IT")}},
+            {QStringLiteral("EsSize"),           {QStringLiteral("ES"), QStringLiteral("FR")}},
+            {QStringLiteral("EuSize"),           {QStringLiteral("DE"), QStringLiteral("EU"), QStringLiteral("NL")}},
+            {QStringLiteral("UsSize"),           {QStringLiteral("US"), QStringLiteral("COM"), QStringLiteral("CA")}},
+            {QStringLiteral("AuSize"),           {QStringLiteral("AU"), QStringLiteral("UK")}},
+            {QStringLiteral("JpSize"),           {QStringLiteral("JP")}},
+            {QStringLiteral("CaSize"),           {QStringLiteral("CA"), QStringLiteral("US")}},
+            {QStringLiteral("MxSize"),           {QStringLiteral("MX"), QStringLiteral("US")}},
+            {QStringLiteral("BrSize"),           {QStringLiteral("BR")}},
+            {QStringLiteral("KrSize"),           {QStringLiteral("KR")}},
+            {QStringLiteral("CnSize"),           {QStringLiteral("CN")}},
+            // Body measurement columns
+            {QStringLiteral("BustSize"),         {QStringLiteral("Bust")}},
+            {QStringLiteral("WaistSize"),        {QStringLiteral("Waist")}},
+            {QStringLiteral("HipSize"),          {QStringLiteral("Hip")}},
+            {QStringLiteral("NeckSize"),         {QStringLiteral("Neck")}},
+            {QStringLiteral("SleeveLengthSize"), {QStringLiteral("Sleeve")}},
+            {QStringLiteral("CuffSize"),         {QStringLiteral("Cuff")}},
+            {QStringLiteral("BicepSize"),        {QStringLiteral("Bicep")}},
+            {QStringLiteral("ShoulderWidthSize"),{QStringLiteral("Shoulder")}},
+            {QStringLiteral("StrapLengthSize"),  {QStringLiteral("Strap")}},
+        };
+
+        // Strip " cm / X in" suffix from measurement values (e.g. "86 cm / 33¾ in" → "86").
+        // Country-size values (e.g. "36") pass through unchanged.
+        auto extractCmValue = [](const QString &val) -> QString {
+            const int idx = val.indexOf(QLatin1String(" cm"));
+            return (idx > 0) ? val.left(idx) : val;
+        };
+
+        // Read ALL row labels from model column 0 (country groups + measurements)
+        const int nGroupRows = _currentCategory()
+            ? static_cast<int>(_currentCategory()->countryGroups().size())
+            : m_sizeTableModel->rowCount();
+        QStringList modelRowLabels;
+        for (int r = 0; r < m_sizeTableModel->rowCount(); ++r) {
+            auto *it = m_sizeTableModel->item(r, 0);
+            modelRowLabels << (it ? it->text() : QString{});
+        }
+
+        // For a given template column header, return the model row index whose label
+        // matches one of the key fragments (first match wins).
+        auto findModelRow = [&](const QString &colHeader) -> int {
+            for (const auto &[hdrFrag, labelFrags] : kColMap) {
+                if (colHeader.compare(hdrFrag, Qt::CaseInsensitive) != 0)
+                    continue;
+                for (const QString &lFrag : labelFrags)
+                    for (int r = 0; r < modelRowLabels.size(); ++r)
+                        if (modelRowLabels[r].contains(lFrag, Qt::CaseInsensitive))
+                            return r;
+            }
+            return -1;
+        };
+
+        // Parse the COLUMN_HEADERS_STANDARD_DIMENSION_NAME row to get ordered column headers.
+        // Data always starts at column C (index 3) in this Amazon template format;
+        // the first column there is BrandSize (the size label), subsequent columns are
+        // country-standard sizes.
+        constexpr int kDataStartCol = 3; // column C
+        QList<int> colModelRows;         // colModelRows[i] → model row for template col kDataStartCol+1+i
+        for (int row = 1; row <= 50; ++row) {
+            const QVariant va = doc.read(row, 1);
+            if (!va.isValid()) continue;
+            if (va.toString().trimmed().compare(
+                    QStringLiteral("COLUMN_HEADERS_STANDARD_DIMENSION_NAME"),
+                    Qt::CaseInsensitive) != 0)
+                continue;
+            for (int col = kDataStartCol + 1; col <= kDataStartCol + 30; ++col) {
+                const QVariant hv = doc.read(row, col);
+                if (!hv.isValid() || hv.toString().trimmed().isEmpty()) break;
+                colModelRows << findModelRow(hv.toString().trimmed());
+            }
+            break;
+        }
+        // Fallback: if no header row found, write country-group rows in model order
+        if (colModelRows.isEmpty())
+            for (int r = 0; r < nGroupRows; ++r)
+                colModelRows << r;
+
+        // Collect ROW rows (column A = "ROW")
+        const int nSizes = m_sizeTableModel->columnCount() - 1;
+        QList<int> rowRows;
+        for (int row = 1; row <= 500 && rowRows.size() < nSizes; ++row) {
+            const QVariant va = doc.read(row, 1);
+            if (!va.isValid()) continue;
+            if (va.toString().trimmed().compare(QStringLiteral("ROW"), Qt::CaseInsensitive) == 0)
+                rowRows << row;
+        }
+
+        // Write: each size column in the model → one ROW row in the template
+        for (int si = 0; si < nSizes && si < rowRows.size(); ++si) {
+            const int tRow = rowRows[si];
+            // Column C (BrandSize): brand label from the brand size widget
+            {
+                const auto *cat = _currentCategory();
+                if (cat) {
+                    const QString bMode = ui->sizeRangeBrand->mode();
+                    const QString bFrom = ui->sizeRangeBrand->from();
+                    const QString bTo   = ui->sizeRangeBrand->to();
+                    QStringList brandLabels;
+                    if (bMode == QLatin1String("letters")) {
+                        const QStringList allLetters = cat->letterSizes();
+                        int bfi = allLetters.indexOf(bFrom);
+                        int bti = allLetters.indexOf(bTo);
+                        if (bfi < 0) bfi = 0;
+                        if (bti < 0) bti = allLetters.size() - 1;
+                        if (bfi > bti) std::swap(bfi, bti);
+                        brandLabels = allLetters.mid(bfi, bti - bfi + 1);
+                    } else {
+                        const QStringList allKeys = cat->referenceKeys();
+                        int bfi = allKeys.indexOf(bFrom);
+                        int bti = allKeys.indexOf(bTo);
+                        if (bfi < 0) bfi = 0;
+                        if (bti < 0) bti = allKeys.size() - 1;
+                        if (bfi > bti) std::swap(bfi, bti);
+                        brandLabels = allKeys.mid(bfi, bti - bfi + 1);
+                    }
+                    const QString brandLabel = brandLabels.value(si);
+                    if (!brandLabel.isEmpty())
+                        doc.write(tRow, kDataStartCol, brandLabel);
+                }
+            }
+            // Remaining data columns: size equivalences and measurements via column mapping
+            for (int ci = 0; ci < colModelRows.size(); ++ci) {
+                const int mr = colModelRows[ci];
+                if (mr < 0 || mr >= m_sizeTableModel->rowCount()) continue;
+                auto *item = m_sizeTableModel->item(mr, si + 1);
+                if (item && !item->text().isEmpty())
+                    doc.write(tRow, kDataStartCol + 1 + ci, extractCmValue(item->text()));
+            }
+        }
+    }
+
+    const QString destPath = sizeTablePath + QStringLiteral("/filled_template.xlsx");
+    if (!doc.saveAs(destPath)) {
+        QMessageBox::warning(this, tr("Template error"),
+                             tr("Could not save filled template to:\n%1").arg(destPath));
+    }
+
+    co_return;
+}
+
+QCoro::Task<void> PaneSizing::_addSkusFromTemplate()
+{
+    if (!m_productWorkingDir.exists()) {
+        QMessageBox::warning(this, tr("Add SKUs"), tr("Load a product first."));
+        co_return;
+    }
+
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Open listing template"), {}, tr("Excel (*.xlsx)"));
+    if (path.isEmpty())
+        co_return;
+
+    const QStringList skus = readSkusFromXlsx(path);
+    if (skus.isEmpty()) {
+        QMessageBox::information(this, tr("Add SKUs"),
+            tr("No SKUs found in the template.\n"
+               "Looked for columns: seller_sku, item_sku, sku."));
+        co_return;
+    }
+
+    const QString mpId = firstMarketplaceIdFromCountryList(ui->listWidgetCountries);
+
+    // Progress dialog
+    QDialog progressDlg(this);
+    progressDlg.setWindowTitle(tr("Fetching ASINs from SKUs"));
+    progressDlg.resize(520, 340);
+    auto *dlgLayout  = new QVBoxLayout(&progressDlg);
+    auto *statusLbl  = new QLabel(tr("Looking up ASINs…"), &progressDlg);
+    auto *progressBar = new QProgressBar(&progressDlg);
+    progressBar->setRange(0, skus.size());
+    progressBar->setValue(0);
+    auto *logEdit = new QPlainTextEdit(&progressDlg);
+    logEdit->setReadOnly(true);
+    logEdit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    auto *closeBtn = new QPushButton(tr("Close"), &progressDlg);
+    closeBtn->setEnabled(false);
+    connect(closeBtn, &QPushButton::clicked, &progressDlg, &QDialog::accept);
+    dlgLayout->addWidget(statusLbl);
+    dlgLayout->addWidget(progressBar);
+    dlgLayout->addWidget(logEdit);
+    dlgLayout->addWidget(closeBtn);
+    progressDlg.show();
+    QCoreApplication::processEvents();
+
+    QStringList foundAsins;
+    int idx = 0;
+    for (const QString &sku : skus) {
+        ++idx;
+        statusLbl->setText(tr("SKU %1 / %2: %3").arg(idx).arg(skus.size()).arg(sku));
+        progressBar->setValue(idx - 1);
+        QCoreApplication::processEvents();
+
+        QString asin;
+        co_await m_api->fetchAsinBySku(mpId, sku, &asin);
+
+        if (!asin.isEmpty()) {
+            logEdit->appendPlainText(QStringLiteral("  %1 → %2").arg(sku, asin));
+            if (!foundAsins.contains(asin))
+                foundAsins << asin;
+        } else {
+            logEdit->appendPlainText(QStringLiteral("  %1 → not found").arg(sku));
+        }
+        progressBar->setValue(idx);
+        logEdit->moveCursor(QTextCursor::End);
+        QCoreApplication::processEvents();
+    }
+
+    // Merge with existing asins-extra.txt
+    m_productWorkingDir.mkpath(QStringLiteral("size-table"));
+    const QString outPath =
+        m_productWorkingDir.filePath(QStringLiteral("size-table/asins-extra.txt"));
+
+    QStringList merged;
+    {
+        QFile f(outPath);
+        if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            for (const QString &a : QString::fromUtf8(f.readAll()).split(QLatin1Char(','))) {
+                const QString t = a.trimmed();
+                if (!t.isEmpty() && !merged.contains(t))
+                    merged << t;
+            }
+        }
+    }
+    for (const QString &a : foundAsins)
+        if (!merged.contains(a))
+            merged << a;
+
+    {
+        QFile f(outPath);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text))
+            f.write(merged.join(QLatin1Char(',')).toUtf8());
+    }
+
+    statusLbl->setText(tr("Done — found %1 ASIN(s), saved to asins-extra.txt").arg(foundAsins.size()));
+    logEdit->appendPlainText(
+        tr("\nTotal in asins-extra.txt: %1 ASIN(s)").arg(merged.size()));
+    closeBtn->setEnabled(true);
+    progressDlg.exec();
+    co_return;
+}
+
+QCoro::Task<void> PaneSizing::_resolveSkus(QList<AsinSku> &items,
+                                            const QString &marketplaceId,
+                                            bool *cancelled)
+{
+    *cancelled = false;
+
+    // Step 1: load SKUs saved from a previous upload (settings.ini)
+    if (m_productWorkingDir.exists()) {
+        QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                    QSettings::IniFormat);
+        for (auto &item : items)
+            if (item.sku.isEmpty())
+                item.sku = s.value(QStringLiteral("sizing/skus/") + item.asin).toString();
+    }
+
+    // Step 2: fetch ALL listings (FBA + MFN) via Reports API for any still-missing
+    {
+        bool anyMissing = false;
+        for (const auto &item : items)
+            if (item.sku.isEmpty()) { anyMissing = true; break; }
+
+        if (anyMissing) {
+            QMessageBox infoBox(QMessageBox::Information, tr("Fetching SKUs"),
+                                tr("Requesting all-listings report from Amazon...\n"
+                                   "This can take up to 3 minutes. Please wait."),
+                                QMessageBox::NoButton, this);
+            infoBox.setStandardButtons(QMessageBox::NoButton);
+            infoBox.show();
+            QCoreApplication::processEvents();
+
+            QHash<QString, QString> reportMap;
+            co_await m_api->fetchAllSkusViaReport(marketplaceId, &reportMap);
+            infoBox.hide();
+
+            if (reportMap.isEmpty() && !m_api->lastError().isEmpty()) {
+                QMessageBox::warning(this, tr("Report error"),
+                                     tr("Could not fetch listings report:\n%1\n\n"
+                                        "Falling back to manual SKU entry.")
+                                     .arg(m_api->lastError()));
+            }
+            for (auto &item : items)
+                if (item.sku.isEmpty())
+                    item.sku = reportMap.value(item.asin);
+
+            if (m_productWorkingDir.exists()) {
+                QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                            QSettings::IniFormat);
+                for (const auto &item : items)
+                    if (!item.sku.isEmpty())
+                        s.setValue(QStringLiteral("sizing/skus/") + item.asin, item.sku);
+            }
+        }
+    }
+
+    // Step 3: manual dialog for any still-missing SKUs
+    {
+        bool anyMissing = false;
+        for (const auto &item : items)
+            if (item.sku.isEmpty()) { anyMissing = true; break; }
+
+        if (anyMissing) {
+            QDialog skuDlg(this);
+            skuDlg.setWindowTitle(tr("Enter SKUs"));
+            auto *skuLayout = new QVBoxLayout(&skuDlg);
+            skuLayout->addWidget(new QLabel(
+                tr("Enter the seller SKU for each ASIN.\n"
+                   "These will be saved for future uploads."), &skuDlg));
+
+            auto *table = new QTableWidget(items.size(), 2, &skuDlg);
+            table->setHorizontalHeaderLabels({tr("ASIN"), tr("Seller SKU")});
+            table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+            table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+            table->verticalHeader()->setVisible(false);
+            for (int i = 0; i < items.size(); ++i) {
+                auto *asinItem = new QTableWidgetItem(items.at(i).asin);
+                asinItem->setFlags(asinItem->flags() & ~Qt::ItemIsEditable);
+                table->setItem(i, 0, asinItem);
+                table->setItem(i, 1, new QTableWidgetItem(items.at(i).sku));
+            }
+            skuLayout->addWidget(table);
+            auto *skuButtons = new QDialogButtonBox(
+                QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &skuDlg);
+            connect(skuButtons, &QDialogButtonBox::accepted, &skuDlg, &QDialog::accept);
+            connect(skuButtons, &QDialogButtonBox::rejected, &skuDlg, &QDialog::reject);
+            skuLayout->addWidget(skuButtons);
+            skuDlg.resize(500, 350);
+
+            if (skuDlg.exec() != QDialog::Accepted) {
+                *cancelled = true;
+                co_return;
+            }
+
+            QSettings *s = m_productWorkingDir.exists()
+                ? new QSettings(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                                QSettings::IniFormat)
+                : nullptr;
+            for (int i = 0; i < items.size(); ++i) {
+                const QString entered = table->item(i, 1)
+                                            ? table->item(i, 1)->text().trimmed()
+                                            : QString{};
+                items[i].sku = entered;
+                if (s && !entered.isEmpty())
+                    s->setValue(QStringLiteral("sizing/skus/") + items.at(i).asin, entered);
+            }
+            delete s;
+        }
+    }
+    co_return;
+}
+
+QCoro::Task<void> PaneSizing::_uploadSizeImage(int imageIndex)
+{
+    const int row = ui->listWidgetSizeGroups->currentRow();
+    if (row < 0 || row >= m_groupImages.size()) {
+        QMessageBox::warning(this, tr("Upload"), tr("No size image selected."));
+        co_return;
+    }
+    const QImage img = m_groupImages.at(row);
+
+    QByteArray jpegData;
+    {
+        QBuffer buf(&jpegData);
+        buf.open(QIODevice::WriteOnly);
+        img.save(&buf, "JPEG", 90);
+    }
+    if (jpegData.isEmpty()) {
+        QMessageBox::warning(this, tr("Upload"), tr("Failed to convert size image to JPEG."));
+        co_return;
+    }
+
+    // Collect child ASINs + whatever SKUs are already known from the tree
+    QList<AsinSku> treeItems;
+    if (m_treeModel) {
+        for (int i = 0; i < m_treeModel->rowCount(); ++i) {
+            const QModelIndex parentIdx = m_treeModel->index(i, 0);
+            for (int j = 0; j < m_treeModel->rowCount(parentIdx); ++j) {
+                const QString asin = m_treeModel->data(
+                    m_treeModel->index(j, TreeSizingAsins::ASIN, parentIdx),
+                    Qt::DisplayRole).toString().trimmed();
+                const QString sku = m_treeModel->data(
+                    m_treeModel->index(j, TreeSizingAsins::SKU, parentIdx),
+                    Qt::DisplayRole).toString().trimmed();
+                if (!asin.isEmpty())
+                    treeItems << AsinSku{asin, sku};
+            }
+        }
+    }
+    if (treeItems.isEmpty()) {
+        QMessageBox::warning(this, tr("Upload"), tr("No items found in the tree."));
+        co_return;
+    }
+
+    // Upload only to amazon.fr for initial testing.
+    // TODO: uncomment the block below to upload to all checked marketplaces.
+    const QStringList marketplaceIds = {QStringLiteral("A13V1IB3VIYZZH")}; // FR only
+
+    bool cancelled = false;
+    co_await _resolveSkus(treeItems, marketplaceIds.first(), &cancelled);
+    if (cancelled)
+        co_return;
+
+    QList<AsinSku> uploadItems;
+    QStringList missingSkuAsins;
+    for (const auto &item : treeItems) {
+        if (item.sku.isEmpty()) missingSkuAsins << item.asin;
+        else                    uploadItems << item;
+    }
+    if (!missingSkuAsins.isEmpty())
+        qWarning() << "PaneSizing: still no SKU for ASINs:" << missingSkuAsins;
+
+    if (uploadItems.isEmpty()) {
+        QMessageBox::warning(this, tr("Upload"),
+            tr("No SKUs resolved. Upload cancelled."));
+        co_return;
+    }
+
+    // Auto-detect product type from the first listing
+    QString productType;
+    co_await m_api->fetchListingProductType(
+        marketplaceIds.first(), uploadItems.first().sku, &productType);
+
+    if (productType.isEmpty()) {
+        bool ok = false;
+        const QString entered = QInputDialog::getText(
+            this, tr("Product Type"),
+            tr("Could not auto-detect the product type.\n"
+               "Enter the Amazon product type (e.g. DRESS, SHIRT, SHOES):"),
+            QLineEdit::Normal, {}, &ok);
+        if (!ok || entered.trimmed().isEmpty())
+            co_return;
+        productType = entered.trimmed().toUpper();
+    }
+
     int successCount = 0;
-    const int totalAttempts = marketplaceIds.size() * skus.size();
+    const int totalAttempts = marketplaceIds.size() * uploadItems.size();
     QStringList errors;
 
-    for (const QString &marketplaceId : marketplaceIds) {
-        for (const QString &sku : skus) {
+    for (const QString &mpId : marketplaceIds) {
+        for (const auto &item : uploadItems) {
             bool ok = false;
-            co_await m_api->patchListingSizeChart(
-                marketplaceId, sku, productType, headerCells, dataRows, &ok);
+            co_await m_api->patchListingImage(mpId, item.sku, productType,
+                                              jpegData, imageIndex, &ok);
             if (ok)
                 ++successCount;
             else
-                errors << QStringLiteral("%1 / %2: %3").arg(marketplaceId, sku, m_api->lastError());
+                errors << QStringLiteral("%1 / %2 (%3): %4")
+                              .arg(mpId, item.sku, item.asin, m_api->lastError());
             m_api->clearLastError();
         }
     }
 
     if (errors.isEmpty()) {
         QMessageBox::information(this, tr("Upload"),
-            tr("Size chart uploaded to %1 listing(s) across %2 marketplace(s).")
-                .arg(successCount).arg(marketplaceIds.size()));
+            tr("Image uploaded to %1 listing(s).").arg(successCount));
     } else {
         QMessageBox::warning(this, tr("Upload"),
-            tr("Uploaded %1 of %2 listing(s).\n\nErrors:\n%3")
+            tr("Uploaded image to %1 of %2 listing(s).\n\nErrors:\n%3")
                 .arg(successCount).arg(totalAttempts).arg(errors.join('\n')));
     }
     co_return;
