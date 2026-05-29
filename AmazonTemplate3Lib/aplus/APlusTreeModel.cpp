@@ -296,6 +296,13 @@ int APlusTreeModel::elementIndexForLocation(const Location &loc) const
     return -1;
 }
 
+QString APlusTreeModel::familyIdAt(int familyRow) const
+{
+    if (familyRow < 0 || familyRow >= m_families.size())
+        return {};
+    return m_families.at(familyRow).familyId;
+}
+
 void APlusTreeModel::rebuild()
 {
     beginResetModel();

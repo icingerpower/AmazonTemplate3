@@ -8,7 +8,9 @@
 #include "SizeTableGenerator.h"
 #include "SettingsTable.h"
 #include "apis/AmazonCatalogApi.h"
+#include "apis/AmazonAplusApi.h"
 #include "apis/TreeSizingAsins.h"
+#include "aplus/APlusUploadDialog.h"
 #include "sizecategories/AbstractSizeCategory.h"
 
 #include <QInputDialog>
@@ -87,6 +89,12 @@ PaneSizing::PaneSizing(QWidget *parent)
         s->value(SettingsTable::KEY_EU_SELLER_ID),
         s->value(SettingsTable::KEY_NA_SELLER_ID),
         s->value(SettingsTable::KEY_JP_SELLER_ID));
+    m_aplusApi = std::make_unique<AmazonAplusApi>(
+        s->value(SettingsTable::KEY_LWA_CLIENT_ID),
+        s->value(SettingsTable::KEY_LWA_CLIENT_SECRET),
+        s->value(SettingsTable::KEY_EU_LWA_REFRESH_TOKEN),
+        s->value(SettingsTable::KEY_NA_LWA_REFRESH_TOKEN),
+        s->value(SettingsTable::KEY_JP_LWA_REFRESH_TOKEN));
 
     connect(ui->buttonAddFromASIN,     &QPushButton::clicked,
             this, &PaneSizing::onAddFromAsinClicked);
@@ -161,6 +169,8 @@ PaneSizing::PaneSizing(QWidget *parent)
             this, &PaneSizing::onAplusAddImageSlot);
     connect(ui->buttonAplusDeleteVersion, &QPushButton::clicked,
             this, &PaneSizing::onAplusDeleteVersion);
+    connect(ui->buttonAplusUpload, &QPushButton::clicked,
+            this, &PaneSizing::onAplusUploadClicked);
 
     // Desktop/Mobile toggle — mutually exclusive
     auto *viewGroup = new QButtonGroup(this);
@@ -276,11 +286,19 @@ void PaneSizing::_refreshApi()
         s->value(SettingsTable::KEY_EU_SELLER_ID),
         s->value(SettingsTable::KEY_NA_SELLER_ID),
         s->value(SettingsTable::KEY_JP_SELLER_ID));
+    m_aplusApi = std::make_unique<AmazonAplusApi>(
+        s->value(SettingsTable::KEY_LWA_CLIENT_ID),
+        s->value(SettingsTable::KEY_LWA_CLIENT_SECRET),
+        s->value(SettingsTable::KEY_EU_LWA_REFRESH_TOKEN),
+        s->value(SettingsTable::KEY_NA_LWA_REFRESH_TOKEN),
+        s->value(SettingsTable::KEY_JP_LWA_REFRESH_TOKEN));
     if (m_treeModel)
         m_treeModel->setApiClient(m_api.get());
 }
 
 static QString countryCodeToLanguage(const QString &code);
+static QList<PaneSizing::SizeChartTarget> buildSizeChartTargets(
+    const AbstractSizeCategory *cat, QListWidget *countriesList);
 static QString simplifyForDirName(const QString &s)
 {
     QString result;
@@ -522,6 +540,11 @@ void PaneSizing::_ensureModel(const QDir &dir)
                     }
                 }
 
+                // Re-check button states now that m_productWorkingDir may have been
+                // set above. The earlier updateButtonStates() at line 519 runs before
+                // the folder lookup, so the A+ buttons were evaluated with stale state.
+                updateButtonStates();
+
                 // Brand range guess runs here (not in attributesFetched) so that
                 // the tree model is fully populated and all child titles are scannable.
                 if (!ui->sizeRangeBrand->isRangeSelected())
@@ -542,6 +565,7 @@ void PaneSizing::_ensureModel(const QDir &dir)
                          const QString& mainImageUrl, const QString& asin,
                          const QString& title) {
                 m_productTitle = title;
+                m_currentAsin = asin;
                 QString text;
                 if (!bullets.isEmpty()) {
                     text += tr("Bullet points:\n");
@@ -560,6 +584,10 @@ void PaneSizing::_ensureModel(const QDir &dir)
                     m_productWorkingDir = _resolveProductDir(asin, title);
                     ui->lineEditSubWorkingDir->setText(m_productWorkingDir.absolutePath());
                     _loadProductSettings();
+                    // updateButtonStates() is called here unconditionally because
+                    // _loadProductSettings() may return early (no saved type yet),
+                    // and the A+ buttons depend on m_productWorkingDir being set.
+                    updateButtonStates();
                     // Brand range guess is deferred to the modelReset handler, which
                     // fires after endResetModel() when all child rows are available.
                 }
@@ -584,6 +612,7 @@ void PaneSizing::updateButtonStates()
     // A+ generate: enabled when a product dir is loaded
     const bool hasProduct = m_productWorkingDir.exists();
     ui->buttonAplusGenerate->setEnabled(hasProduct);
+    ui->buttonAplusUpload->setEnabled(hasProduct && m_aplusContent != nullptr);
     ui->buttonOpenSizeTableFolder->setEnabled(hasProduct);
     ui->buttonAddSkusFromTemplate->setEnabled(hasProduct);
 }
@@ -806,25 +835,29 @@ void PaneSizing::onGenSizeTablesClicked()
         // Each onDone (inside _buildSizeChartTranslationTasks) calls _refreshSizeGroupList()
         // so the list updates progressively as translations complete.
         if (m_sizeTableModel && m_aplusContent) {
+            const QList<SizeChartTarget> targets = buildSizeChartTargets(cat, ui->listWidgetCountries);
+
+            // English groups: render synchronously — no AI needed, keep inches
+            for (const SizeChartTarget &t : targets) {
+                if (!t.isEnglish) continue;
+                _renderAndSaveChart(cat, t.groupRow,
+                                    QStringLiteral("size_chart_") + t.groupKey,
+                                    t.language, {}, true);
+            }
+
+            // Non-English groups: translate row labels via AI CLI
             AbstractCli *cli = ui->comboBoxCli->currentData().value<AbstractCli *>();
             if (cli) {
-                QList<QPair<QString,QString>> targetLangs;
-                QSet<QString> seenLangs;
-                for (int i = 0; i < ui->listWidgetCountries->count(); ++i) {
-                    const QString code = ui->listWidgetCountries->item(i)->text().trimmed();
-                    if (code.contains(QLatin1String("(missing)"))) continue;
-                    const QString lang = countryCodeToLanguage(code);
-                    if (lang.isEmpty() || seenLangs.contains(lang)) continue;
-                    seenLangs.insert(lang);
-                    targetLangs.append({code, lang});
-                }
-                if (!targetLangs.isEmpty()) {
+                QList<SizeChartTarget> nonEnglish;
+                for (const SizeChartTarget &t : targets)
+                    if (!t.isEnglish) nonEnglish.append(t);
+                if (!nonEnglish.isEmpty()) {
                     QStringList origRowLabels;
                     for (int row = 0; row < m_sizeTableModel->rowCount(); ++row) {
                         auto *it = m_sizeTableModel->item(row, 0);
                         origRowLabels << (it ? it->text() : QString{});
                     }
-                    _runSequentially(_buildSizeChartTranslationTasks(targetLangs, origRowLabels));
+                    _runSequentially(_buildSizeChartTranslationTasks(nonEnglish, origRowLabels));
                 }
             }
         }
@@ -1058,9 +1091,9 @@ void PaneSizing::_initAplusContent()
     ui->aplusTreeView->setColumnWidth(APlusTreeModel::Mobile,   70);
 
     connect(m_aplusContent.get(), &APlusContent::elementChanged,
-            this, [this](const QString &) { m_aplusModel->rebuild(); });
+            this, [this](const QString &) { _rebuildAplusModel(); });
     connect(m_aplusContent.get(), &APlusContent::layoutChanged,
-            this, [this]() { m_aplusModel->rebuild(); });
+            this, [this]() { _rebuildAplusModel(); });
 
     if (auto *sel = ui->aplusTreeView->selectionModel()) {
         connect(sel, &QItemSelectionModel::currentChanged,
@@ -1078,6 +1111,469 @@ void PaneSizing::_initAplusContent()
 
     _refreshSizeGroupList();
     _refreshAplusPreview();
+}
+
+// ---------------------------------------------------------------------------
+// A+ upload helpers (file-local) — kept outside the coroutine frame to avoid
+// GCC 13 ICE in build_special_member_call when too many non-trivially-
+// destructible locals straddle a suspension point.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+QList<APlusUploadDialog::ElementInfo>
+buildAplusElementInfos(const APlusContent &content)
+{
+    QList<APlusUploadDialog::ElementInfo> infos;
+    const QDir aplusDir = content.dir();
+    for (const APlusElement &elem : content.elements()) {
+        const APlusVersion *ver = elem.current();
+        if (!ver) continue;
+
+        APlusUploadDialog::ElementInfo info;
+        info.id          = elem.id;
+        info.displayName = elem.displayName;
+        info.type        = elem.type;
+
+        if (elem.type == APlusElementType::Faq) {
+            const QString txtPath = aplusDir.filePath(ver->desktopFile);
+            QFile f(txtPath);
+            if (f.open(QIODevice::ReadOnly | QIODevice::Text))
+                info.textContent = QString::fromUtf8(f.readAll()).trimmed();
+        } else {
+            info.imagePath = aplusDir.filePath(ver->desktopFile);
+            const QImage full(info.imagePath);
+            if (!full.isNull())
+                info.thumbnail = full.scaled(120, 80, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        }
+        infos.append(info);
+    }
+    return infos;
+}
+
+QList<QPair<QString, QString>>
+buildAplusMarketplaceList(QListWidget *countriesList)
+{
+    static const QHash<QString, QString> kCodeToMp = {
+        {QStringLiteral("fr"), QStringLiteral("A13V1IB3VIYZZH")},
+        {QStringLiteral("de"), QStringLiteral("A1PA6795UKMFR9")},
+        {QStringLiteral("it"), QStringLiteral("APJ6JRA9NG5V4")},
+        {QStringLiteral("es"), QStringLiteral("A1RKKUPIHCS9HS")},
+        {QStringLiteral("uk"), QStringLiteral("A1F83G8C2ARO7P")},
+        {QStringLiteral("nl"), QStringLiteral("A1805IZSGTT6HS")},
+        {QStringLiteral("se"), QStringLiteral("A2NODRKZP88ZB9")},
+        {QStringLiteral("pl"), QStringLiteral("A1C3SOZRARQ6R3")},
+        {QStringLiteral("be"), QStringLiteral("AMEN7PMS3EDWL")},
+        {QStringLiteral("ie"), QStringLiteral("A28R8C7NBKEWEA")},
+        {QStringLiteral("tr"), QStringLiteral("A33AVAJ2PDY3EV")},
+        {QStringLiteral("us"), QStringLiteral("ATVPDKIKX0DER")},
+        {QStringLiteral("ca"), QStringLiteral("A2EUQ1WTGCTBG2")},
+        {QStringLiteral("mx"), QStringLiteral("A1AM78C64UM0Y8")},
+        {QStringLiteral("jp"), QStringLiteral("A1VC38T7YXB528")},
+    };
+    QList<QPair<QString, QString>> marketplaces;
+    QSet<QString> seenMps;
+    for (int i = 0; i < countriesList->count(); ++i) {
+        const QString code = countriesList->item(i)->text().trimmed().toLower();
+        if (code.contains(QLatin1String("(missing)"))) continue;
+        const QString mpId = kCodeToMp.value(code);
+        if (mpId.isEmpty() || seenMps.contains(mpId)) continue;
+        seenMps.insert(mpId);
+        marketplaces.append({code.toUpper(), mpId});
+    }
+    if (marketplaces.isEmpty())
+        marketplaces.append({QStringLiteral("UK"), QStringLiteral("A1F83G8C2ARO7P")});
+    return marketplaces;
+}
+
+QJsonObject buildFaqModule(const QString &text)
+{
+    QJsonArray textList;
+    int pos = 0;
+    while (pos < text.length()) {
+        textList.append(QJsonObject{
+            {QStringLiteral("value"), text.mid(pos, 2000)},
+            {QStringLiteral("decoratorSet"), QJsonArray{}}
+        });
+        pos += 2000;
+    }
+    return QJsonObject{
+        {QStringLiteral("contentModuleType"), QStringLiteral("STANDARD_TEXT_BOX")},
+        {QStringLiteral("standardTextBox"), QJsonObject{
+            {QStringLiteral("headline"), QJsonObject{
+                {QStringLiteral("value"), QStringLiteral("FAQ")},
+                {QStringLiteral("decoratorSet"), QJsonArray{}}
+            }},
+            {QStringLiteral("body"), QJsonObject{
+                {QStringLiteral("textList"), textList}
+            }}
+        }}
+    };
+}
+
+QJsonObject buildImageModule(const QString &uploadId,
+                              const QString &caption,
+                              int imgWidth, int imgHeight)
+{
+    return QJsonObject{
+        {QStringLiteral("contentModuleType"), QStringLiteral("STANDARD_SINGLE_SIDE_IMAGE")},
+        {QStringLiteral("standardSingleSideImage"), QJsonObject{
+            {QStringLiteral("imageCaption"), QJsonObject{
+                {QStringLiteral("value"), caption},
+                {QStringLiteral("decoratorSet"), QJsonArray{}}
+            }},
+            {QStringLiteral("imageList"), QJsonArray{
+                QJsonObject{
+                    {QStringLiteral("image"), QJsonObject{
+                        {QStringLiteral("uploadDestinationId"), uploadId},
+                        {QStringLiteral("imageCropSpecification"), QJsonObject{
+                            {QStringLiteral("size"), QJsonObject{
+                                {QStringLiteral("width"),  QJsonObject{{QStringLiteral("value"), imgWidth},  {QStringLiteral("units"), QStringLiteral("pixels")}}},
+                                {QStringLiteral("height"), QJsonObject{{QStringLiteral("value"), imgHeight}, {QStringLiteral("units"), QStringLiteral("pixels")}}}
+                            }},
+                            {QStringLiteral("offset"), QJsonObject{
+                                {QStringLiteral("x"), QJsonObject{{QStringLiteral("value"), 0}, {QStringLiteral("units"), QStringLiteral("pixels")}}},
+                                {QStringLiteral("y"), QJsonObject{{QStringLiteral("value"), 0}, {QStringLiteral("units"), QStringLiteral("pixels")}}}
+                            }}
+                        }}
+                    }},
+                    {QStringLiteral("altText"), caption}
+                }
+            }}
+        }}
+    };
+}
+
+QByteArray imageToPngBytes(const QImage &img)
+{
+    QByteArray bytes;
+    QBuffer buf(&bytes);
+    buf.open(QIODevice::WriteOnly);
+    img.save(&buf, "PNG");
+    return bytes;
+}
+
+struct AplusProgressUi {
+    QPointer<QLabel>       statusPtr;
+    QPointer<QProgressBar> barPtr;
+    QPointer<QTextEdit>    logPtr;
+};
+
+AplusProgressUi createAplusProgressDialog(QWidget *parent, int totalSteps)
+{
+    auto *progressDlg = new QDialog(parent);
+    progressDlg->setAttribute(Qt::WA_DeleteOnClose);
+    progressDlg->setWindowTitle(QObject::tr("Uploading A+ Content"));
+    progressDlg->resize(500, 320);
+    auto *pLayout = new QVBoxLayout(progressDlg);
+
+    auto *statusLabel = new QLabel(QObject::tr("Starting…"), progressDlg);
+    QFont boldF = statusLabel->font(); boldF.setBold(true);
+    statusLabel->setFont(boldF);
+    pLayout->addWidget(statusLabel);
+
+    auto *progressBar = new QProgressBar(progressDlg);
+    progressBar->setRange(0, totalSteps);
+    progressBar->setValue(0);
+    pLayout->addWidget(progressBar);
+
+    auto *logEdit = new QTextEdit(progressDlg);
+    logEdit->setReadOnly(true);
+    logEdit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    pLayout->addWidget(logEdit);
+
+    auto *closeBtns = new QDialogButtonBox(QDialogButtonBox::Close, progressDlg);
+    QObject::connect(closeBtns, &QDialogButtonBox::rejected, progressDlg, &QDialog::close);
+    pLayout->addWidget(closeBtns);
+
+    progressDlg->show();
+
+    return AplusProgressUi{
+        QPointer<QLabel>(statusLabel),
+        QPointer<QProgressBar>(progressBar),
+        QPointer<QTextEdit>(logEdit)
+    };
+}
+
+void appendAplusLog(const QPointer<QTextEdit> &logPtr, const QString &msg)
+{
+    if (logPtr)
+        logPtr->append(QStringLiteral("[%1] %2")
+            .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")), msg));
+}
+
+void setAplusStatus(const AplusProgressUi &ui, const QString &msg, int step)
+{
+    if (ui.statusPtr) ui.statusPtr->setText(msg);
+    if (ui.barPtr)    ui.barPtr->setValue(step);
+}
+
+} // namespace
+
+void PaneSizing::onAplusUploadClicked()
+{
+    _uploadAplusContent();
+}
+
+// Helper: find element from flat list by type + exact id, with fallback to base id.
+static const APlusUploadDialog::ElementInfo *
+findAplusElement(const QList<APlusUploadDialog::ElementInfo> &infos,
+                 APlusElementType type,
+                 const QString &exactId,
+                 const QString &fallbackId = QString{})
+{
+    for (const auto &info : infos)
+        if (info.type == type && info.id == exactId) return &info;
+    if (!fallbackId.isEmpty())
+        for (const auto &info : infos)
+            if (info.type == type && info.id == fallbackId) return &info;
+    return nullptr;
+}
+
+QCoro::Task<void> PaneSizing::_uploadAplusContent()
+{
+    if (!m_aplusContent || !m_aplusApi) co_return;
+
+    // --- Sync prep ---
+    QList<APlusUploadDialog::ElementInfo> infos = buildAplusElementInfos(*m_aplusContent);
+    if (infos.isEmpty()) {
+        QMessageBox::information(this, tr("Upload A+ Content"),
+            tr("No A+ content elements found. Generate content first."));
+        co_return;
+    }
+
+    QList<QPair<QString, QString>> marketplaces = buildAplusMarketplaceList(ui->listWidgetCountries);
+
+    QStringList colorNames;
+    for (const auto &[color, urls] : std::as_const(m_colorVariants))
+        if (!color.isEmpty()) colorNames << color;
+
+    // --- Dialog (all locals scoped before any co_await) ---
+    QStringList mpIds;
+    bool addSizeChart  = false;
+    bool addFaq        = false;
+    bool submitApproval = false;
+    QList<QList<APlusUploadDialog::ElementInfo>> imageSets;
+    {
+        auto s = WorkingDirectoryManager::instance()->settings();
+        const bool submitDefault = s->value(
+            QStringLiteral("aplus/submitForApproval"), true).toBool();
+
+        APlusUploadDialog dlg(infos, marketplaces, colorNames, submitDefault, this);
+        if (dlg.exec() != QDialog::Accepted) co_return;
+        mpIds          = dlg.selectedMarketplaceIds();
+        addSizeChart   = dlg.includeSizeChart();
+        addFaq         = dlg.includeFaq();
+        imageSets      = dlg.selectedImagesByColor();
+        submitApproval = dlg.shouldSubmitForApproval();
+
+        s->setValue(QStringLiteral("aplus/submitForApproval"), submitApproval);
+    }
+    if (mpIds.isEmpty()) co_return;
+    if (imageSets.isEmpty()) imageSets.append(QList<APlusUploadDialog::ElementInfo>{}); // size chart + FAQ only
+
+    // --- Estimate total steps ---
+    const int fixedPerUpload = 3 + (submitApproval ? 1 : 0);
+    int totalSteps = 0;
+    for (const auto &imgSet : std::as_const(imageSets))
+        totalSteps += mpIds.size() * (imgSet.size() + (addSizeChart ? 1 : 0) + fixedPerUpload);
+
+    AplusProgressUi progressUi = createAplusProgressDialog(this, totalSteps);
+    int step = 0;
+
+    // --- Main loop: marketplace × color set ---
+    for (const QString &mpId : std::as_const(mpIds)) {
+        const QString locale = AmazonAplusApi::localeForMarketplace(mpId);
+
+        for (int colorIdx = 0; colorIdx < imageSets.size(); ++colorIdx) {
+            const QList<APlusUploadDialog::ElementInfo> &imgSet = imageSets.at(colorIdx);
+
+            appendAplusLog(progressUi.logPtr,
+                imageSets.size() > 1
+                ? tr("─── %1  |  color set %2/%3 ───").arg(mpId).arg(colorIdx + 1).arg(imageSets.size())
+                : tr("─── %1 ───").arg(mpId));
+
+            QJsonArray moduleList;
+
+            // --- Size chart ---
+            if (addSizeChart) {
+                ++step;
+                const QString scKey = APlusUploadDialog::sizeChartKeyForMarketplace(mpId);
+                setAplusStatus(progressUi,
+                    tr("Uploading size chart (%1)…").arg(scKey), step - 1);
+                const auto *sc = findAplusElement(infos, APlusElementType::SizeChart,
+                    QStringLiteral("size_chart_") + scKey, QStringLiteral("size_chart"));
+                if (!sc) {
+                    appendAplusLog(progressUi.logPtr,
+                        tr("  ⚠ Size chart '%1' not found — skipped").arg(scKey));
+                } else {
+                    appendAplusLog(progressUi.logPtr,
+                        tr("▶ Uploading size chart: %1").arg(sc->displayName));
+                    QImage img(sc->imagePath);
+                    if (!img.isNull()) {
+                        const int imgW = img.width(), imgH = img.height();
+                        QByteArray bytes = imageToPngBytes(img);
+                        QString uploadId;
+                        co_await m_aplusApi->uploadImage(mpId, bytes,
+                            QStringLiteral("image/png"), &uploadId);
+                        if (uploadId.isEmpty()) {
+                            appendAplusLog(progressUi.logPtr,
+                                tr("  ✗ Upload failed: %1").arg(m_aplusApi->lastError()));
+                            setAplusStatus(progressUi, tr("Upload failed."), step);
+                            co_return;
+                        }
+                        appendAplusLog(progressUi.logPtr,
+                            tr("  ✓ Uploaded — ID: %1").arg(uploadId.left(40)));
+                        moduleList.append(buildImageModule(uploadId, sc->displayName, imgW, imgH));
+                    } else {
+                        appendAplusLog(progressUi.logPtr,
+                            tr("  ⚠ Cannot load size chart image — skipped"));
+                    }
+                }
+            }
+
+            // --- Color-set images ---
+            for (int ii = 0; ii < imgSet.size(); ++ii) {
+                const APlusUploadDialog::ElementInfo &info = imgSet.at(ii);
+                ++step;
+                setAplusStatus(progressUi, tr("Uploading %1…").arg(info.displayName), step - 1);
+                appendAplusLog(progressUi.logPtr, tr("▶ Uploading %1").arg(info.displayName));
+                if (info.imagePath.isEmpty()) {
+                    appendAplusLog(progressUi.logPtr, tr("  ⚠ No image path — skipped"));
+                    continue;
+                }
+                QImage img(info.imagePath);
+                if (img.isNull()) {
+                    appendAplusLog(progressUi.logPtr, tr("  ⚠ Cannot load image — skipped"));
+                    continue;
+                }
+                const int imgW = img.width(), imgH = img.height();
+                QByteArray bytes = imageToPngBytes(img);
+                QString uploadId;
+                co_await m_aplusApi->uploadImage(mpId, bytes,
+                    QStringLiteral("image/png"), &uploadId);
+                if (uploadId.isEmpty()) {
+                    appendAplusLog(progressUi.logPtr,
+                        tr("  ✗ Upload failed: %1").arg(m_aplusApi->lastError()));
+                    setAplusStatus(progressUi, tr("Upload failed."), step);
+                    co_return;
+                }
+                appendAplusLog(progressUi.logPtr,
+                    tr("  ✓ Uploaded — ID: %1").arg(uploadId.left(40)));
+                moduleList.append(buildImageModule(uploadId, info.displayName, imgW, imgH));
+            }
+
+            // --- FAQ ---
+            if (addFaq) {
+                const QString faqKey = APlusUploadDialog::faqLangKeyForMarketplace(mpId);
+                const auto *faq = findAplusElement(infos, APlusElementType::Faq,
+                    QStringLiteral("faq_") + faqKey, QStringLiteral("faq"));
+                if (!faq) {
+                    appendAplusLog(progressUi.logPtr,
+                        tr("  ⚠ FAQ '%1' not found — skipped").arg(faqKey));
+                } else {
+                    const QString text = faq->textContent.isEmpty()
+                        ? QStringLiteral("(no FAQ content)") : faq->textContent;
+                    moduleList.append(buildFaqModule(text));
+                    appendAplusLog(progressUi.logPtr,
+                        tr("  ✓ FAQ '%1' included (%2 chars)").arg(faq->displayName).arg(text.size()));
+                }
+            }
+
+            if (moduleList.isEmpty()) {
+                appendAplusLog(progressUi.logPtr, tr("  ⚠ No modules — skipping this upload."));
+                step += fixedPerUpload;
+                continue;
+            }
+
+            // --- Create content document ---
+            ++step;
+            setAplusStatus(progressUi, tr("Creating A+ content document…"), step - 1);
+            appendAplusLog(progressUi.logPtr,
+                tr("▶ Creating document (locale: %1)").arg(locale));
+            QJsonObject contentDoc{
+                {QStringLiteral("name"),              m_productTitle.isEmpty()
+                                                      ? QStringLiteral("A+ Content")
+                                                      : m_productTitle.left(100)},
+                {QStringLiteral("contentType"),       QStringLiteral("EMC")},
+                {QStringLiteral("locale"),            locale},
+                {QStringLiteral("contentModuleList"), moduleList}
+            };
+            QString contentReferenceKey;
+            co_await m_aplusApi->createContentDocument(mpId, contentDoc, &contentReferenceKey);
+            if (contentReferenceKey.isEmpty()) {
+                appendAplusLog(progressUi.logPtr,
+                    tr("✗ createContentDocument failed: %1").arg(m_aplusApi->lastError()));
+                setAplusStatus(progressUi, tr("Create document failed."), step);
+                co_return;
+            }
+            appendAplusLog(progressUi.logPtr,
+                tr("  ✓ Document created — key: %1").arg(contentReferenceKey.left(40)));
+
+            // --- Associate with ASIN ---
+            ++step;
+            setAplusStatus(progressUi, tr("Associating with ASIN…"), step - 1);
+            if (m_currentAsin.isEmpty()) {
+                appendAplusLog(progressUi.logPtr,
+                    tr("  ⚠ No ASIN available — skipping association."));
+            } else {
+                appendAplusLog(progressUi.logPtr,
+                    tr("▶ Associating with ASIN %1").arg(m_currentAsin));
+                bool asinOk = false;
+                QStringList asinList{m_currentAsin};
+                co_await m_aplusApi->postAsinRelations(contentReferenceKey, mpId,
+                                                       asinList, &asinOk);
+                appendAplusLog(progressUi.logPtr, asinOk
+                    ? tr("  ✓ ASIN associated.")
+                    : tr("  ⚠ ASIN association failed: %1 (continuing)")
+                          .arg(m_aplusApi->lastError()));
+            }
+
+            // --- Validate ---
+            ++step;
+            setAplusStatus(progressUi, tr("Validating content…"), step - 1);
+            appendAplusLog(progressUi.logPtr, tr("▶ Validating content document…"));
+            {
+                QStringList valErrors, valWarnings;
+                QStringList asinList = m_currentAsin.isEmpty()
+                    ? QStringList{} : QStringList{m_currentAsin};
+                co_await m_aplusApi->validateContentDocumentAsinRelations(
+                    contentReferenceKey, mpId, contentDoc,
+                    asinList, &valErrors, &valWarnings);
+                for (const QString &w : std::as_const(valWarnings))
+                    appendAplusLog(progressUi.logPtr, tr("  ⚠ Warning: %1").arg(w));
+                for (const QString &e : std::as_const(valErrors))
+                    appendAplusLog(progressUi.logPtr, tr("  ✗ Error: %1").arg(e));
+                if (!valErrors.isEmpty()) {
+                    setAplusStatus(progressUi, tr("Validation failed."), step);
+                    appendAplusLog(progressUi.logPtr,
+                        tr("✗ Created (key: %1) but not submitted.").arg(contentReferenceKey));
+                    co_return;
+                }
+                appendAplusLog(progressUi.logPtr, valWarnings.isEmpty()
+                    ? tr("  ✓ Validation passed.")
+                    : tr("  ✓ Validation passed (with warnings)."));
+            }
+
+            // --- Submit for approval ---
+            if (submitApproval) {
+                ++step;
+                setAplusStatus(progressUi, tr("Submitting for approval…"), step - 1);
+                appendAplusLog(progressUi.logPtr, tr("▶ Submitting for approval…"));
+                bool approvalOk = false;
+                co_await m_aplusApi->submitForApproval(contentReferenceKey, mpId, &approvalOk);
+                appendAplusLog(progressUi.logPtr, approvalOk
+                    ? tr("  ✓ Submitted. Amazon reviews within 24–48 hours.")
+                    : tr("  ⚠ Approval submission failed: %1").arg(m_aplusApi->lastError()));
+            }
+
+            appendAplusLog(progressUi.logPtr,
+                tr("  ✓ Upload complete — key: %1").arg(contentReferenceKey));
+        }
+    }
+
+    setAplusStatus(progressUi, tr("Done!"), totalSteps);
+    appendAplusLog(progressUi.logPtr, tr("✓ All uploads complete."));
 }
 
 void PaneSizing::_rebuildAplusMenu()
@@ -1148,7 +1644,7 @@ void PaneSizing::_aplusPushImage(const QImage &img, const QString &elementId,
     ver.mobileFile  = relMobile;
 
     m_aplusContent->pushVersion(elementId, type, displayName, ver);
-    m_aplusModel->rebuild();
+    _rebuildAplusModel();
 
     // Expand and select the new version row (latest version is index 0 under family).
     const int famIdx = m_aplusModel->familyIndexForElement(elementId);
@@ -1220,11 +1716,48 @@ void PaneSizing::_aplusPushSizeChart()
                                      APlusElementType::SizeChart,
                                      tr("Size Chart"), ver);
     if (m_aplusModel)
-        m_aplusModel->rebuild();
+        _rebuildAplusModel();
     _refreshSizeGroupList();
 }
 
 // --- A+ workflow helpers -----------------------------------------------------
+
+void PaneSizing::_rebuildAplusModel()
+{
+    if (!m_aplusModel) return;
+
+    // Save which families (by stable familyId) and versions are expanded.
+    QSet<QString>            expandedFamilies;
+    QSet<QPair<QString,int>> expandedVersions;
+
+    const int famCount = m_aplusModel->rowCount();
+    for (int f = 0; f < famCount; ++f) {
+        const QModelIndex famIdx = m_aplusModel->index(f, 0);
+        if (!ui->aplusTreeView->isExpanded(famIdx)) continue;
+        const QString fid = m_aplusModel->familyIdAt(f);
+        if (fid.isEmpty()) continue;
+        expandedFamilies.insert(fid);
+        for (int v = 0; v < m_aplusModel->rowCount(famIdx); ++v) {
+            const QModelIndex verIdx = m_aplusModel->index(v, 0, famIdx);
+            if (ui->aplusTreeView->isExpanded(verIdx))
+                expandedVersions.insert({fid, v});
+        }
+    }
+
+    m_aplusModel->rebuild();
+
+    // Restore expansion by matching on stable familyId.
+    for (int f = 0; f < m_aplusModel->rowCount(); ++f) {
+        const QString fid = m_aplusModel->familyIdAt(f);
+        if (!expandedFamilies.contains(fid)) continue;
+        const QModelIndex famIdx = m_aplusModel->index(f, 0);
+        ui->aplusTreeView->expand(famIdx);
+        for (int v = 0; v < m_aplusModel->rowCount(famIdx); ++v) {
+            if (expandedVersions.contains({fid, v}))
+                ui->aplusTreeView->expand(m_aplusModel->index(v, 0, famIdx));
+        }
+    }
+}
 
 void PaneSizing::_initWorkflowCombo()
 {
@@ -1366,8 +1899,58 @@ static QString countryCodeToLanguage(const QString &code)
         {QStringLiteral("mx"), QStringLiteral("Spanish")},
         {QStringLiteral("jp"), QStringLiteral("Japanese")},
         {QStringLiteral("tr"), QStringLiteral("Turkish")},
+        {QStringLiteral("uk"), QStringLiteral("English")},
+        {QStringLiteral("ie"), QStringLiteral("English")},
+        {QStringLiteral("au"), QStringLiteral("English")},
+        {QStringLiteral("us"), QStringLiteral("English")},
+        {QStringLiteral("ca"), QStringLiteral("English")},
     };
     return map.value(code.toLower().trimmed());
+}
+
+// Builds one SizeChartTarget per unique (country-group-row, language) pair
+// found in the country list widget. English groups use the group key ("uk"/"com")
+// as groupKey; others use the first matching country code.
+static QList<PaneSizing::SizeChartTarget> buildSizeChartTargets(
+    const AbstractSizeCategory *cat, QListWidget *countriesList)
+{
+    QList<PaneSizing::SizeChartTarget> result;
+    if (!cat) return result;
+    const QList<CountryGroup> groups = cat->countryGroups();
+    using Key = QPair<int, QString>; // (groupRow, language)
+    QSet<Key> seen;
+
+    for (int i = 0; i < countriesList->count(); ++i) {
+        const QString code = countriesList->item(i)->text().trimmed().toLower();
+        if (code.contains(QLatin1String("(missing)"))) continue;
+
+        int groupRow = -1;
+        for (int g = 0; g < groups.size() && groupRow < 0; ++g) {
+            const QStringList parts = groups[g].label.split(QLatin1Char('/'));
+            for (const QString &part : parts)
+                if (part.compare(code, Qt::CaseInsensitive) == 0)
+                    { groupRow = g; break; }
+        }
+        if (groupRow < 0) continue;
+
+        const bool isEnglish = groups[groupRow].isEnglish;
+        const QString lang = isEnglish ? QStringLiteral("English")
+                                       : countryCodeToLanguage(code);
+        if (lang.isEmpty()) continue;
+
+        const Key key{groupRow, lang};
+        if (seen.contains(key)) continue;
+        seen.insert(key);
+
+        PaneSizing::SizeChartTarget t;
+        t.groupKey   = isEnglish ? groups[groupRow].key.toLower() : code;
+        t.groupLabel = isEnglish ? groups[groupRow].label         : lang;
+        t.groupRow   = groupRow;
+        t.language   = lang;
+        t.isEnglish  = isEnglish;
+        result.append(t);
+    }
+    return result;
 }
 
 // Strips any leading CLI commentary from a FAQ output and returns only the Q&A block.
@@ -1525,7 +2108,7 @@ void PaneSizing::onAplusGenerateAll()
     // Ensure all destination element directories exist for the planned slots.
     for (const ImageSlotSpec &spec : slotSpecs)
         m_aplusContent->dir().mkpath(spec.elementId);
-    if (m_aplusModel) { m_aplusModel->rebuild(); _rebuildAplusMenu(); }
+    if (m_aplusModel) { _rebuildAplusModel(); _rebuildAplusMenu(); }
 
     // Build FAQ prompt (independent of the workflow image specs)
     const QString imgHintWithGap = mainImageHint.isEmpty()
@@ -1607,7 +2190,7 @@ void PaneSizing::onAplusGenerateAll()
             const QString code = ui->listWidgetCountries->item(i)->text().trimmed();
             if (code.contains(QStringLiteral("(missing)"))) continue;
             const QString lang = countryCodeToLanguage(code);
-            if (lang.isEmpty() || seen.contains(lang)) continue;
+            if (lang.isEmpty() || lang == QLatin1String("English") || seen.contains(lang)) continue;
             seen.insert(lang);
             targetLangs.append({code, lang});
         }
@@ -1697,7 +2280,7 @@ void PaneSizing::onAplusGenerateAll()
             ver.desktopFile = aplusDir.relativeFilePath(filePair->first);
             ver.mobileFile  = aplusDir.relativeFilePath(filePair->second);
             m_aplusContent->pushVersion(elemId, APlusElementType::Image, displayName, ver);
-            if (m_aplusModel) m_aplusModel->rebuild();
+            if (m_aplusModel) _rebuildAplusModel();
         };
         tasks.append(mobileTask);
     }
@@ -1748,7 +2331,7 @@ void PaneSizing::onAplusGenerateAll()
             ver.desktopFile = ver.mobileFile = relPath;
             m_aplusContent->pushVersion(QStringLiteral("faq_en"), APlusElementType::Faq,
                                         tr("FAQ (English)"), ver);
-            if (m_aplusModel) m_aplusModel->rebuild();
+            if (m_aplusModel) _rebuildAplusModel();
         });
 
     // FAQ translation tasks — one translate + format + validate per target language
@@ -1790,19 +2373,35 @@ void PaneSizing::onAplusGenerateAll()
                 const QString elemId = QStringLiteral("faq_") + capturedLangCode;
                 m_aplusContent->pushVersion(elemId, APlusElementType::Faq,
                                             tr("FAQ (%1)").arg(capturedLangName), ver);
-                if (m_aplusModel) m_aplusModel->rebuild();
+                if (m_aplusModel) _rebuildAplusModel();
             });
     }
 
-    // Size chart translation tasks — one per target language
+    // Size chart tasks — one per country group
     if (m_sizeTableModel) {
-        QStringList origRowLabels;
-        for (int row = 0; row < m_sizeTableModel->rowCount(); ++row) {
-            auto *it = m_sizeTableModel->item(row, 0);
-            origRowLabels << (it ? it->text() : QString{});
+        const auto *cat = _currentCategory();
+        const QList<SizeChartTarget> chartTargets = buildSizeChartTargets(cat, ui->listWidgetCountries);
+
+        // English groups: render synchronously now (no AI)
+        for (const SizeChartTarget &t : chartTargets) {
+            if (!t.isEnglish) continue;
+            _renderAndSaveChart(cat, t.groupRow,
+                                QStringLiteral("size_chart_") + t.groupKey,
+                                t.language, {}, true);
         }
-        const auto chartTasks = _buildSizeChartTranslationTasks(targetLangs, origRowLabels);
-        tasks.append(chartTasks);
+
+        // Non-English: add CLI translation tasks to the queue
+        QList<SizeChartTarget> nonEnglishCharts;
+        for (const SizeChartTarget &t : chartTargets)
+            if (!t.isEnglish) nonEnglishCharts.append(t);
+        if (!nonEnglishCharts.isEmpty()) {
+            QStringList origRowLabels;
+            for (int row = 0; row < m_sizeTableModel->rowCount(); ++row) {
+                auto *it = m_sizeTableModel->item(row, 0);
+                origRowLabels << (it ? it->text() : QString{});
+            }
+            tasks.append(_buildSizeChartTranslationTasks(nonEnglishCharts, origRowLabels));
+        }
     }
 
     // Assessment runs via the onTaskDone sentinel (step==total+1) after all content tasks.
@@ -2011,16 +2610,14 @@ void PaneSizing::_refreshSizeGroupList()
 
     addEntry(tr("Size Chart"), defaultImg);
 
-    QSet<QString> seenLangs;
-    for (int i = 0; i < ui->listWidgetCountries->count(); ++i) {
-        const QString code = ui->listWidgetCountries->item(i)->text().trimmed();
-        if (code.contains(QLatin1String("(missing)"))) continue;
-        const QString lang = countryCodeToLanguage(code);
-        if (lang.isEmpty() || seenLangs.contains(lang)) continue;
-        seenLangs.insert(lang);
-        const QString elemId = QStringLiteral("size_chart_") + code;
-        addEntry(tr("Size Chart (%1)").arg(lang),
-                 generatedImages.contains(elemId) ? generatedImages[elemId] : defaultImg);
+    const auto *cat = _currentCategory();
+    const QList<SizeChartTarget> targets = buildSizeChartTargets(cat, ui->listWidgetCountries);
+    for (const SizeChartTarget &t : targets) {
+        const QString elemId = QStringLiteral("size_chart_") + t.groupKey;
+        const QString label = t.isEnglish
+            ? tr("Size Chart (%1)").arg(t.groupLabel)
+            : tr("Size Chart (%1)").arg(t.language);
+        addEntry(label, generatedImages.contains(elemId) ? generatedImages[elemId] : defaultImg);
     }
 
     int restoreRow = 0;
@@ -2036,117 +2633,153 @@ void PaneSizing::_refreshSizeGroupList()
     ui->listWidgetSizeGroups->setCurrentRow(restoreRow);
 }
 
+static QImage padImageToMinHeight(const QImage &src, int minH)
+{
+    if (src.height() >= minH) return src;
+    QImage padded(src.width(), minH, QImage::Format_ARGB32);
+    padded.fill(Qt::white);
+    QPainter p(&padded);
+    p.drawImage(0, (minH - src.height()) / 2, src);
+    p.end();
+    return padded;
+}
+
+void PaneSizing::_renderAndSaveChart(const AbstractSizeCategory *cat,
+                                      int groupRow,
+                                      const QString &elemId,
+                                      const QString &displayLang,
+                                      const QStringList &translatedLabels,
+                                      bool keepInches)
+{
+    if (!m_aplusContent || !m_sizeTableModel || !cat) return;
+
+    const QList<CountryGroup> groups = cat->countryGroups();
+    const int groupCount = groups.size();
+
+    // Optionally swap row labels (column 0) for translated charts
+    QStringList savedLabels;
+    if (!translatedLabels.isEmpty()) {
+        for (int row = 0; row < m_sizeTableModel->rowCount(); ++row) {
+            auto *it = m_sizeTableModel->item(row, 0);
+            savedLabels << (it ? it->text() : QString{});
+        }
+        for (int row = 0; row < m_sizeTableModel->rowCount() && row < translatedLabels.size(); ++row) {
+            if (auto *it = m_sizeTableModel->item(row, 0))
+                it->setText(translatedLabels[row].trimmed());
+        }
+    }
+
+    // Strip " cm / xx in" from data cells for non-English charts
+    static const QString kCmSep = QStringLiteral(" cm / ");
+    QList<QPair<int,int>> inchCells;
+    QStringList savedCellTexts;
+    if (!keepInches) {
+        for (int row = 0; row < m_sizeTableModel->rowCount(); ++row) {
+            for (int col = 1; col < m_sizeTableModel->columnCount(); ++col) {
+                auto *it = m_sizeTableModel->item(row, col);
+                if (!it) continue;
+                const int sep = it->text().indexOf(kCmSep);
+                if (sep >= 0) {
+                    inchCells.append({row, col});
+                    savedCellTexts << it->text();
+                    it->setText(it->text().left(sep) + QStringLiteral(" cm"));
+                }
+            }
+        }
+    }
+
+    // Temporarily remove non-target group rows (high→low to keep indices stable)
+    using RowData = QList<QStandardItem *>;
+    QList<QPair<int, RowData>> removedGroupRows;
+    if (groupRow >= 0 && groupRow < groupCount) {
+        for (int i = groupCount - 1; i >= 0; --i) {
+            if (i == groupRow) continue;
+            RowData rowItems;
+            for (int c = 0; c < m_sizeTableModel->columnCount(); ++c) {
+                auto *it = m_sizeTableModel->item(i, c);
+                rowItems << (it ? it->clone() : new QStandardItem());
+            }
+            removedGroupRows.prepend({i, rowItems});
+            m_sizeTableModel->removeRow(i);
+        }
+    }
+
+    const QImage img = cat->renderImage(m_sizeTableModel);
+
+    // Restore removed group rows (low→high to preserve original positions)
+    for (auto &[origIdx, rowItems] : removedGroupRows) {
+        m_sizeTableModel->insertRow(origIdx);
+        for (int c = 0; c < rowItems.size(); ++c)
+            m_sizeTableModel->setItem(origIdx, c, rowItems[c]);
+    }
+    // Restore row labels
+    for (int row = 0; row < savedLabels.size() && row < m_sizeTableModel->rowCount(); ++row) {
+        if (auto *it = m_sizeTableModel->item(row, 0))
+            it->setText(savedLabels[row]);
+    }
+    // Restore data cells
+    for (int i = 0; i < inchCells.size(); ++i) {
+        if (auto *it = m_sizeTableModel->item(inchCells[i].first, inchCells[i].second))
+            it->setText(savedCellTexts[i]);
+    }
+
+    if (img.isNull()) return;
+
+    const QDir aplusDir = m_aplusContent->dir();
+    aplusDir.mkpath(elemId);
+    QImage desktop = padImageToMinHeight(img.scaledToWidth(970, Qt::SmoothTransformation), 400);
+    QImage mobile  = padImageToMinHeight(img.scaledToWidth(600, Qt::SmoothTransformation), 400);
+    const QString relD = elemId + QStringLiteral("/size_chart.png");
+    const QString relM = elemId + QStringLiteral("/size_chart_mobile.png");
+    desktop.save(aplusDir.filePath(relD));
+    mobile.save(aplusDir.filePath(relM));
+
+    APlusVersion ver;
+    ver.generated   = QDateTime::currentDateTime();
+    ver.desktopFile = relD;
+    ver.mobileFile  = relM;
+    m_aplusContent->setSingleVersion(elemId, APlusElementType::SizeChart,
+                                     tr("Size Chart (%1)").arg(displayLang), ver);
+    if (m_aplusModel) _rebuildAplusModel();
+    _refreshSizeGroupList();
+}
+
 QList<PaneSizing::CliTask> PaneSizing::_buildSizeChartTranslationTasks(
-    const QList<QPair<QString, QString>> &targetLangs,
+    const QList<SizeChartTarget> &targets,
     const QStringList &origRowLabels)
 {
-    // origRowLabels = model->item(r, 0)->text() for r=0..rowCount-1
-    // These are the visible row labels ("Size", "Chest (cm)", ...) that renderImage renders.
     auto origLabelsPtr = QSharedPointer<QStringList>::create(origRowLabels);
     const QString workDir = m_productWorkingDir.exists()
                           ? m_productWorkingDir.absolutePath() : QString{};
 
     QList<CliTask> tasks;
-    for (const auto &[langCode, langName] : std::as_const(targetLangs)) {
+    for (const SizeChartTarget &t : targets) {
+        if (t.isEnglish) continue; // English rendered synchronously without AI
+
         CliTask chartTask;
-        chartTask.label   = tr("Size chart — %1").arg(langName);
+        chartTask.label   = tr("Size chart — %1").arg(t.language);
         chartTask.workDir = workDir;
-        const QString capturedLangCode = langCode;
-        const QString capturedLangName = langName;
-        chartTask.promptFn = [origLabelsPtr, capturedLangName]() -> QString {
+        const QString capturedGroupKey  = t.groupKey;
+        const QString capturedLang      = t.language;
+        const int     capturedGroupRow  = t.groupRow;
+
+        chartTask.promptFn = [origLabelsPtr, capturedLang]() -> QString {
             QString p = QStringLiteral("Translate the following Amazon size chart row labels to ")
-                      + capturedLangName
+                      + capturedLang
                       + QStringLiteral(".\nReturn ONLY the translated labels, one per line, "
                                        "in the same order. No extra text.\n\n");
             for (const QString &h : std::as_const(*origLabelsPtr))
                 p += h + QLatin1Char('\n');
             return p;
         };
-        chartTask.onDone = [this, capturedLangCode, capturedLangName](CliRunResult r) {
-            if (!m_aplusContent || !m_sizeTableModel) return;
+        chartTask.onDone = [this, capturedGroupKey, capturedLang, capturedGroupRow](CliRunResult r) {
+            if (!m_sizeTableModel) return;
             const auto *cat = _currentCategory();
             if (!cat) return;
-
-            const QStringList lines = r.output.trimmed().split(
-                QLatin1Char('\n'), Qt::SkipEmptyParts);
+            const QStringList lines = r.output.trimmed().split(QLatin1Char('\n'), Qt::SkipEmptyParts);
             if (lines.isEmpty()) return;
-
-            // Temporarily swap row labels (column 0), strip inches cells, render, restore.
-            // renderImage() reads model->item(r,0)->text() — not horizontalHeaderItem.
-            // Non-English markets are metric: strip the " cm / xx in" portion so renderImage
-            // does not emit an inches row.
-            static const QString kCmSep = QStringLiteral(" cm / ");
-
-            QStringList savedLabels;
-            for (int row = 0; row < m_sizeTableModel->rowCount(); ++row) {
-                auto *it = m_sizeTableModel->item(row, 0);
-                savedLabels << (it ? it->text() : QString{});
-            }
-            for (int row = 0; row < m_sizeTableModel->rowCount() && row < lines.size(); ++row) {
-                if (auto *it = m_sizeTableModel->item(row, 0))
-                    it->setText(lines[row].trimmed());
-            }
-
-            // Strip inches part from data cells so renderImage skips the inches row.
-            QList<QPair<int,int>> inchCells;
-            QStringList savedCellTexts;
-            for (int row = 0; row < m_sizeTableModel->rowCount(); ++row) {
-                for (int col = 1; col < m_sizeTableModel->columnCount(); ++col) {
-                    auto *it = m_sizeTableModel->item(row, col);
-                    if (!it) continue;
-                    const int sep = it->text().indexOf(kCmSep);
-                    if (sep >= 0) {
-                        inchCells.append({row, col});
-                        savedCellTexts << it->text();
-                        it->setText(it->text().left(sep) + QStringLiteral(" cm"));
-                    }
-                }
-            }
-
-            const QImage img = cat->renderImage(m_sizeTableModel);
-
-            // Restore row labels
-            for (int row = 0; row < savedLabels.size() && row < m_sizeTableModel->rowCount(); ++row) {
-                if (auto *it = m_sizeTableModel->item(row, 0))
-                    it->setText(savedLabels[row]);
-            }
-            // Restore data cells
-            for (int i = 0; i < inchCells.size(); ++i) {
-                if (auto *it = m_sizeTableModel->item(inchCells[i].first, inchCells[i].second))
-                    it->setText(savedCellTexts[i]);
-            }
-            if (img.isNull()) return;
-
-            auto padToMinHeight = [](const QImage &src, int minH) -> QImage {
-                if (src.height() >= minH) return src;
-                QImage padded(src.width(), minH, QImage::Format_ARGB32);
-                padded.fill(Qt::white);
-                QPainter p(&padded);
-                p.drawImage(0, (minH - src.height()) / 2, src);
-                p.end();
-                return padded;
-            };
-
-            const QString elemId = QStringLiteral("size_chart_") + capturedLangCode;
-            const QDir aplusDir = m_aplusContent->dir();
-            aplusDir.mkpath(elemId);
-            QImage desktop = img.scaledToWidth(970, Qt::SmoothTransformation);
-            QImage mobile  = img.scaledToWidth(600, Qt::SmoothTransformation);
-            desktop = padToMinHeight(desktop, 400);
-            mobile  = padToMinHeight(mobile,  400);
-            const QString relD = elemId + QStringLiteral("/size_chart.png");
-            const QString relM = elemId + QStringLiteral("/size_chart_mobile.png");
-            desktop.save(aplusDir.filePath(relD));
-            mobile.save(aplusDir.filePath(relM));
-
-            APlusVersion ver;
-            ver.generated   = QDateTime::currentDateTime();
-            ver.desktopFile = relD;
-            ver.mobileFile  = relM;
-            m_aplusContent->setSingleVersion(elemId, APlusElementType::SizeChart,
-                                             tr("Size Chart (%1)").arg(capturedLangName), ver);
-            if (m_aplusModel) m_aplusModel->rebuild();
-            _refreshSizeGroupList();
+            const QString elemId = QStringLiteral("size_chart_") + capturedGroupKey;
+            _renderAndSaveChart(cat, capturedGroupRow, elemId, capturedLang, lines, false);
         };
         tasks.append(chartTask);
     }
@@ -2166,20 +2799,23 @@ void PaneSizing::onAplusGenerateSizeChart()
 
     if (!m_sizeTableModel || !m_aplusContent) return;
 
-    // Collect unique target languages from the country list.
-    QList<QPair<QString,QString>> targetLangs;
-    {
-        QSet<QString> seen;
-        for (int i = 0; i < ui->listWidgetCountries->count(); ++i) {
-            const QString code = ui->listWidgetCountries->item(i)->text().trimmed();
-            if (code.contains(QLatin1String("(missing)"))) continue;
-            const QString lang = countryCodeToLanguage(code);
-            if (lang.isEmpty() || seen.contains(lang)) continue;
-            seen.insert(lang);
-            targetLangs.append({code, lang});
-        }
+    const auto *cat = _currentCategory();
+    const QList<SizeChartTarget> targets = buildSizeChartTargets(cat, ui->listWidgetCountries);
+
+    // English groups: render synchronously
+    for (const SizeChartTarget &t : targets) {
+        if (!t.isEnglish) continue;
+        _renderAndSaveChart(cat, t.groupRow,
+                            QStringLiteral("size_chart_") + t.groupKey,
+                            t.language, {}, true);
     }
-    if (targetLangs.isEmpty()) return;
+
+    // Non-English: translate via AI CLI
+    QList<SizeChartTarget> nonEnglish;
+    for (const SizeChartTarget &t : targets)
+        if (!t.isEnglish) nonEnglish.append(t);
+
+    if (nonEnglish.isEmpty()) return;
 
     AbstractCli *cli = ui->comboBoxCli->currentData().value<AbstractCli *>();
     if (!cli) return;
@@ -2190,7 +2826,7 @@ void PaneSizing::onAplusGenerateSizeChart()
         origRowLabels << (it ? it->text() : QString{});
     }
 
-    QList<CliTask> tasks = _buildSizeChartTranslationTasks(targetLangs, origRowLabels);
+    QList<CliTask> tasks = _buildSizeChartTranslationTasks(nonEnglish, origRowLabels);
     if (tasks.isEmpty()) return;
 
     const int total = tasks.size();
@@ -2345,7 +2981,7 @@ void PaneSizing::onAplusGenerateFaq()
         guard->m_aplusContent->pushVersion(QStringLiteral("faq"),
                                            APlusElementType::Faq,
                                            guard->tr("FAQ"), ver);
-        guard->m_aplusModel->rebuild();
+        guard->_rebuildAplusModel();
 
         const int famIdx =
             guard->m_aplusModel->familyIndexForElement(QStringLiteral("faq"));
@@ -2463,7 +3099,7 @@ void PaneSizing::onAplusGenerateFaq()
                             guard->m_aplusContent->pushVersion(
                                 elemId, APlusElementType::Faq,
                                 guard->tr("FAQ (%1)").arg(cLN), ver);
-                            if (guard->m_aplusModel) guard->m_aplusModel->rebuild();
+                            if (guard->m_aplusModel) guard->_rebuildAplusModel();
                         });
                 }
                 guard->_runSequentially(std::move(transTasks));
@@ -2604,7 +3240,7 @@ void PaneSizing::onAplusGenerateImage(const QString &elementId)
                 guard->m_aplusContent->pushVersion(capturedId,
                                                    APlusElementType::Image,
                                                    capturedDisplayName, ver);
-                guard->m_aplusModel->rebuild();
+                guard->_rebuildAplusModel();
             }
         }
     });
@@ -2623,7 +3259,7 @@ void PaneSizing::onAplusDeleteVersion()
     const QString id = els.at(elemIdx).id;
 
     m_aplusContent->deleteVersion(id, loc.version);
-    m_aplusModel->rebuild();
+    _rebuildAplusModel();
     _refreshAplusPreview(ui->aplusTreeView->currentIndex());
 }
 
@@ -2635,7 +3271,7 @@ void PaneSizing::onAplusAddImageSlot()
         if (e.type == APlusElementType::Image)
             ++count;
     m_aplusContent->ensureImageElement(count);
-    m_aplusModel->rebuild();
+    _rebuildAplusModel();
     _rebuildAplusMenu();
 }
 

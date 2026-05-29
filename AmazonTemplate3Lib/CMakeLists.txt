@@ -38,12 +38,16 @@ add_library(AmazonTemplate3Lib STATIC
   #${WORKING_DIR_FILES}
   apis/AmazonCatalogApi.h
   apis/AmazonCatalogApi.cpp
+  apis/AmazonAplusApi.h
+  apis/AmazonAplusApi.cpp
   apis/TreeSizingAsins.h
   apis/TreeSizingAsins.cpp
   aplus/APlusContent.h
   aplus/APlusContent.cpp
   aplus/APlusTreeModel.h
   aplus/APlusTreeModel.cpp
+  aplus/APlusUploadDialog.h
+  aplus/APlusUploadDialog.cpp
   aplus/APlusWorkflow.h
   aplus/APlusWorkflow.cpp
   Attribute.h
@@ -105,12 +109,16 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   ${OPENAI_FILES}
   apis/AmazonCatalogApi.h
   apis/AmazonCatalogApi.cpp
+  apis/AmazonAplusApi.h
+  apis/AmazonAplusApi.cpp
   apis/TreeSizingAsins.h
   apis/TreeSizingAsins.cpp
   aplus/APlusContent.h
   aplus/APlusContent.cpp
   aplus/APlusTreeModel.h
   aplus/APlusTreeModel.cpp
+  aplus/APlusUploadDialog.h
+  aplus/APlusUploadDialog.cpp
   aplus/APlusWorkflow.h
   aplus/APlusWorkflow.cpp
   Attribute.h
@@ -139,6 +147,7 @@ add_library(AmazonTemplate3Lib_Tests STATIC
 
 target_link_libraries(AmazonTemplate3Lib_Tests PUBLIC
     Qt${QT_VERSION_MAJOR}::Gui
+    Qt${QT_VERSION_MAJOR}::Widgets
     Qt${QT_VERSION_MAJOR}::Network
     Qt${QT_VERSION_MAJOR}::Core
     ZLIB::ZLIB

@@ -306,14 +306,22 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
             QList<QPair<QString, QStringList>> colorImages;
             QSet<QString> seenColors;
             QSet<QString> seenMainUrls;
+            QSet<QString> seenImageFingerprints;
             for (const auto& c : family.children) {
                 if (c.allImageUrls.isEmpty()) continue;
                 const QString colorKey = c.color.toLower();
                 const QString mainUrl  = c.mainImageUrl;
                 if (seenColors.contains(colorKey)) continue;
                 if (!mainUrl.isEmpty() && seenMainUrls.contains(mainUrl)) continue;
+                // Dedup same physical variant appearing under different language
+                // color names (e.g. "Yellow" from US probe vs "Jaune" from FR probe).
+                QStringList sortedUrls = c.allImageUrls;
+                std::sort(sortedUrls.begin(), sortedUrls.end());
+                const QString fingerprint = sortedUrls.join(QLatin1Char('\n'));
+                if (!fingerprint.isEmpty() && seenImageFingerprints.contains(fingerprint)) continue;
                 seenColors.insert(colorKey);
                 if (!mainUrl.isEmpty()) seenMainUrls.insert(mainUrl);
+                if (!fingerprint.isEmpty()) seenImageFingerprints.insert(fingerprint);
                 colorImages.append({c.color, c.allImageUrls});
             }
             if (!colorImages.isEmpty())

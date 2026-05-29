@@ -33,6 +33,9 @@ public:
     // or -1 if no family contains that element.
     int familyIndexForElement(const QString &elementId) const;
 
+    // Returns the stable familyId string for the given family row, or {} if out of range.
+    QString familyIdAt(int familyRow) const;
+
     // Returns the underlying APlusContent element index referenced by a location:
     // - language node → the variant element at loc.lang
     // - version node  → the family's base element

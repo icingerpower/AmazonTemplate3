@@ -12,6 +12,7 @@
 #include <QCoro/QCoroTask>
 
 #include "AbstractCli.h"
+#include "apis/AmazonAplusApi.h"
 #include "aplus/APlusContent.h"
 #include "aplus/APlusTreeModel.h"
 #include "aplus/APlusWorkflow.h"
@@ -46,6 +47,14 @@ public:
         std::function<void(CliRunResult)> onDone;
     };
 
+    struct SizeChartTarget {
+        QString groupKey;    // element id suffix: "uk", "com", "fr", …
+        QString groupLabel;  // display label: "UK/IE/AU" or language name
+        int     groupRow = -1;
+        QString language;    // "English", "French", …
+        bool    isEnglish = false;
+    };
+
 private slots:
     void onAddFromAsinClicked();
     void onAddFromTemplateClicked();
@@ -68,6 +77,7 @@ private slots:
     void onAplusAddImageSlot();
     void onAplusTreeClicked(const QModelIndex &idx);
     void onAplusSelectionChanged(const QModelIndex &current, const QModelIndex &previous);
+    void onAplusUploadClicked();
 
 private:
     struct AsinSku {
@@ -84,6 +94,8 @@ private:
 
     Ui::PaneSizing   *ui;
     std::unique_ptr<AmazonCatalogApi> m_api;
+    std::unique_ptr<AmazonAplusApi>   m_aplusApi;
+    QString                           m_currentAsin;
     std::unique_ptr<TreeSizingAsins>  m_treeModel;
     QStandardItemModel               *m_sizeTableModel = nullptr;
     bool                              m_generatedSuccessfully = false;
@@ -119,6 +131,7 @@ private:
     QCoro::Task<void> _uploadSizeImage(int imageIndex);
     QCoro::Task<void> _saveToSizeTableFolder();
     QCoro::Task<void> _addSkusFromTemplate();
+    QCoro::Task<void> _uploadAplusContent();
     // Fills missing SKUs: settings.ini → Reports API → manual dialog.
     // Sets *cancelled = true if the user dismissed the manual entry dialog.
     QCoro::Task<void> _resolveSkus(QList<AsinSku> &items,
@@ -153,8 +166,14 @@ private:
     void    _updateLangCombo(const QString &family, const QString &currentId);
     void    _showAplusFile(const QString &absPath);
     QList<CliTask> _buildSizeChartTranslationTasks(
-                        const QList<QPair<QString, QString>> &targetLangs,
+                        const QList<SizeChartTarget> &targets,
                         const QStringList &origRowLabels);
+    void _renderAndSaveChart(const AbstractSizeCategory *cat,
+                              int groupRow,
+                              const QString &elemId,
+                              const QString &displayLang,
+                              const QStringList &translatedLabels,
+                              bool keepInches);
     void _refreshSizeGroupList();
     QString _aplusTimestamp() const;
     void    _aplusPushImage(const QImage &img, const QString &elementId,
@@ -167,6 +186,8 @@ private:
     void           _rebuildPromptTabs();
     APlusWorkflow *_currentWorkflow() const;
     QStringList    _stepInstructions() const;
+    // Saves tree expansion by stable family ID, calls rebuild(), then restores.
+    void           _rebuildAplusModel();
 };
 
 #endif
