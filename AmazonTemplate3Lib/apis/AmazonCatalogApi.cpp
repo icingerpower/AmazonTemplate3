@@ -125,6 +125,7 @@ AmazonCatalogApi::AmazonCatalogApi(const QString& lwaClientId,
                                    const QString& sellerIdEu,
                                    const QString& sellerIdNa,
                                    const QString& sellerIdJp,
+                                   const QString& imgbbApiKey,
                                    QObject* parent)
     : QObject(parent)
     , m_lwaClientId(lwaClientId)
@@ -135,6 +136,7 @@ AmazonCatalogApi::AmazonCatalogApi(const QString& lwaClientId,
     , m_sellerIdEu(sellerIdEu)
     , m_sellerIdNa(sellerIdNa)
     , m_sellerIdJp(sellerIdJp)
+    , m_imgbbApiKey(imgbbApiKey)
 {
 }
 
@@ -998,121 +1000,75 @@ QCoro::Task<void> AmazonCatalogApi::patchListingImage(QString marketplaceId,
         co_return;
     }
 
+    if (m_imgbbApiKey.isEmpty()) {
+        m_lastError = QStringLiteral("No ImgBB API key configured — cannot host listing image");
+        qWarning() << "AmazonCatalogApi:" << m_lastError;
+        co_return;
+    }
+
     const QString endpoint = endpointForMarketplace(marketplaceId);
 
-    // Step 1: Create upload destination
-    const QByteArray md5Bytes = QCryptographicHash::hash(jpegData, QCryptographicHash::Md5);
-    const QString contentMd5 = QString::fromLatin1(md5Bytes.toBase64());
-
-    // Build the upload-destination URL. The resource path contains literal slashes that
-    // must be percent-encoded as %2F in the URL path segment. QUrl::setPath() uses
-    // DecodedMode by default and would re-encode '%' → '%25', corrupting the URL.
-    // Use QUrl::fromEncoded() so the pre-encoded %2F is preserved intact.
-    const QString resource = QStringLiteral("listings/items/%1/%2").arg(sellerId, sku);
-    const QString encodedResource = QString::fromUtf8(
-        QUrl::toPercentEncoding(resource, {}, QByteArrayLiteral("/")));
-    const QUrl uploadsUrl = QUrl::fromEncoded(
-        QStringLiteral("https://%1/uploads/2020-11-01/uploadDestinations/%2?marketplaceIds=%3")
-            .arg(endpoint, encodedResource, marketplaceId)
-            .toUtf8());
-
+    // Single token variable reused across all SP-API calls in this method
+    // (GCC 13 ICE workaround — see #pragma at top of file).
     QString token;
-    co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
-    if (token.isEmpty()) {
-        m_lastError = QStringLiteral("No access token for marketplace %1").arg(marketplaceId);
-        co_return;
+
+    // ---------------------------------------------------------------
+    // Step 1: upload the JPEG to imgbb.com to obtain a public URL
+    // ---------------------------------------------------------------
+    QUrl imgbbUrl(QStringLiteral("https://api.imgbb.com/1/upload"));
+    {
+        QUrlQuery imgbbQuery;
+        imgbbQuery.addQueryItem(QStringLiteral("key"), m_imgbbApiKey);
+        imgbbUrl.setQuery(imgbbQuery);
     }
 
-    const QJsonObject uploadsBodyObj{
-        {QStringLiteral("contentType"), QStringLiteral("image/jpeg")},
-        {QStringLiteral("contentMD5"),  contentMd5}
-    };
-    const QByteArray uploadsBodyBytes = QJsonDocument(uploadsBodyObj).toJson(QJsonDocument::Compact);
+    // imgbb expects the base64-encoded image in the `image` form field of an
+    // application/x-www-form-urlencoded body. The base64 bytes must themselves
+    // be percent-encoded so that '+' / '/' / '=' survive the form decoder.
+    const QByteArray imgbbBody =
+        QByteArray("image=")
+        + QUrl::toPercentEncoding(QString::fromLatin1(jpegData.toBase64()));
 
-    QNetworkRequest uploadsReq(uploadsUrl);
-    uploadsReq.setRawHeader("x-amz-access-token", token.toUtf8());
-    uploadsReq.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-    uploadsReq.setRawHeader("accept", "application/json");
+    QNetworkRequest imgbbReq(imgbbUrl);
+    imgbbReq.setHeader(QNetworkRequest::ContentTypeHeader,
+                       "application/x-www-form-urlencoded");
+    imgbbReq.setRawHeader("accept", "application/json");
 
-    const QString uploadsTs = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
-    qDebug() << "AmazonCatalogApi: POST upload destination" << uploadsUrl.toString();
-    QNetworkReply* uploadsReply = _nam()->post(uploadsReq, uploadsBodyBytes);
-    co_await qCoro(uploadsReply).waitForFinished();
+    qDebug() << "AmazonCatalogApi: POST imgbb upload (" << jpegData.size()
+             << "bytes JPEG,"      << imgbbBody.size() << "bytes form body)";
+    QNetworkReply* imgbbReply = _nam()->post(imgbbReq, imgbbBody);
+    co_await qCoro(imgbbReply).waitForFinished();
 
-    const QByteArray uploadsData = uploadsReply->readAll();
-    const int uploadsStatus = uploadsReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    const QString uploadsRequestId = rawHeaderCI(uploadsReply, "x-amzn-RequestId");
-    uploadsReply->deleteLater();
+    const QByteArray imgbbData = imgbbReply->readAll();
+    const int imgbbStatus = imgbbReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QNetworkReply::NetworkError imgbbError = imgbbReply->error();
+    imgbbReply->deleteLater();
 
-    qDebug() << "AmazonCatalogApi: upload destination HTTP" << uploadsStatus
-             << "RequestId:" << uploadsRequestId
-             << "response:" << QString::fromUtf8(uploadsData.left(300));
+    qDebug() << "AmazonCatalogApi: imgbb HTTP" << imgbbStatus
+             << "response:" << QString::fromUtf8(imgbbData.left(300));
 
-    if (uploadsStatus != 201 && uploadsStatus != 200) {
-        m_lastError = QStringLiteral("Upload destination HTTP %1 for SKU %2: %3")
-                          .arg(uploadsStatus).arg(sku, QString::fromUtf8(uploadsData.left(300)));
-        qWarning() << "AmazonCatalogApi:" << m_lastError;
-        const QString tsFile = QDateTime::currentDateTimeUtc().toString("yyyyMMdd'T'HHmmss'Z'");
-        const QString diagPath = QStringLiteral("/tmp/sp-api-img-upload-%1-%2.txt").arg(sku, tsFile);
-        QFile f(diagPath);
-        if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            QTextStream s(&f);
-            s << "=== API OPERATION ===\n"
-              << "createUploadDestinationForResource\n\n"
-              << "=== REQUEST ===\n"
-              << "Timestamp:  " << uploadsTs << "\n"
-              << "POST " << uploadsUrl.toString() << "\n"
-              << "x-amz-access-token: " << token.left(20) << "...(truncated)\n"
-              << "Content-Type: application/json\n"
-              << "accept: application/json\n\n"
-              << "Body:\n" << QString::fromUtf8(uploadsBodyBytes) << "\n\n"
-              << "=== RESPONSE ===\n"
-              << "HTTP " << uploadsStatus << "\n"
-              << "x-amzn-RequestId: " << uploadsRequestId << "\n\n"
-              << QString::fromUtf8(uploadsData) << "\n";
-        }
-        co_return;
-    }
-
-    const QJsonObject uploadsDoc = QJsonDocument::fromJson(uploadsData).object();
-    const QJsonObject payload = uploadsDoc.value(QStringLiteral("payload")).toObject();
-    const QString uploadDestinationId = payload.value(QStringLiteral("uploadDestinationId")).toString();
-    const QString presignedUrl = payload.value(QStringLiteral("url")).toString();
-    const QJsonObject extraHeaders = payload.value(QStringLiteral("headers")).toObject();
-
-    if (uploadDestinationId.isEmpty() || presignedUrl.isEmpty()) {
-        m_lastError = QStringLiteral("Upload destination missing uploadDestinationId or url for SKU %1: %2")
-                          .arg(sku, QString::fromUtf8(uploadsData.left(300)));
+    if (imgbbStatus != 200 || imgbbError != QNetworkReply::NoError) {
+        m_lastError = QStringLiteral("imgbb upload HTTP %1 for SKU %2: %3")
+                          .arg(imgbbStatus).arg(sku, QString::fromUtf8(imgbbData.left(300)));
         qWarning() << "AmazonCatalogApi:" << m_lastError;
         co_return;
     }
 
-    // Step 2: PUT image to the presigned URL
-    const QUrl presignedUrlObj(presignedUrl);
-    QNetworkRequest putReq(presignedUrlObj);
-    putReq.setHeader(QNetworkRequest::ContentTypeHeader, "image/jpeg");
-    for (auto it = extraHeaders.constBegin(); it != extraHeaders.constEnd(); ++it)
-        putReq.setRawHeader(it.key().toUtf8(), it.value().toString().toUtf8());
-
-    qDebug() << "AmazonCatalogApi: PUT image" << jpegData.size() << "bytes to presigned URL";
-    QNetworkReply* putReply = _nam()->put(putReq, jpegData);
-    co_await qCoro(putReply).waitForFinished();
-
-    const QByteArray putData = putReply->readAll();
-    const int putStatus = putReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    const QNetworkReply::NetworkError putError = putReply->error();
-    putReply->deleteLater();
-
-    qDebug() << "AmazonCatalogApi: PUT image HTTP" << putStatus;
-
-    if (putStatus != 200 && putStatus != 204 && putError != QNetworkReply::NoError) {
-        m_lastError = QStringLiteral("PUT image HTTP %1 for SKU %2: %3")
-                          .arg(putStatus).arg(sku, QString::fromUtf8(putData.left(300)));
+    const QJsonObject imgbbDoc = QJsonDocument::fromJson(imgbbData).object();
+    const QJsonObject imgbbDataObj = imgbbDoc.value(QStringLiteral("data")).toObject();
+    const QString publicUrl = imgbbDataObj.value(QStringLiteral("url")).toString();
+    if (publicUrl.isEmpty()) {
+        m_lastError = QStringLiteral("imgbb upload succeeded but no data.url in response for SKU %1: %2")
+                          .arg(sku, QString::fromUtf8(imgbbData.left(300)));
         qWarning() << "AmazonCatalogApi:" << m_lastError;
         co_return;
     }
+    qDebug() << "AmazonCatalogApi: imgbb public URL =" << publicUrl;
 
-    // Step 3: Determine target image slot
+    // ---------------------------------------------------------------
+    // Step 2: detect the target image slot (only if caller didn't pin one).
+    //         -1 = append at next empty slot, -2 = replace the last filled.
+    // ---------------------------------------------------------------
     int targetIndex = imageIndex; // >= 0: use directly
 
     if (imageIndex == -1 || imageIndex == -2) {
@@ -1154,8 +1110,9 @@ QCoro::Task<void> AmazonCatalogApi::patchListingImage(QString marketplaceId,
             const QJsonObject getDoc = QJsonDocument::fromJson(getData).object();
             const QJsonObject attrs = getDoc.value(QStringLiteral("attributes")).toObject();
             for (int i = 0; i < 8; ++i) {
-                const QString attrName = QStringLiteral("other_product_image_locator_%1").arg(i + 1);
-                if (!attrs.value(attrName).toArray().isEmpty())
+                const QString attrLookupName =
+                    QStringLiteral("other_product_image_locator_%1").arg(i + 1);
+                if (!attrs.value(attrLookupName).toArray().isEmpty())
                     highestFilledSlot = i;
             }
         } else {
@@ -1168,19 +1125,18 @@ QCoro::Task<void> AmazonCatalogApi::patchListingImage(QString marketplaceId,
             targetIndex = qMax(highestFilledSlot, 0);     // replace last
     }
 
-    // Step 4: PATCH listing with the uploaded image
+    // ---------------------------------------------------------------
+    // Step 3: PATCH the listing using the Submit-Media format. The stored
+    //         listing GET shows the actual schema is { marketplace_id,
+    //         media_location } — NOT the legacy { images: [{link, variant}] }
+    //         shape that the docs sometimes show.
+    // ---------------------------------------------------------------
     const int slotNumber = targetIndex + 1; // 1-based
     const QString attrName = QStringLiteral("other_product_image_locator_%1").arg(slotNumber);
-    const QString variantName = QStringLiteral("PT%1").arg(slotNumber, 2, 10, QLatin1Char('0'));
 
     const QJsonObject imageValue{
         {QStringLiteral("marketplace_id"), marketplaceId},
-        {QStringLiteral("images"), QJsonArray{
-            QJsonObject{
-                {QStringLiteral("link"),    uploadDestinationId},
-                {QStringLiteral("variant"), variantName}
-            }
-        }}
+        {QStringLiteral("media_location"), publicUrl}
     };
 
     const QJsonObject patch{
@@ -1218,7 +1174,8 @@ QCoro::Task<void> AmazonCatalogApi::patchListingImage(QString marketplaceId,
     patchReq.setRawHeader("accept", "application/json");
 
     qDebug() << "AmazonCatalogApi: PATCH image" << patchUrl.toString()
-             << "slot:" << slotNumber << attrName << variantName
+             << "slot:" << slotNumber << attrName
+             << "media_location:" << publicUrl
              << "body:" << patchBodyBytes.left(200);
     QNetworkReply* patchReply = _nam()->sendCustomRequest(patchReq, "PATCH", patchBodyBytes);
     co_await qCoro(patchReply).waitForFinished();
@@ -1242,14 +1199,38 @@ QCoro::Task<void> AmazonCatalogApi::patchListingImage(QString marketplaceId,
         QFile f(diagPath);
         if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
             QTextStream s(&f);
-            s << "=== REQUEST ===\n"
+            s << "=== IMGBB UPLOAD ===\n"
+              << "Public URL: " << publicUrl << "\n\n"
+              << "=== REQUEST ===\n"
               << "PATCH " << patchUrl.toString() << "\n\n"
               << "Request body:\n" << QString::fromUtf8(patchBodyBytes) << "\n\n"
               << "=== RESPONSE ===\n"
-              << "HTTP " << patchStatus << "\n\n"
+              << "HTTP " << patchStatus << "\n"
+              << "x-amzn-RequestId: " << requestId << "\n\n"
               << QString::fromUtf8(patchData) << "\n";
+            qDebug() << "AmazonCatalogApi: diagnostic written to" << diagPath;
         }
         co_return;
+    }
+
+    // Always write a success diagnostic too, so we can inspect the public URL
+    // that was sent if Amazon later rejects the asset asynchronously.
+    {
+        const QString ts = QDateTime::currentDateTimeUtc().toString("yyyyMMdd'T'HHmmss'Z'");
+        const QString diagPath = QStringLiteral("/tmp/sp-api-img-patch-%1-%2.txt").arg(sku, ts);
+        QFile f(diagPath);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream s(&f);
+            s << "=== IMGBB UPLOAD ===\n"
+              << "Public URL: " << publicUrl << "\n\n"
+              << "=== REQUEST ===\n"
+              << "PATCH " << patchUrl.toString() << "\n\n"
+              << "Request body:\n" << QString::fromUtf8(patchBodyBytes) << "\n\n"
+              << "=== RESPONSE ===\n"
+              << "HTTP " << patchStatus << "\n"
+              << "x-amzn-RequestId: " << requestId << "\n\n"
+              << QString::fromUtf8(patchData) << "\n";
+        }
     }
 
     *success = true;

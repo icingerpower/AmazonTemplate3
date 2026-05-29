@@ -13,6 +13,7 @@ const QString SettingsTable::KEY_JP_LWA_REFRESH_TOKEN = "AmazonApi/jp/lwaRefresh
 const QString SettingsTable::KEY_EU_SELLER_ID         = "AmazonApi/eu/sellerId";
 const QString SettingsTable::KEY_NA_SELLER_ID         = "AmazonApi/na/sellerId";
 const QString SettingsTable::KEY_JP_SELLER_ID         = "AmazonApi/jp/sellerId";
+const QString SettingsTable::KEY_IMGBB_API_KEY        = "Imgbb/apiKey";
 
 const QList<SettingsTable::Entry> SettingsTable::ENTRIES = {
     {"OpenAI API Key",        KEY_OPENAI_API_KEY,        true},
@@ -24,6 +25,7 @@ const QList<SettingsTable::Entry> SettingsTable::ENTRIES = {
     {"Europe – Seller ID",    KEY_EU_SELLER_ID,          false},
     {"N. America – Seller ID",KEY_NA_SELLER_ID,          false},
     {"Japan – Seller ID",     KEY_JP_SELLER_ID,          false},
+    {"ImgBB API Key",          KEY_IMGBB_API_KEY,         true},
 };
 
 SettingsTable::SettingsTable(QObject *parent)

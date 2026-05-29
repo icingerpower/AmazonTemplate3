@@ -243,30 +243,32 @@ QCoro::Task<void> AmazonAplusApi::uploadImage(QString marketplaceId,
 {
     out->clear();
 
-    const QString endpoint = endpointForMarketplace(marketplaceId);
-
     // Step 1 — POST /uploads/2020-11-01/uploadDestinations/{resource}
     const QByteArray md5Bytes = QCryptographicHash::hash(imageBytes, QCryptographicHash::Md5);
     const QString contentMd5  = QString::fromLatin1(md5Bytes.toBase64());
 
-    // The {resource} path segment must have its slashes percent-encoded as %2F
-    // so Amazon's router sees a single parameter, not extra path segments.
-    // Use fromEncoded() for the path so Qt does not re-encode the %2F.
-    // contentMD5 and contentType are query parameters per the Uploads API spec.
+    // The Uploads API is only available on the NA endpoint (sellingpartnerapi-na).
+    // Upload destination IDs are S3-backed and cross-region usable, so we always
+    // upload via NA regardless of which marketplace the A+ content targets.
+    const QString uploadEndpoint    = QStringLiteral("sellingpartnerapi-na.amazon.com");
+    // NA marketplace ID used only for the upload call; content is still published
+    // to the original marketplaceId.
+    const QString uploadMarketplace = QStringLiteral("ATVPDKIKX0DER");
+
     const QString resource = QStringLiteral("aplus/2020-11-01/contentDocuments");
     const QString encodedResource = QString::fromUtf8(QUrl::toPercentEncoding(resource));
 
     QUrl uploadsUrl = QUrl::fromEncoded(
         QStringLiteral("https://%1/uploads/2020-11-01/uploadDestinations/%2")
-            .arg(endpoint, encodedResource).toUtf8());
+            .arg(uploadEndpoint, encodedResource).toUtf8());
     QUrlQuery uploadsQuery;
-    uploadsQuery.addQueryItem(QStringLiteral("marketplaceIds"), marketplaceId);
+    uploadsQuery.addQueryItem(QStringLiteral("marketplaceIds"), uploadMarketplace);
     uploadsQuery.addQueryItem(QStringLiteral("contentMD5"),     contentMd5);
     uploadsQuery.addQueryItem(QStringLiteral("contentType"),    contentType);
     uploadsUrl.setQuery(uploadsQuery);
 
     QString token;
-    co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
+    co_await _getAccessToken(QStringLiteral("NA"), &token);
     if (token.isEmpty()) {
         m_lastError = QStringLiteral("No access token for marketplace %1").arg(marketplaceId);
         co_return;

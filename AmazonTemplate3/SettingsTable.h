@@ -21,6 +21,8 @@ public:
     static const QString KEY_NA_SELLER_ID;
     static const QString KEY_JP_SELLER_ID;
 
+    static const QString KEY_IMGBB_API_KEY;
+
     static SettingsTable *instance();
 
     QString value(const QString &key, const QString &defaultValue = {}) const;

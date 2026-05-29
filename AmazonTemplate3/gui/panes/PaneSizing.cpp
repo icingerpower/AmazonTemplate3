@@ -88,7 +88,8 @@ PaneSizing::PaneSizing(QWidget *parent)
         s->value(SettingsTable::KEY_JP_LWA_REFRESH_TOKEN),
         s->value(SettingsTable::KEY_EU_SELLER_ID),
         s->value(SettingsTable::KEY_NA_SELLER_ID),
-        s->value(SettingsTable::KEY_JP_SELLER_ID));
+        s->value(SettingsTable::KEY_JP_SELLER_ID),
+        s->value(SettingsTable::KEY_IMGBB_API_KEY));
     m_aplusApi = std::make_unique<AmazonAplusApi>(
         s->value(SettingsTable::KEY_LWA_CLIENT_ID),
         s->value(SettingsTable::KEY_LWA_CLIENT_SECRET),
@@ -285,7 +286,8 @@ void PaneSizing::_refreshApi()
         s->value(SettingsTable::KEY_JP_LWA_REFRESH_TOKEN),
         s->value(SettingsTable::KEY_EU_SELLER_ID),
         s->value(SettingsTable::KEY_NA_SELLER_ID),
-        s->value(SettingsTable::KEY_JP_SELLER_ID));
+        s->value(SettingsTable::KEY_JP_SELLER_ID),
+        s->value(SettingsTable::KEY_IMGBB_API_KEY));
     m_aplusApi = std::make_unique<AmazonAplusApi>(
         s->value(SettingsTable::KEY_LWA_CLIENT_ID),
         s->value(SettingsTable::KEY_LWA_CLIENT_SECRET),

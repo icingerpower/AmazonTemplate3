@@ -66,6 +66,8 @@ void PaneSettings::_loadSettings()
     ui->lineEditJpLwaRefreshToken->setText(st->value(SettingsTable::KEY_JP_LWA_REFRESH_TOKEN));
     ui->lineEditJpSellerId->setText(st->value(SettingsTable::KEY_JP_SELLER_ID));
 
+    ui->lineEditImgbbApiKey->setText(st->value(SettingsTable::KEY_IMGBB_API_KEY));
+
     const QString openAiKey = st->value(SettingsTable::KEY_OPENAI_API_KEY);
     if (!openAiKey.isEmpty()) {
         OpenAi2::instance()->init(openAiKey);
@@ -104,4 +106,7 @@ void PaneSettings::_connectSlots()
             this, [st](const QString &v){ st->setValue(SettingsTable::KEY_JP_LWA_REFRESH_TOKEN, v); });
     connect(ui->lineEditJpSellerId, &QLineEdit::textChanged,
             this, [st](const QString &v){ st->setValue(SettingsTable::KEY_JP_SELLER_ID, v); });
+
+    connect(ui->lineEditImgbbApiKey, &QLineEdit::textChanged,
+            this, [st](const QString &v){ st->setValue(SettingsTable::KEY_IMGBB_API_KEY, v); });
 }

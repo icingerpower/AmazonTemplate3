@@ -49,6 +49,7 @@ public:
                               const QString& sellerIdEu = {},
                               const QString& sellerIdNa = {},
                               const QString& sellerIdJp = {},
+                              const QString& imgbbApiKey = {},
                               QObject* parent = nullptr);
     ~AmazonCatalogApi() override;
 
@@ -200,6 +201,7 @@ private:
     QString m_sellerIdEu;
     QString m_sellerIdNa;
     QString m_sellerIdJp;
+    QString m_imgbbApiKey;
 
     // LWA access token cache — one entry per geographic region (EU / NA / JP)
     QString   m_accessTokenEu;   QDateTime m_accessTokenExpiryEu;
