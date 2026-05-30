@@ -5,6 +5,7 @@
 #include <QDir>
 #include <QImage>
 #include <QList>
+#include <QMap>
 #include <QMenu>
 #include <QPair>
 #include <memory>
@@ -111,6 +112,7 @@ private:
     QList<AbstractCli *>  m_availableClis;
     QNetworkAccessManager *m_imageNam = nullptr;
     QList<QPair<QString, QStringList>> m_colorVariants;
+    QMap<QString, QStringList>         m_colorAsins;  // color.toLower() → child ASINs
 
     // A+ content state
     std::unique_ptr<APlusContent> m_aplusContent;

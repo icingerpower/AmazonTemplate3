@@ -1,5 +1,6 @@
 #include "TreeSizingAsins.h"
 
+#include <QMap>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -326,6 +327,15 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
             }
             if (!colorImages.isEmpty())
                 emit variantImagesFetched(colorImages);
+
+            // Emit color → child ASINs map (all sizes per color).
+            QMap<QString, QStringList> colorToAsins;
+            for (const auto& c : family.children) {
+                if (!c.asin.isEmpty())
+                    colorToAsins[c.color.toLower()].append(c.asin);
+            }
+            if (!colorToAsins.isEmpty())
+                emit colorAsinsReady(colorToAsins);
 
             attributesEmitted = true;
         }

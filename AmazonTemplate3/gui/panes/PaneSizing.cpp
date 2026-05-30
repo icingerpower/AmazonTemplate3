@@ -555,6 +555,8 @@ void PaneSizing::_ensureModel(const QDir &dir)
 
     connect(m_treeModel.get(), &TreeSizingAsins::variantImagesFetched,
             this, &PaneSizing::_downloadVariantImages);
+    connect(m_treeModel.get(), &TreeSizingAsins::colorAsinsReady,
+            this, [this](const QMap<QString, QStringList> &map) { m_colorAsins = map; });
 
 
     connect(m_treeModel.get(), &TreeSizingAsins::loadError,
@@ -1200,8 +1202,8 @@ QJsonObject buildFaqModule(const QString &text)
         pos += 2000;
     }
     return QJsonObject{
-        {QStringLiteral("contentModuleType"), QStringLiteral("STANDARD_TEXT_BOX")},
-        {QStringLiteral("standardTextBox"), QJsonObject{
+        {QStringLiteral("contentModuleType"), QStringLiteral("STANDARD_TEXT")},
+        {QStringLiteral("standardText"), QJsonObject{
             {QStringLiteral("headline"), QJsonObject{
                 {QStringLiteral("value"), QStringLiteral("FAQ")},
                 {QStringLiteral("decoratorSet"), QJsonArray{}}
@@ -1217,30 +1219,34 @@ QJsonObject buildImageModule(const QString &uploadId,
                               const QString &caption,
                               int imgWidth, int imgHeight)
 {
+    // Amazon rejects em/en dashes as guideline violations — replace with hyphen.
+    const QString safeCaption = QString(caption).replace(QChar(0x2014), QLatin1Char('-'))
+                                                .replace(QChar(0x2013), QLatin1Char('-'));
     return QJsonObject{
-        {QStringLiteral("contentModuleType"), QStringLiteral("STANDARD_SINGLE_SIDE_IMAGE")},
-        {QStringLiteral("standardSingleSideImage"), QJsonObject{
-            {QStringLiteral("imageCaption"), QJsonObject{
-                {QStringLiteral("value"), caption},
+        {QStringLiteral("contentModuleType"), QStringLiteral("STANDARD_HEADER_IMAGE_TEXT")},
+        {QStringLiteral("standardHeaderImageText"), QJsonObject{
+            {QStringLiteral("headline"), QJsonObject{
+                {QStringLiteral("value"), safeCaption},
                 {QStringLiteral("decoratorSet"), QJsonArray{}}
             }},
-            {QStringLiteral("imageList"), QJsonArray{
-                QJsonObject{
-                    {QStringLiteral("image"), QJsonObject{
-                        {QStringLiteral("uploadDestinationId"), uploadId},
-                        {QStringLiteral("imageCropSpecification"), QJsonObject{
-                            {QStringLiteral("size"), QJsonObject{
-                                {QStringLiteral("width"),  QJsonObject{{QStringLiteral("value"), imgWidth},  {QStringLiteral("units"), QStringLiteral("pixels")}}},
-                                {QStringLiteral("height"), QJsonObject{{QStringLiteral("value"), imgHeight}, {QStringLiteral("units"), QStringLiteral("pixels")}}}
-                            }},
-                            {QStringLiteral("offset"), QJsonObject{
-                                {QStringLiteral("x"), QJsonObject{{QStringLiteral("value"), 0}, {QStringLiteral("units"), QStringLiteral("pixels")}}},
-                                {QStringLiteral("y"), QJsonObject{{QStringLiteral("value"), 0}, {QStringLiteral("units"), QStringLiteral("pixels")}}}
-                            }}
+            {QStringLiteral("block"), QJsonObject{
+                {QStringLiteral("image"), QJsonObject{
+                    {QStringLiteral("uploadDestinationId"), uploadId},
+                    {QStringLiteral("altText"), safeCaption},
+                    {QStringLiteral("imageCropSpecification"), QJsonObject{
+                        {QStringLiteral("size"), QJsonObject{
+                            {QStringLiteral("width"),  QJsonObject{{QStringLiteral("value"), imgWidth},  {QStringLiteral("units"), QStringLiteral("pixels")}}},
+                            {QStringLiteral("height"), QJsonObject{{QStringLiteral("value"), imgHeight}, {QStringLiteral("units"), QStringLiteral("pixels")}}}
+                        }},
+                        {QStringLiteral("offset"), QJsonObject{
+                            {QStringLiteral("x"), QJsonObject{{QStringLiteral("value"), 0}, {QStringLiteral("units"), QStringLiteral("pixels")}}},
+                            {QStringLiteral("y"), QJsonObject{{QStringLiteral("value"), 0}, {QStringLiteral("units"), QStringLiteral("pixels")}}}
                         }}
-                    }},
-                    {QStringLiteral("altText"), caption}
-                }
+                    }}
+                }},
+                {QStringLiteral("body"), QJsonObject{
+                    {QStringLiteral("textList"), QJsonArray{}}
+                }}
             }}
         }}
     };
@@ -1374,6 +1380,14 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
     if (mpIds.isEmpty()) co_return;
     if (imageSets.isEmpty()) imageSets.append(QList<APlusUploadDialog::ElementInfo>{}); // size chart + FAQ only
 
+    // --- Probe A+ Content API access before attempting uploads ---
+    {
+        int probeStatus = 0;
+        co_await m_aplusApi->probeContentDocumentAccess(mpIds.first(), &probeStatus);
+        qDebug() << "PaneSizing: A+ Content API probe for" << mpIds.first()
+                 << "→ HTTP" << probeStatus;
+    }
+
     // --- Estimate total steps ---
     const int fixedPerUpload = 3 + (submitApproval ? 1 : 0);
     int totalSteps = 0;
@@ -1413,6 +1427,16 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                         tr("▶ Uploading size chart: %1").arg(sc->displayName));
                     QImage img(sc->imagePath);
                     if (!img.isNull()) {
+                        img = [](QImage src) {
+                            if (src.width() > 970) src = src.scaledToWidth(970, Qt::SmoothTransformation);
+                            if (src.height() < 600) {
+                                QImage p(src.width(), 600, QImage::Format_ARGB32);
+                                p.fill(Qt::white);
+                                QPainter(&p).drawImage(0, (600 - src.height()) / 2, src);
+                                src = p;
+                            }
+                            return src;
+                        }(img);
                         const int imgW = img.width(), imgH = img.height();
                         QByteArray bytes = imageToPngBytes(img);
                         QString uploadId;
@@ -1449,6 +1473,16 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                     appendAplusLog(progressUi.logPtr, tr("  ⚠ Cannot load image — skipped"));
                     continue;
                 }
+                img = [](QImage src) {
+                    if (src.width() > 970) src = src.scaledToWidth(970, Qt::SmoothTransformation);
+                    if (src.height() < 600) {
+                        QImage p(src.width(), 600, QImage::Format_ARGB32);
+                        p.fill(Qt::white);
+                        QPainter(&p).drawImage(0, (600 - src.height()) / 2, src);
+                        src = p;
+                    }
+                    return src;
+                }(img);
                 const int imgW = img.width(), imgH = img.height();
                 QByteArray bytes = imageToPngBytes(img);
                 QString uploadId;
@@ -1497,7 +1531,7 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                 {QStringLiteral("name"),              m_productTitle.isEmpty()
                                                       ? QStringLiteral("A+ Content")
                                                       : m_productTitle.left(100)},
-                {QStringLiteral("contentType"),       QStringLiteral("EMC")},
+                {QStringLiteral("contentType"),       QStringLiteral("EBC")},
                 {QStringLiteral("locale"),            locale},
                 {QStringLiteral("contentModuleList"), moduleList}
             };
@@ -1512,21 +1546,39 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
             appendAplusLog(progressUi.logPtr,
                 tr("  ✓ Document created — key: %1").arg(contentReferenceKey.left(40)));
 
-            // --- Associate with ASIN ---
+            // --- Resolve child ASINs for this color set ---
+            // A+ content must be associated with child (purchasable) ASINs,
+            // not the parent variation ASIN which doesn't exist in the catalog.
+            QStringList asinList;
+            {
+                const QString colorKey = (colorIdx < colorNames.size())
+                    ? colorNames.at(colorIdx).toLower() : QString{};
+                if (!colorKey.isEmpty() && m_colorAsins.contains(colorKey)) {
+                    asinList = m_colorAsins.value(colorKey);
+                } else {
+                    // Size-only or single-color product: use all children.
+                    for (const auto &asins : std::as_const(m_colorAsins))
+                        for (const QString &a : asins)
+                            if (!asinList.contains(a)) asinList << a;
+                }
+            }
+
+            // --- Associate with ASINs ---
             ++step;
-            setAplusStatus(progressUi, tr("Associating with ASIN…"), step - 1);
-            if (m_currentAsin.isEmpty()) {
+            setAplusStatus(progressUi, tr("Associating with ASINs…"), step - 1);
+            if (asinList.isEmpty()) {
                 appendAplusLog(progressUi.logPtr,
-                    tr("  ⚠ No ASIN available — skipping association."));
+                    tr("  ⚠ No child ASINs available — skipping association."));
             } else {
                 appendAplusLog(progressUi.logPtr,
-                    tr("▶ Associating with ASIN %1").arg(m_currentAsin));
+                    tr("▶ Associating with %1 ASIN(s): %2")
+                        .arg(asinList.size())
+                        .arg(asinList.join(QStringLiteral(", "))));
                 bool asinOk = false;
-                QStringList asinList{m_currentAsin};
                 co_await m_aplusApi->postAsinRelations(contentReferenceKey, mpId,
                                                        asinList, &asinOk);
                 appendAplusLog(progressUi.logPtr, asinOk
-                    ? tr("  ✓ ASIN associated.")
+                    ? tr("  ✓ ASINs associated.")
                     : tr("  ⚠ ASIN association failed: %1 (continuing)")
                           .arg(m_aplusApi->lastError()));
             }
@@ -1537,8 +1589,6 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
             appendAplusLog(progressUi.logPtr, tr("▶ Validating content document…"));
             {
                 QStringList valErrors, valWarnings;
-                QStringList asinList = m_currentAsin.isEmpty()
-                    ? QStringList{} : QStringList{m_currentAsin};
                 co_await m_aplusApi->validateContentDocumentAsinRelations(
                     contentReferenceKey, mpId, contentDoc,
                     asinList, &valErrors, &valWarnings);

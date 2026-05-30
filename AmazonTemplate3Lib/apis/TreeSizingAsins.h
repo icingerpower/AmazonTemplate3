@@ -64,6 +64,9 @@ signals:
     // For color variants, one entry per unique color is emitted so each
     // color's photos can be downloaded and shown separately.
     void variantImagesFetched(QList<QPair<QString, QStringList>> colorImages);
+    // Emitted alongside variantImagesFetched: maps color.toLower() → all child ASINs
+    // with that color (all sizes). Empty-string key covers size-only products.
+    void colorAsinsReady(QMap<QString, QStringList> colorToAsins);
     // Emitted after the first family load: country codes where the product
     // exists (no suffix) followed by missing ones suffixed with " (missing)".
     // Regions checked: EU representative (FR), NA representative (US), JP.

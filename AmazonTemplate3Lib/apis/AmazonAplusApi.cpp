@@ -164,6 +164,7 @@ static void writeAplusDiagnostic(const QString &tag,
       << requestSummary << "\n\n";
     if (!requestBody.isEmpty())
         s << "Body:\n" << QString::fromUtf8(requestBody) << "\n\n";
+    // token prefix logged separately via qDebug
     s << "=== RESPONSE ===\n"
       << "HTTP " << httpStatus << "\n"
       << "x-amzn-RequestId: " << requestId << "\n\n"
@@ -247,26 +248,27 @@ QCoro::Task<void> AmazonAplusApi::uploadImage(QString marketplaceId,
     const QByteArray md5Bytes = QCryptographicHash::hash(imageBytes, QCryptographicHash::Md5);
     const QString contentMd5  = QString::fromLatin1(md5Bytes.toBase64());
 
-    // The Uploads API is only available on the NA endpoint (sellingpartnerapi-na).
-    // Upload destination IDs are S3-backed and cross-region usable, so we always
-    // upload via NA regardless of which marketplace the A+ content targets.
-    const QString uploadEndpoint    = QStringLiteral("sellingpartnerapi-na.amazon.com");
-    // NA marketplace ID used only for the upload call; content is still published
-    // to the original marketplaceId.
-    const QString uploadMarketplace = QStringLiteral("ATVPDKIKX0DER");
+    // The Uploads API is hosted on the NA endpoint. EU tokens are cross-verified
+    // by Amazon's infrastructure for A+ content. CRITICAL: the resource path
+    // slashes must NOT be percent-encoded (%2F) — Amazon's API gateway fails
+    // IAM/STS route policy matching if the path contains %2F.
+    const QString uploadEndpoint = QStringLiteral("sellingpartnerapi-na.amazon.com");
 
-    const QString resource = QStringLiteral("aplus/2020-11-01/contentDocuments");
-    const QString encodedResource = QString::fromUtf8(QUrl::toPercentEncoding(resource));
-
-    QUrl uploadsUrl = QUrl::fromEncoded(
-        QStringLiteral("https://%1/uploads/2020-11-01/uploadDestinations/%2")
-            .arg(uploadEndpoint, encodedResource).toUtf8());
+    QUrl uploadsUrl;
+    uploadsUrl.setScheme(QStringLiteral("https"));
+    uploadsUrl.setHost(uploadEndpoint);
+    uploadsUrl.setPath(QStringLiteral(
+        "/uploads/2020-11-01/uploadDestinations/aplus/2020-11-01/contentDocuments"));
+    // NA endpoint requires NA marketplace ID. Use ATVPDKIKX0DER (US) with NA
+    // token. The uploadDestinationId is S3-backed and reusable across regions.
     QUrlQuery uploadsQuery;
-    uploadsQuery.addQueryItem(QStringLiteral("marketplaceIds"), uploadMarketplace);
+    uploadsQuery.addQueryItem(QStringLiteral("marketplaceIds"),
+                              QStringLiteral("ATVPDKIKX0DER"));
     uploadsQuery.addQueryItem(QStringLiteral("contentMD5"),     contentMd5);
     uploadsQuery.addQueryItem(QStringLiteral("contentType"),    contentType);
     uploadsUrl.setQuery(uploadsQuery);
 
+    // NA token for the NA endpoint.
     QString token;
     co_await _getAccessToken(QStringLiteral("NA"), &token);
     if (token.isEmpty()) {
@@ -279,8 +281,11 @@ QCoro::Task<void> AmazonAplusApi::uploadImage(QString marketplaceId,
     QNetworkRequest uploadsReq(uploadsUrl);
     uploadsReq.setRawHeader("x-amz-access-token", token.toUtf8());
     uploadsReq.setRawHeader("accept", "application/json");
+    uploadsReq.setHeader(QNetworkRequest::ContentTypeHeader,
+                         QStringLiteral("application/json"));
 
-    qDebug() << "AmazonAplusApi: POST upload destination" << uploadsUrl.toString();
+    qDebug() << "AmazonAplusApi: POST upload destination" << uploadsUrl.toString()
+             << "token prefix:" << token.left(20);
     QNetworkReply *uploadsReply = _nam()->post(uploadsReq, uploadsBodyBytes);
     co_await qCoro(uploadsReply).waitForFinished();
 
@@ -318,20 +323,41 @@ QCoro::Task<void> AmazonAplusApi::uploadImage(QString marketplaceId,
     }
 
     // Step 2 — POST image to S3 as multipart/form-data.
-    // A+ content uses S3 pre-signed POST (not PUT). The `headers` field in the
-    // Uploads API response contains the required S3 form fields (acl, key,
-    // policy, x-amz-credential, x-amz-date, x-amz-signature, …). The image
-    // itself goes as the last "File" part per Amazon's documentation.
+    // Amazon returns an S3 presigned-POST URL where all signing parameters are
+    // in the query string (not a separate `headers` field). We must POST to the
+    // bare base URL (scheme+host only) with all query parameters moved into the
+    // multipart form body. Sending them in the URL query string causes S3 to
+    // return 400 "Conflicting query string parameters: acl, policy".
+    const QUrl psuFull(presignedUrl);
+    QUrl s3BaseUrl;
+    s3BaseUrl.setScheme(psuFull.scheme());
+    s3BaseUrl.setHost(psuFull.host());
+    s3BaseUrl.setPath(psuFull.path());   // usually "/"
+
     auto *multipart = new QHttpMultiPart(QHttpMultiPart::FormDataType);
 
-    for (auto it = extraHeaders.constBegin(); it != extraHeaders.constEnd(); ++it) {
+    // Add all URL query params as form fields first (order matters for S3).
+    const QUrlQuery psuQuery(psuFull);
+    for (const auto &pair : psuQuery.queryItems()) {
         QHttpPart part;
         part.setHeader(QNetworkRequest::ContentDispositionHeader,
-                       QStringLiteral("form-data; name=\"%1\"").arg(it.key()));
-        part.setBody(it.value().toString().toUtf8());
+                       QStringLiteral("form-data; name=\"%1\"").arg(pair.first));
+        part.setBody(pair.second.toUtf8());
         multipart->append(part);
     }
 
+    // Fall back to `headers` field if the URL had no query params (future-proof).
+    if (psuQuery.isEmpty()) {
+        for (auto it = extraHeaders.constBegin(); it != extraHeaders.constEnd(); ++it) {
+            QHttpPart part;
+            part.setHeader(QNetworkRequest::ContentDispositionHeader,
+                           QStringLiteral("form-data; name=\"%1\"").arg(it.key()));
+            part.setBody(it.value().toString().toUtf8());
+            multipart->append(part);
+        }
+    }
+
+    // Image must be the last part, named "File".
     QHttpPart filePart;
     filePart.setHeader(QNetworkRequest::ContentDispositionHeader,
                        QStringLiteral("form-data; name=\"File\""));
@@ -340,8 +366,8 @@ QCoro::Task<void> AmazonAplusApi::uploadImage(QString marketplaceId,
     multipart->append(filePart);
 
     qDebug() << "AmazonAplusApi: POST (multipart)" << imageBytes.size()
-             << "bytes to" << presignedUrl.left(60);
-    QNetworkRequest postReq{QUrl(presignedUrl)};
+             << "bytes to" << s3BaseUrl.toString();
+    QNetworkRequest postReq{s3BaseUrl};
     QNetworkReply *putReply = _nam()->post(postReq, multipart);
     multipart->setParent(putReply); // deleted with the reply
     co_await qCoro(putReply).waitForFinished();
@@ -365,6 +391,45 @@ QCoro::Task<void> AmazonAplusApi::uploadImage(QString marketplaceId,
 
     *out = uploadDestinationId;
     co_return;
+}
+
+// ---------------------------------------------------------------------------
+// probeContentDocumentAccess — GET /aplus/2020-11-01/contentDocuments
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonAplusApi::probeContentDocumentAccess(QString marketplaceId,
+                                                               int *httpStatus)
+{
+    *httpStatus = 0;
+    const QString endpoint = endpointForMarketplace(marketplaceId);
+
+    QUrl url;
+    url.setScheme(QStringLiteral("https"));
+    url.setHost(endpoint);
+    url.setPath(QStringLiteral("/aplus/2020-11-01/contentDocuments"));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("marketplaceId"), marketplaceId);
+    query.addQueryItem(QStringLiteral("pageSize"),      QStringLiteral("1"));
+    url.setQuery(query);
+
+    QString token;
+    co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
+    if (token.isEmpty()) { co_return; }
+
+    QNetworkRequest req(url);
+    req.setRawHeader("x-amz-access-token", token.toUtf8());
+    req.setRawHeader("accept", "application/json");
+
+    qDebug() << "AmazonAplusApi: GET probeContentDocumentAccess" << url.toString();
+    QNetworkReply *reply = _nam()->get(req);
+    co_await qCoro(reply).waitForFinished();
+
+    *httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QByteArray data = reply->readAll();
+    reply->deleteLater();
+
+    qDebug() << "AmazonAplusApi: probeContentDocumentAccess HTTP" << *httpStatus
+             << QString::fromUtf8(data.left(200));
 }
 
 // ---------------------------------------------------------------------------
@@ -571,8 +636,14 @@ QCoro::Task<void> AmazonAplusApi::validateContentDocumentAsinRelations(
              << "response:" << QString::fromUtf8(data.left(500));
 
     if (status != 200) {
-        errors->append(QStringLiteral("HTTP %1: %2")
-                           .arg(status).arg(QString::fromUtf8(data.left(400))));
+        // 403 means the account lacks permission for this endpoint (e.g. no Brand Registry).
+        // That is not a content error — treat it as a warning so callers can still submit.
+        if (status == 403) {
+            warnings->append(QStringLiteral("Validation skipped (HTTP 403 — endpoint may require Brand Registry)."));
+        } else {
+            errors->append(QStringLiteral("HTTP %1: %2")
+                               .arg(status).arg(QString::fromUtf8(data.left(400))));
+        }
         writeAplusDiagnostic(QStringLiteral("validate"),
                              QStringLiteral("POST ") + url.toString(),
                              bodyBytes, status, requestId, data);

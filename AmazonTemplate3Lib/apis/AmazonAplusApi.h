@@ -35,6 +35,10 @@ public:
                                    QString contentType,
                                    QString *out);
 
+    // Diagnostic: GET /aplus/2020-11-01/contentDocuments — tests A+ API access.
+    // Logs HTTP status to qDebug; *httpStatus receives the status code.
+    QCoro::Task<void> probeContentDocumentAccess(QString marketplaceId, int *httpStatus);
+
     // Step 2: Create A+ content document. contentDocument is the inner object
     // {name, contentType:"EMC", locale, contentModuleList:[...]}.
     // Writes contentReferenceKey into *out on success.
