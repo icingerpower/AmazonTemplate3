@@ -1190,17 +1190,93 @@ buildAplusMarketplaceList(QListWidget *countriesList)
     return marketplaces;
 }
 
+static QString sizeChartTitle(const QString &locale)
+{
+    static const QHash<QString, QString> t{
+        {QStringLiteral("fr-FR"), QStringLiteral("Tableau des tailles")},
+        {QStringLiteral("fr-BE"), QStringLiteral("Tableau des tailles")},
+        {QStringLiteral("de-DE"), QStringLiteral("Größentabelle")},
+        {QStringLiteral("it-IT"), QStringLiteral("Tabella delle taglie")},
+        {QStringLiteral("es-ES"), QStringLiteral("Tabla de tallas")},
+        {QStringLiteral("nl-NL"), QStringLiteral("Maattabel")},
+        {QStringLiteral("en-GB"), QStringLiteral("Size guide")},
+        {QStringLiteral("en-US"), QStringLiteral("Size chart")},
+    };
+    return t.value(locale, QStringLiteral("Size chart"));
+}
+
+static QString apparelSlogan(const QString &locale)
+{
+    static const QHash<QString, QString> t{
+        {QStringLiteral("fr-FR"), QStringLiteral("Réveillez votre aura")},
+        {QStringLiteral("fr-BE"), QStringLiteral("Réveillez votre aura")},
+        {QStringLiteral("de-DE"), QStringLiteral("Entfalte deine Ausstrahlung")},
+        {QStringLiteral("it-IT"), QStringLiteral("Esalta la tua aura")},
+        {QStringLiteral("es-ES"), QStringLiteral("Eleva tu aura")},
+        {QStringLiteral("nl-NL"), QStringLiteral("Straal je aura uit")},
+        {QStringLiteral("en-GB"), QStringLiteral("Raise your aura")},
+        {QStringLiteral("en-US"), QStringLiteral("Raise your aura")},
+    };
+    return t.value(locale, QStringLiteral("Raise your aura"));
+}
+
+static QJsonObject buildHeadlineModule(const QString &title)
+{
+    return QJsonObject{
+        {QStringLiteral("contentModuleType"), QStringLiteral("STANDARD_TEXT")},
+        {QStringLiteral("standardText"), QJsonObject{
+            {QStringLiteral("headline"), QJsonObject{
+                {QStringLiteral("value"), title},
+                {QStringLiteral("decoratorSet"), QJsonArray{}}
+            }},
+            {QStringLiteral("body"), QJsonObject{
+                {QStringLiteral("textList"), QJsonArray{}}
+            }}
+        }}
+    };
+}
+
+static QString stripQaPrefix(const QString &line)
+{
+    // Remove leading "Q: ", "A: ", "Q : ", "A : " (case-insensitive, any whitespace after colon)
+    static const QRegularExpression re(QStringLiteral("^[QqAa]\\s*:\\s*"));
+    return QString(line).remove(re).trimmed();
+}
+
 QJsonObject buildFaqModule(const QString &text)
 {
     QJsonArray textList;
-    int pos = 0;
-    while (pos < text.length()) {
+
+    // One text item per Q&A pair: bold question + STYLE_LINEBREAK + answer.
+    // Paragraph spacing appears only between pairs, not between Q and A.
+    const QStringList pairs = text.split(QStringLiteral("\n\n"), Qt::SkipEmptyParts);
+    for (const QString &pair : pairs) {
+        const QStringList lines = pair.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+        const QString question = lines.isEmpty() ? QString{} : stripQaPrefix(lines[0]);
+        const QString answer   = lines.size() > 1 ? stripQaPrefix(lines[1]) : QString{};
+        if (question.isEmpty()) continue;
+
+        // Q and A go in the same text item (no \n — \n creates a full paragraph
+        // break which gives the same spacing as separate items). One space
+        // between them keeps them in the same paragraph so Q and A stay tight,
+        // while full paragraph spacing appears only between Q&A pairs.
+        const QString sep      = answer.isEmpty() ? QString{} : QStringLiteral(" ");
+        const QString combined = (question + sep + answer).left(2000);
+        const int     qLen     = qMin(question.length(), combined.length());
         textList.append(QJsonObject{
-            {QStringLiteral("value"), text.mid(pos, 2000)},
+            {QStringLiteral("value"), combined},
+            {QStringLiteral("decoratorSet"), QJsonArray{
+                QJsonObject{{QStringLiteral("type"),   QStringLiteral("STYLE_BOLD")},
+                            {QStringLiteral("offset"), 0},
+                            {QStringLiteral("length"), qLen}}
+            }}
+        });
+    }
+    if (textList.isEmpty())
+        textList.append(QJsonObject{
+            {QStringLiteral("value"), text.left(2000)},
             {QStringLiteral("decoratorSet"), QJsonArray{}}
         });
-        pos += 2000;
-    }
     return QJsonObject{
         {QStringLiteral("contentModuleType"), QStringLiteral("STANDARD_TEXT")},
         {QStringLiteral("standardText"), QJsonObject{
@@ -1215,40 +1291,43 @@ QJsonObject buildFaqModule(const QString &text)
     };
 }
 
+// headline is optional — pass empty string to omit it.
 QJsonObject buildImageModule(const QString &uploadId,
                               const QString &caption,
-                              int imgWidth, int imgHeight)
+                              int imgWidth, int imgHeight,
+                              const QString &headline = {})
 {
     // Amazon rejects em/en dashes as guideline violations — replace with hyphen.
     const QString safeCaption = QString(caption).replace(QChar(0x2014), QLatin1Char('-'))
                                                 .replace(QChar(0x2013), QLatin1Char('-'));
-    return QJsonObject{
-        {QStringLiteral("contentModuleType"), QStringLiteral("STANDARD_HEADER_IMAGE_TEXT")},
-        {QStringLiteral("standardHeaderImageText"), QJsonObject{
-            {QStringLiteral("headline"), QJsonObject{
-                {QStringLiteral("value"), safeCaption},
-                {QStringLiteral("decoratorSet"), QJsonArray{}}
-            }},
-            {QStringLiteral("block"), QJsonObject{
-                {QStringLiteral("image"), QJsonObject{
-                    {QStringLiteral("uploadDestinationId"), uploadId},
-                    {QStringLiteral("altText"), safeCaption},
-                    {QStringLiteral("imageCropSpecification"), QJsonObject{
-                        {QStringLiteral("size"), QJsonObject{
-                            {QStringLiteral("width"),  QJsonObject{{QStringLiteral("value"), imgWidth},  {QStringLiteral("units"), QStringLiteral("pixels")}}},
-                            {QStringLiteral("height"), QJsonObject{{QStringLiteral("value"), imgHeight}, {QStringLiteral("units"), QStringLiteral("pixels")}}}
-                        }},
-                        {QStringLiteral("offset"), QJsonObject{
-                            {QStringLiteral("x"), QJsonObject{{QStringLiteral("value"), 0}, {QStringLiteral("units"), QStringLiteral("pixels")}}},
-                            {QStringLiteral("y"), QJsonObject{{QStringLiteral("value"), 0}, {QStringLiteral("units"), QStringLiteral("pixels")}}}
-                        }}
-                    }}
+    QJsonObject inner;
+    if (!headline.isEmpty())
+        inner[QStringLiteral("headline")] = QJsonObject{
+            {QStringLiteral("value"), headline},
+            {QStringLiteral("decoratorSet"), QJsonArray{}}
+        };
+    inner[QStringLiteral("block")] = QJsonObject{
+        {QStringLiteral("image"), QJsonObject{
+            {QStringLiteral("uploadDestinationId"), uploadId},
+            {QStringLiteral("altText"), safeCaption},
+            {QStringLiteral("imageCropSpecification"), QJsonObject{
+                {QStringLiteral("size"), QJsonObject{
+                    {QStringLiteral("width"),  QJsonObject{{QStringLiteral("value"), imgWidth},  {QStringLiteral("units"), QStringLiteral("pixels")}}},
+                    {QStringLiteral("height"), QJsonObject{{QStringLiteral("value"), imgHeight}, {QStringLiteral("units"), QStringLiteral("pixels")}}}
                 }},
-                {QStringLiteral("body"), QJsonObject{
-                    {QStringLiteral("textList"), QJsonArray{}}
+                {QStringLiteral("offset"), QJsonObject{
+                    {QStringLiteral("x"), QJsonObject{{QStringLiteral("value"), 0}, {QStringLiteral("units"), QStringLiteral("pixels")}}},
+                    {QStringLiteral("y"), QJsonObject{{QStringLiteral("value"), 0}, {QStringLiteral("units"), QStringLiteral("pixels")}}}
                 }}
             }}
+        }},
+        {QStringLiteral("body"), QJsonObject{
+            {QStringLiteral("textList"), QJsonArray{}}
         }}
+    };
+    return QJsonObject{
+        {QStringLiteral("contentModuleType"), QStringLiteral("STANDARD_HEADER_IMAGE_TEXT")},
+        {QStringLiteral("standardHeaderImageText"), inner}
     };
 }
 
@@ -1427,8 +1506,27 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                         tr("▶ Uploading size chart: %1").arg(sc->displayName));
                     QImage img(sc->imagePath);
                     if (!img.isNull()) {
-                        img = [](QImage src) {
+                        img = [&locale](QImage src) {
                             if (src.width() > 970) src = src.scaledToWidth(970, Qt::SmoothTransformation);
+                            // Bake the localised title into the image so the module has no
+                            // headline field — Amazon's module headline adds a large fixed gap.
+                            const QString title = sizeChartTitle(locale);
+                            if (!title.isEmpty()) {
+                                const int hdr = 60;
+                                QImage canvas(src.width(), src.height() + hdr, QImage::Format_ARGB32);
+                                canvas.fill(Qt::white);
+                                QPainter pp(&canvas);
+                                pp.drawImage(0, hdr, src);
+                                QFont f;
+                                f.setBold(true);
+                                f.setPixelSize(26);
+                                pp.setFont(f);
+                                pp.setPen(Qt::black);
+                                pp.drawText(QRect(16, 0, src.width() - 16, hdr),
+                                            Qt::AlignVCenter | Qt::AlignLeft, title);
+                                pp.end();
+                                src = canvas;
+                            }
                             if (src.height() < 600) {
                                 QImage p(src.width(), 600, QImage::Format_ARGB32);
                                 p.fill(Qt::white);
@@ -1450,6 +1548,7 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                         }
                         appendAplusLog(progressUi.logPtr,
                             tr("  ✓ Uploaded — ID: %1").arg(uploadId.left(40)));
+                        // No module headline — title is baked into the image.
                         moduleList.append(buildImageModule(uploadId, sc->displayName, imgW, imgH));
                     } else {
                         appendAplusLog(progressUi.logPtr,
@@ -1459,6 +1558,9 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
             }
 
             // --- Color-set images ---
+            const bool useSlogan = !imgSet.isEmpty() && [this]() {
+                const auto *cat = _currentCategory(); return cat && cat->isApparel();
+            }();
             for (int ii = 0; ii < imgSet.size(); ++ii) {
                 const APlusUploadDialog::ElementInfo &info = imgSet.at(ii);
                 ++step;
@@ -1473,8 +1575,30 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                     appendAplusLog(progressUi.logPtr, tr("  ⚠ Cannot load image — skipped"));
                     continue;
                 }
-                img = [](QImage src) {
+                img = [&, ii](QImage src) {
                     if (src.width() > 970) src = src.scaledToWidth(970, Qt::SmoothTransformation);
+                    // Bake the slogan into the first lifestyle image using the same
+                    // 60 px header approach as the size chart, so both titles are
+                    // rendered identically (same font, same spacing, no module headline).
+                    if (ii == 0 && useSlogan) {
+                        const QString slogan = apparelSlogan(locale);
+                        if (!slogan.isEmpty()) {
+                            const int hdr = 60;
+                            QImage canvas(src.width(), src.height() + hdr, QImage::Format_ARGB32);
+                            canvas.fill(Qt::white);
+                            QPainter pp(&canvas);
+                            pp.drawImage(0, hdr, src);
+                            QFont f;
+                            f.setBold(true);
+                            f.setPixelSize(26);
+                            pp.setFont(f);
+                            pp.setPen(Qt::black);
+                            pp.drawText(QRect(16, 0, src.width() - 16, hdr),
+                                        Qt::AlignVCenter | Qt::AlignLeft, slogan);
+                            pp.end();
+                            src = canvas;
+                        }
+                    }
                     if (src.height() < 600) {
                         QImage p(src.width(), 600, QImage::Format_ARGB32);
                         p.fill(Qt::white);
@@ -1496,6 +1620,7 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                 }
                 appendAplusLog(progressUi.logPtr,
                     tr("  ✓ Uploaded — ID: %1").arg(uploadId.left(40)));
+                // No module headline — title is baked into the image for ii==0.
                 moduleList.append(buildImageModule(uploadId, info.displayName, imgW, imgH));
             }
 
@@ -1527,10 +1652,16 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
             setAplusStatus(progressUi, tr("Creating A+ content document…"), step - 1);
             appendAplusLog(progressUi.logPtr,
                 tr("▶ Creating document (locale: %1)").arg(locale));
+            // Build a per-color document name so each color set is identifiable in Seller Central.
+            QString docName = m_productTitle.isEmpty() ? QStringLiteral("A+ Content") : m_productTitle;
+            if (colorIdx < colorNames.size() && !colorNames.at(colorIdx).isEmpty()) {
+                // Strip any existing parenthetical (e.g. "(Orange, S=8)") and replace with current color.
+                const int paren = docName.indexOf(QLatin1Char('('));
+                const QString base = (paren > 0 ? docName.left(paren) : docName).trimmed();
+                docName = base + QStringLiteral(" (") + colorNames.at(colorIdx) + QLatin1Char(')');
+            }
             QJsonObject contentDoc{
-                {QStringLiteral("name"),              m_productTitle.isEmpty()
-                                                      ? QStringLiteral("A+ Content")
-                                                      : m_productTitle.left(100)},
+                {QStringLiteral("name"),              docName.left(100)},
                 {QStringLiteral("contentType"),       QStringLiteral("EBC")},
                 {QStringLiteral("locale"),            locale},
                 {QStringLiteral("contentModuleList"), moduleList}
@@ -3646,6 +3777,8 @@ QCoro::Task<void> PaneSizing::_saveToSizeTableFolder()
         }
     }
 
+    bool perGroupSaved = false;
+
     if (asinCol > 0) {
         // Listing template: write child ASINs, skip the required/optional markers row
         const int firstDataRow = asinHdrRow + 2;
@@ -3654,6 +3787,8 @@ QCoro::Task<void> PaneSizing::_saveToSizeTableFolder()
 
     } else if (m_sizeTableModel) {
         // Size chart template (Type B): fill ROW rows with transposed size table data.
+        // One output file per country group; each file contains only that group's size
+        // equivalence column plus all body-measurement columns.
 
         // Template-column → model-row label fragments mapping.
         // Maps the template's standard dimension name (e.g. "FrSize") to fragments
@@ -3686,15 +3821,15 @@ QCoro::Task<void> PaneSizing::_saveToSizeTableFolder()
         };
 
         // Strip " cm / X in" suffix from measurement values (e.g. "86 cm / 33¾ in" → "86").
-        // Country-size values (e.g. "36") pass through unchanged.
         auto extractCmValue = [](const QString &val) -> QString {
             const int idx = val.indexOf(QLatin1String(" cm"));
             return (idx > 0) ? val.left(idx) : val;
         };
 
         // Read ALL row labels from model column 0 (country groups + measurements)
-        const int nGroupRows = _currentCategory()
-            ? static_cast<int>(_currentCategory()->countryGroups().size())
+        const auto *sizeCat = _currentCategory();
+        const int nGroupRows = sizeCat
+            ? static_cast<int>(sizeCat->countryGroups().size())
             : m_sizeTableModel->rowCount();
         QStringList modelRowLabels;
         for (int r = 0; r < m_sizeTableModel->rowCount(); ++r) {
@@ -3751,54 +3886,84 @@ QCoro::Task<void> PaneSizing::_saveToSizeTableFolder()
                 rowRows << row;
         }
 
-        // Write: each size column in the model → one ROW row in the template
-        for (int si = 0; si < nSizes && si < rowRows.size(); ++si) {
-            const int tRow = rowRows[si];
-            // Column C (BrandSize): brand label from the brand size widget
-            {
-                const auto *cat = _currentCategory();
-                if (cat) {
-                    const QString bMode = ui->sizeRangeBrand->mode();
-                    const QString bFrom = ui->sizeRangeBrand->from();
-                    const QString bTo   = ui->sizeRangeBrand->to();
-                    QStringList brandLabels;
-                    if (bMode == QLatin1String("letters")) {
-                        const QStringList allLetters = cat->letterSizes();
-                        int bfi = allLetters.indexOf(bFrom);
-                        int bti = allLetters.indexOf(bTo);
-                        if (bfi < 0) bfi = 0;
-                        if (bti < 0) bti = allLetters.size() - 1;
-                        if (bfi > bti) std::swap(bfi, bti);
-                        brandLabels = allLetters.mid(bfi, bti - bfi + 1);
-                    } else {
-                        const QStringList allKeys = cat->referenceKeys();
-                        int bfi = allKeys.indexOf(bFrom);
-                        int bti = allKeys.indexOf(bTo);
-                        if (bfi < 0) bfi = 0;
-                        if (bti < 0) bti = allKeys.size() - 1;
-                        if (bfi > bti) std::swap(bfi, bti);
-                        brandLabels = allKeys.mid(bfi, bti - bfi + 1);
-                    }
-                    const QString brandLabel = brandLabels.value(si);
-                    if (!brandLabel.isEmpty())
-                        doc.write(tRow, kDataStartCol, brandLabel);
-                }
-            }
-            // Remaining data columns: size equivalences and measurements via column mapping
-            for (int ci = 0; ci < colModelRows.size(); ++ci) {
-                const int mr = colModelRows[ci];
-                if (mr < 0 || mr >= m_sizeTableModel->rowCount()) continue;
-                auto *item = m_sizeTableModel->item(mr, si + 1);
-                if (item && !item->text().isEmpty())
-                    doc.write(tRow, kDataStartCol + 1 + ci, extractCmValue(item->text()));
+        // Pre-compute brand labels (same for every group)
+        QStringList brandLabels;
+        if (sizeCat) {
+            const QString bMode = ui->sizeRangeBrand->mode();
+            const QString bFrom = ui->sizeRangeBrand->from();
+            const QString bTo   = ui->sizeRangeBrand->to();
+            if (bMode == QLatin1String("letters")) {
+                const QStringList allLetters = sizeCat->letterSizes();
+                int bfi = allLetters.indexOf(bFrom);
+                int bti = allLetters.indexOf(bTo);
+                if (bfi < 0) bfi = 0;
+                if (bti < 0) bti = allLetters.size() - 1;
+                if (bfi > bti) std::swap(bfi, bti);
+                brandLabels = allLetters.mid(bfi, bti - bfi + 1);
+            } else {
+                const QStringList allKeys = sizeCat->referenceKeys();
+                int bfi = allKeys.indexOf(bFrom);
+                int bti = allKeys.indexOf(bTo);
+                if (bfi < 0) bfi = 0;
+                if (bti < 0) bti = allKeys.size() - 1;
+                if (bfi > bti) std::swap(bfi, bti);
+                brandLabels = allKeys.mid(bfi, bti - bfi + 1);
             }
         }
+
+        // --- One output file per country group ---
+        const QList<CountryGroup> allGroups = sizeCat ? sizeCat->countryGroups()
+                                                       : QList<CountryGroup>{};
+        const int nAllGroups = allGroups.size();
+
+        // When no group info is available, fall back to a single file with all rows.
+        const int loopCount = (nAllGroups > 0) ? nAllGroups : 1;
+
+        for (int g = 0; g < loopCount; ++g) {
+            const QString groupKey = (nAllGroups > 0)
+                ? allGroups[g].key.toLower()
+                : QStringLiteral("all");
+
+            QXlsx::Document gDoc(templatePath);
+            if (!gDoc.load()) continue;
+
+            for (int si = 0; si < nSizes && si < rowRows.size(); ++si) {
+                const int tRow = rowRows[si];
+
+                // Column C: brand label
+                const QString bl = brandLabels.value(si);
+                if (!bl.isEmpty())
+                    gDoc.write(tRow, kDataStartCol, bl);
+
+                // Data columns: fill only the current group row + measurement rows
+                for (int ci = 0; ci < colModelRows.size(); ++ci) {
+                    const int mr = colModelRows[ci];
+                    if (mr < 0 || mr >= m_sizeTableModel->rowCount()) continue;
+                    const bool isThisGroup  = (nAllGroups == 0) || (mr == g);
+                    const bool isMeasurement = (mr >= nGroupRows);
+                    if (!isThisGroup && !isMeasurement) continue;
+                    auto *item = m_sizeTableModel->item(mr, si + 1);
+                    if (item && !item->text().isEmpty())
+                        gDoc.write(tRow, kDataStartCol + 1 + ci, extractCmValue(item->text()));
+                }
+            }
+
+            const QString destPath = sizeTablePath
+                + QStringLiteral("/filled_template_%1.xlsx").arg(groupKey);
+            if (!gDoc.saveAs(destPath)) {
+                QMessageBox::warning(this, tr("Template error"),
+                    tr("Could not save filled template to:\n%1").arg(destPath));
+            }
+        }
+        perGroupSaved = true;
     }
 
-    const QString destPath = sizeTablePath + QStringLiteral("/filled_template.xlsx");
-    if (!doc.saveAs(destPath)) {
-        QMessageBox::warning(this, tr("Template error"),
-                             tr("Could not save filled template to:\n%1").arg(destPath));
+    if (!perGroupSaved) {
+        const QString destPath = sizeTablePath + QStringLiteral("/filled_template.xlsx");
+        if (!doc.saveAs(destPath)) {
+            QMessageBox::warning(this, tr("Template error"),
+                                 tr("Could not save filled template to:\n%1").arg(destPath));
+        }
     }
 
     co_return;

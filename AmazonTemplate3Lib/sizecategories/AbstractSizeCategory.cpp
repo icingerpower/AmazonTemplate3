@@ -192,10 +192,12 @@ QImage AbstractSizeCategory::_renderRows(const QList<QPair<QString,QStringList>>
     int nCols = 1;
     for (const auto &r : rows)
         nCols = std::max(nCols, 1 + static_cast<int>(r.second.size()));
-    const int rowH  = 30;
 
-    QFont labelFont("Arial", 9, QFont::Bold);
-    QFont cellFont("Arial", 9);
+    constexpr int kScale = 2;
+    const int rowH  = 30 * kScale;
+
+    QFont labelFont("Arial", 9 * kScale, QFont::Bold);
+    QFont cellFont("Arial", 9 * kScale);
     QFontMetrics fmLabel(labelFont);
     QFontMetrics fmCell(cellFont);
 
@@ -205,7 +207,7 @@ QImage AbstractSizeCategory::_renderRows(const QList<QPair<QString,QStringList>>
     int maxLabel = 0;
     for (const auto &r : rows)
         maxLabel = std::max(maxLabel, fmLabel.horizontalAdvance(r.first));
-    colWidths << std::max(100, maxLabel + 24);
+    colWidths << std::max(100 * kScale, maxLabel + 24 * kScale);
 
     for (int c = 1; c < nCols; ++c) {
         int maxW = 0;
@@ -213,7 +215,7 @@ QImage AbstractSizeCategory::_renderRows(const QList<QPair<QString,QStringList>>
             if (c - 1 < r.second.size())
                 maxW = std::max(maxW, fmCell.horizontalAdvance(r.second[c - 1]));
         }
-        colWidths << std::max(48, maxW + 20);
+        colWidths << std::max(48 * kScale, maxW + 20 * kScale);
     }
 
     int totalW = 0;
@@ -237,7 +239,7 @@ QImage AbstractSizeCategory::_renderRows(const QList<QPair<QString,QStringList>>
             const QRect cellRect(x, y, colWidths[c], rowH);
             if (c == 0) {
                 p.setFont(labelFont);
-                QRect textRect = cellRect.adjusted(10, 0, 0, 0);
+                QRect textRect = cellRect.adjusted(10 * kScale, 0, 0, 0);
                 p.drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, rows[r].first);
             } else {
                 p.setFont(cellFont);
@@ -248,13 +250,13 @@ QImage AbstractSizeCategory::_renderRows(const QList<QPair<QString,QStringList>>
         }
     }
 
-    p.setPen(QPen(QColor("#b0d8d0"), 1));
+    p.setPen(QPen(QColor("#b0d8d0"), 1 * kScale));
     for (int r = 0; r <= nRows; ++r) {
         const int y = r * rowH;
         p.drawLine(0, y, totalW, y);
     }
 
-    p.setPen(QPen(QColor("#80c0b8"), 2));
+    p.setPen(QPen(QColor("#80c0b8"), 2 * kScale));
     p.drawLine(colWidths[0], 0, colWidths[0], totalH);
 
     p.end();

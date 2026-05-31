@@ -35,6 +35,7 @@ class AbstractSizeCategory {
 public:
     virtual ~AbstractSizeCategory() = default;
     virtual QString                      displayName()       const = 0;
+    virtual bool                         isApparel()         const { return true; }
     virtual QList<MeasurementField>      measurementFields() const = 0;
     virtual QList<CountryGroup>          countryGroups()     const = 0;
     virtual QString                      referenceKey()      const { return QStringLiteral("FR"); }
