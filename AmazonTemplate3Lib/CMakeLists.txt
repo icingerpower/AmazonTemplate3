@@ -40,8 +40,12 @@ add_library(AmazonTemplate3Lib STATIC
   apis/AmazonCatalogApi.cpp
   apis/AmazonAplusApi.h
   apis/AmazonAplusApi.cpp
+  apis/AmazonWarningsApi.h
+  apis/AmazonWarningsApi.cpp
   apis/TreeSizingAsins.h
   apis/TreeSizingAsins.cpp
+  TableProductWarnings.h
+  TableProductWarnings.cpp
   aplus/APlusContent.h
   aplus/APlusContent.cpp
   aplus/APlusTreeModel.h
@@ -111,8 +115,12 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   apis/AmazonCatalogApi.cpp
   apis/AmazonAplusApi.h
   apis/AmazonAplusApi.cpp
+  apis/AmazonWarningsApi.h
+  apis/AmazonWarningsApi.cpp
   apis/TreeSizingAsins.h
   apis/TreeSizingAsins.cpp
+  TableProductWarnings.h
+  TableProductWarnings.cpp
   aplus/APlusContent.h
   aplus/APlusContent.cpp
   aplus/APlusTreeModel.h

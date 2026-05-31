@@ -131,6 +131,54 @@
         </widget>
        </item>
        <item>
+        <layout class="QHBoxLayout" name="horizontalLayout_6">
+         <item>
+          <widget class="QComboBox" name="comboBoxSizeSaved"/>
+         </item>
+         <item>
+          <widget class="QPushButton" name="buttonSavedSizeEdit">
+           <property name="text">
+            <string>Edit</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="buttonSavedSizeAdd">
+           <property name="text">
+            <string>Add new</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="buttonSavedSizeSave">
+           <property name="text">
+            <string>Save</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="buttonSavedSizeLoad">
+           <property name="text">
+            <string>Load</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="horizontalSpacer_6">
+           <property name="orientation">
+            <enum>Qt::Orientation::Horizontal</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>148</width>
+             <height>20</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+        </layout>
+       </item>
+       <item>
         <layout class="QHBoxLayout" name="horizontalLayout_2">
          <item>
           <widget class="QComboBox" name="comboBoxSizeType"/>
@@ -208,7 +256,7 @@
           </sizepolicy>
          </property>
          <property name="currentIndex">
-          <number>0</number>
+          <number>1</number>
          </property>
          <widget class="QWidget" name="pageImages">
           <property name="geometry">
@@ -216,7 +264,7 @@
             <x>0</x>
             <y>0</y>
             <width>956</width>
-            <height>497</height>
+            <height>437</height>
            </rect>
           </property>
           <attribute name="label">
@@ -237,7 +285,7 @@
                 <x>0</x>
                 <y>0</y>
                 <width>464</width>
-                <height>477</height>
+                <height>417</height>
                </rect>
               </property>
               <layout class="QVBoxLayout" name="verticalLayoutScrollImage">
@@ -257,13 +305,18 @@
            </item>
           </layout>
          </widget>
+         <widget class="QWidget" name="page">
+          <attribute name="label">
+           <string>Page</string>
+          </attribute>
+         </widget>
          <widget class="QWidget" name="pageImageSize">
           <property name="geometry">
            <rect>
             <x>0</x>
             <y>0</y>
             <width>956</width>
-            <height>497</height>
+            <height>437</height>
            </rect>
           </property>
           <attribute name="label">
@@ -371,7 +424,7 @@
             <x>0</x>
             <y>0</y>
             <width>956</width>
-            <height>497</height>
+            <height>437</height>
            </rect>
           </property>
           <attribute name="label">
@@ -433,7 +486,7 @@
             <x>0</x>
             <y>0</y>
             <width>956</width>
-            <height>497</height>
+            <height>437</height>
            </rect>
           </property>
           <attribute name="label">
@@ -679,7 +732,7 @@
                             <x>0</x>
                             <y>0</y>
                             <width>462</width>
-                            <height>142</height>
+                            <height>113</height>
                            </rect>
                           </property>
                           <layout class="QVBoxLayout" name="verticalLayoutAplusScrollContents">

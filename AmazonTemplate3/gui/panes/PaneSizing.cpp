@@ -12,6 +12,10 @@
 #include "apis/TreeSizingAsins.h"
 #include "aplus/APlusUploadDialog.h"
 #include "sizecategories/AbstractSizeCategory.h"
+#include "sizecategories/SizingTableTemplateModel.h"
+#include <QTableView>
+#include <QHeaderView>
+#include <QUuid>
 
 #include <QInputDialog>
 #include <QFileDialog>
@@ -228,6 +232,12 @@ PaneSizing::PaneSizing(QWidget *parent)
     ui->treeViewAsins->setItemDelegateForColumn(
         TreeSizingAsins::Title, new MiddleTruncateDelegate(this));
 
+    m_templateModel = new SizingTableTemplateModel(this);
+    connect(ui->buttonSavedSizeAdd,  &QPushButton::clicked, this, &PaneSizing::onSavedSizeAddClicked);
+    connect(ui->buttonSavedSizeSave, &QPushButton::clicked, this, &PaneSizing::onSavedSizeSaveClicked);
+    connect(ui->buttonSavedSizeLoad, &QPushButton::clicked, this, &PaneSizing::onSavedSizeLoadClicked);
+    connect(ui->buttonSavedSizeEdit, &QPushButton::clicked, this, &PaneSizing::onSavedSizeEditClicked);
+
     _rebuildMeasurementForm();
     updateButtonStates();
 }
@@ -273,6 +283,10 @@ void PaneSizing::setWorkingDir(const QDir &workingDir)
 {
     m_workingDir = workingDir;
     _ensureModel(workingDir);
+    if (m_templateModel) {
+        m_templateModel->setWorkingDir(m_workingDir);
+        _refreshTemplateCombo();
+    }
 }
 
 void PaneSizing::_refreshApi()
@@ -4400,4 +4414,251 @@ QCoro::Task<void> PaneSizing::_uploadSizeImage(int imageIndex)
                 .arg(successCount).arg(totalAttempts).arg(errors.join('\n')));
     }
     co_return;
+}
+
+void PaneSizing::_refreshTemplateCombo()
+{
+    if (!m_templateModel) return;
+
+    const QString previousId = ui->comboBoxSizeSaved->currentData().toString();
+
+    QSignalBlocker blocker(ui->comboBoxSizeSaved);
+    ui->comboBoxSizeSaved->clear();
+    ui->comboBoxSizeSaved->addItem(tr("— select —"), QString{});
+    for (int row = 0; row < m_templateModel->rowCount(); ++row) {
+        const SizingTemplate &t = m_templateModel->templateAt(row);
+        ui->comboBoxSizeSaved->addItem(t.name, t.id);
+    }
+
+    if (!previousId.isEmpty()) {
+        const int idx = ui->comboBoxSizeSaved->findData(previousId);
+        if (idx >= 0) ui->comboBoxSizeSaved->setCurrentIndex(idx);
+    }
+}
+
+void PaneSizing::onSavedSizeAddClicked()
+{
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, tr("New Template"),
+                                               tr("Template name:"),
+                                               QLineEdit::Normal, QString{}, &ok);
+    if (!ok || name.trimmed().isEmpty())
+        return;
+
+    const int row = m_templateModel->addTemplate(name.trimmed());
+
+    // Auto-save current sizing data into the new template if a category is set.
+    const auto *cat = _currentCategory();
+    if (cat) {
+        SizingTemplate data;
+        data.id       = m_templateModel->idForRow(row);
+        data.name     = name.trimmed();
+        data.category     = cat->displayName();
+        data.mode         = ui->sizeRangeMain->mode();
+        data.fromVal      = ui->sizeRangeMain->from();
+        data.toVal        = ui->sizeRangeMain->to();
+        data.brandMode    = ui->sizeRangeBrand->mode();
+        data.brandFromVal = ui->sizeRangeBrand->from();
+        data.brandToVal   = ui->sizeRangeBrand->to();
+        for (const auto &w : m_measurementWidgets)
+            data.measurements[w.fieldId] = {
+                w.refSpinBox->value(),
+                w.stepSpinBox->value(),
+                w.rangeSpinBox->value()
+            };
+        m_templateModel->updateTemplate(row, data);
+    }
+
+    _refreshTemplateCombo();
+    const QString newId = m_templateModel->idForRow(row);
+    const int idx = ui->comboBoxSizeSaved->findData(newId);
+    if (idx >= 0) ui->comboBoxSizeSaved->setCurrentIndex(idx);
+}
+
+void PaneSizing::onSavedSizeSaveClicked()
+{
+    const QString id = ui->comboBoxSizeSaved->currentData().toString();
+    if (id.isEmpty()) {
+        QMessageBox::information(this, tr("No template"),
+                                 tr("Select or create a template first."));
+        return;
+    }
+    const int row = m_templateModel->rowForId(id);
+    if (row < 0) return;
+
+    const SizingTemplate &existing = m_templateModel->templateAt(row);
+
+    const auto *cat = _currentCategory();
+    if (!cat) {
+        QMessageBox::warning(this, tr("No category"),
+                             tr("Select a size category first."));
+        return;
+    }
+
+    QString message;
+    if (!existing.category.isEmpty() && existing.category != cat->displayName()) {
+        message = tr("<p>Overwrite existing data for template \"%1\"?</p>"
+                     "<p><b><font color='red' size='+2'>"
+                     "WARNING: Previous category was \"%2\", current is \"%3\"!"
+                     "</font></b></p>")
+                  .arg(existing.name.toHtmlEscaped(),
+                       existing.category.toHtmlEscaped(),
+                       QString(cat->displayName()).toHtmlEscaped());
+    } else {
+        message = tr("Overwrite existing data for template \"%1\"?")
+                  .arg(existing.name.toHtmlEscaped());
+    }
+
+    const auto answer = QMessageBox::question(this, tr("Save template"), message,
+                                              QMessageBox::Yes | QMessageBox::No,
+                                              QMessageBox::No);
+    if (answer != QMessageBox::Yes)
+        return;
+
+    SizingTemplate newData;
+    newData.id           = existing.id;
+    newData.name         = existing.name;
+    newData.category     = cat->displayName();
+    newData.mode         = ui->sizeRangeMain->mode();
+    newData.fromVal      = ui->sizeRangeMain->from();
+    newData.toVal        = ui->sizeRangeMain->to();
+    newData.brandMode    = ui->sizeRangeBrand->mode();
+    newData.brandFromVal = ui->sizeRangeBrand->from();
+    newData.brandToVal   = ui->sizeRangeBrand->to();
+    for (const auto &w : m_measurementWidgets) {
+        newData.measurements[w.fieldId] = {
+            w.refSpinBox->value(),
+            w.stepSpinBox->value(),
+            w.rangeSpinBox->value()
+        };
+    }
+
+    m_templateModel->updateTemplate(row, newData);
+    _refreshTemplateCombo();
+    const int idx = ui->comboBoxSizeSaved->findData(newData.id);
+    if (idx >= 0) ui->comboBoxSizeSaved->setCurrentIndex(idx);
+
+    QMessageBox::information(this, tr("Saved"),
+                             tr("Template \"%1\" saved.").arg(existing.name));
+}
+
+void PaneSizing::onSavedSizeLoadClicked()
+{
+    const QString id = ui->comboBoxSizeSaved->currentData().toString();
+    if (id.isEmpty()) {
+        QMessageBox::information(this, tr("No template"),
+                                 tr("Select a template first."));
+        return;
+    }
+    const int row = m_templateModel->rowForId(id);
+    if (row < 0) return;
+
+    const SizingTemplate tmpl = m_templateModel->templateAt(row);
+
+    if (tmpl.category.isEmpty()) {
+        QMessageBox::information(this, tr("No data"),
+            tr("Template \"%1\" has no saved sizing data yet.\n"
+               "Configure the sizing settings and click Save first.")
+            .arg(tmpl.name));
+        return;
+    }
+
+    if (m_productWorkingDir.exists()) {
+        const QString iniPath = m_productWorkingDir.filePath(QStringLiteral("settings.ini"));
+        if (QFile::exists(iniPath)) {
+            QSettings s(iniPath, QSettings::IniFormat);
+            const QString currentType = s.value(QStringLiteral("sizing/type")).toString();
+            if (!currentType.isEmpty() && currentType != tmpl.category) {
+                QMessageBox::critical(this, tr("Type mismatch"),
+                    tr("Cannot load: product uses category \"%1\" but template is for \"%2\".")
+                        .arg(currentType, tmpl.category));
+                return;
+            }
+        }
+    }
+
+    int catIdx = -1;
+    for (int i = 0; i < ui->comboBoxSizeType->count(); ++i) {
+        if (ui->comboBoxSizeType->itemText(i) == tmpl.category) {
+            catIdx = i;
+            break;
+        }
+    }
+    if (catIdx < 0) {
+        QMessageBox::warning(this, tr("Category not found"),
+                             tr("Category \"%1\" not found.").arg(tmpl.category));
+        return;
+    }
+    ui->comboBoxSizeType->setCurrentIndex(catIdx);
+
+    ui->sizeRangeMain->setMode(tmpl.mode);
+    _populateSizeRangeCombos();
+    if (!tmpl.fromVal.isEmpty())      ui->sizeRangeMain->setFrom(tmpl.fromVal);
+    if (!tmpl.toVal.isEmpty())        ui->sizeRangeMain->setTo(tmpl.toVal);
+    if (!tmpl.brandMode.isEmpty())    ui->sizeRangeBrand->setMode(tmpl.brandMode);
+    if (!tmpl.brandFromVal.isEmpty()) ui->sizeRangeBrand->setFrom(tmpl.brandFromVal);
+    if (!tmpl.brandToVal.isEmpty())   ui->sizeRangeBrand->setTo(tmpl.brandToVal);
+
+    for (auto it = tmpl.measurements.constBegin(); it != tmpl.measurements.constEnd(); ++it) {
+        for (const auto &w : m_measurementWidgets) {
+            if (w.fieldId == it.key()) {
+                w.refSpinBox->setValue(it.value().refValue);
+                w.stepSpinBox->setValue(it.value().step);
+                w.rangeSpinBox->setValue(it.value().rangeVal);
+                break;
+            }
+        }
+    }
+
+    _saveProductSettings();
+
+    QMessageBox::information(this, tr("Loaded"),
+                             tr("Template \"%1\" loaded and applied.").arg(tmpl.name));
+}
+
+void PaneSizing::onSavedSizeEditClicked()
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Edit Sizing Templates"));
+    dlg.resize(420, 360);
+
+    auto *layout = new QVBoxLayout(&dlg);
+
+    auto *view = new QTableView(&dlg);
+    view->setModel(m_templateModel);
+    view->setSelectionBehavior(QAbstractItemView::SelectRows);
+    view->setSelectionMode(QAbstractItemView::SingleSelection);
+    view->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    view->horizontalHeader()->hideSection(SizingTableTemplateModel::ColCategory);
+    view->verticalHeader()->setVisible(false);
+    view->setEditTriggers(QAbstractItemView::DoubleClicked
+                          | QAbstractItemView::EditKeyPressed
+                          | QAbstractItemView::SelectedClicked);
+    layout->addWidget(view);
+
+    auto *btnRow = new QHBoxLayout();
+    auto *deleteBtn = new QPushButton(tr("Delete"), &dlg);
+    btnRow->addWidget(deleteBtn);
+    btnRow->addStretch();
+    auto *bbox = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
+    btnRow->addWidget(bbox);
+    layout->addLayout(btnRow);
+
+    connect(bbox, &QDialogButtonBox::rejected, &dlg, &QDialog::accept);
+    connect(deleteBtn, &QPushButton::clicked, &dlg, [this, view]() {
+        const QModelIndex cur = view->currentIndex();
+        if (!cur.isValid()) return;
+        const int row = cur.row();
+        const QString name = m_templateModel->templateAt(row).name;
+        const auto answer = QMessageBox::question(
+            view, tr("Delete template"),
+            tr("Delete template \"%1\"?").arg(name),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer != QMessageBox::Yes) return;
+        m_templateModel->removeTemplateAt(row);
+        _refreshTemplateCombo();
+    });
+
+    dlg.exec();
+    _refreshTemplateCombo();
 }

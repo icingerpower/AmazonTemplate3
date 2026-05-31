@@ -18,6 +18,7 @@
 #include "aplus/APlusTreeModel.h"
 #include "aplus/APlusWorkflow.h"
 #include "SizeRangeWidget.h"
+#include "sizecategories/SizingTableTemplateModel.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class PaneSizing; }
@@ -80,6 +81,11 @@ private slots:
     void onAplusSelectionChanged(const QModelIndex &current, const QModelIndex &previous);
     void onAplusUploadClicked();
 
+    void onSavedSizeAddClicked();
+    void onSavedSizeSaveClicked();
+    void onSavedSizeLoadClicked();
+    void onSavedSizeEditClicked();
+
 private:
     struct AsinSku {
         QString asin;
@@ -120,8 +126,11 @@ private:
     bool                          m_aplusDesktop = true;
     QMenu                        *m_aplusMenu    = nullptr;
 
+    SizingTableTemplateModel     *m_templateModel = nullptr;
+
     void _ensureModel(const QDir &dir);
     void _refreshApi();
+    void _refreshTemplateCombo();
     QDir _resolveProductDir(const QString &asin, const QString &title);
     void _saveProductSettings();
     void _loadProductSettings();
