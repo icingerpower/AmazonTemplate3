@@ -835,9 +835,9 @@ void PaneSizing::onGenSizeTablesClicked()
         _refreshSizeGroupList();
         _rebuildAplusMenu();
 
-        // Silently translate size chart headers for each target language in background.
-        // Each onDone (inside _buildSizeChartTranslationTasks) calls _refreshSizeGroupList()
-        // so the list updates progressively as translations complete.
+        // Render English charts synchronously, then translate non-English row labels
+        // via the AI CLI inside a modal progress dialog so the user cannot trigger
+        // dependent actions (e.g. A+ upload) before translations complete.
         if (m_sizeTableModel && m_aplusContent) {
             const QList<SizeChartTarget> targets = buildSizeChartTargets(cat, ui->listWidgetCountries);
 
@@ -849,19 +849,118 @@ void PaneSizing::onGenSizeTablesClicked()
                                     t.language, {}, true);
             }
 
-            // Non-English groups: translate row labels via AI CLI
             AbstractCli *cli = ui->comboBoxCli->currentData().value<AbstractCli *>();
             if (cli) {
                 QList<SizeChartTarget> nonEnglish;
                 for (const SizeChartTarget &t : targets)
                     if (!t.isEnglish) nonEnglish.append(t);
+
                 if (!nonEnglish.isEmpty()) {
                     QStringList origRowLabels;
                     for (int row = 0; row < m_sizeTableModel->rowCount(); ++row) {
                         auto *it = m_sizeTableModel->item(row, 0);
                         origRowLabels << (it ? it->text() : QString{});
                     }
-                    _runSequentially(_buildSizeChartTranslationTasks(nonEnglish, origRowLabels));
+
+                    QList<CliTask> tasks =
+                        _buildSizeChartTranslationTasks(nonEnglish, origRowLabels);
+
+                    if (!tasks.isEmpty()) {
+                        const int total = tasks.size();
+
+                        auto *progressDlg = new QDialog(this);
+                        progressDlg->setAttribute(Qt::WA_DeleteOnClose);
+                        progressDlg->setWindowModality(Qt::ApplicationModal);
+                        progressDlg->setWindowTitle(
+                            tr("Generating size charts — %1").arg(cli->getName()));
+                        progressDlg->resize(560, 380);
+                        auto *pLayout = new QVBoxLayout(progressDlg);
+
+                        auto *statusLabel = new QLabel(tr("Starting…"), progressDlg);
+                        QFont boldFont = statusLabel->font();
+                        boldFont.setBold(true);
+                        statusLabel->setFont(boldFont);
+                        pLayout->addWidget(statusLabel);
+
+                        auto *progressBar = new QProgressBar(progressDlg);
+                        progressBar->setRange(0, total);
+                        progressBar->setValue(0);
+                        pLayout->addWidget(progressBar);
+
+                        auto *logEdit = new QTextEdit(progressDlg);
+                        logEdit->setReadOnly(true);
+                        logEdit->setFont(
+                            QFontDatabase::systemFont(QFontDatabase::FixedFont));
+                        pLayout->addWidget(logEdit);
+
+                        auto *btnLayout = new QHBoxLayout();
+                        auto *copyBtn = new QPushButton(tr("Copy log"), progressDlg);
+                        btnLayout->addWidget(copyBtn);
+                        btnLayout->addStretch();
+                        auto *closeBtns =
+                            new QDialogButtonBox(QDialogButtonBox::Close, progressDlg);
+                        QPushButton *closeBtn = closeBtns->button(QDialogButtonBox::Close);
+                        if (closeBtn) closeBtn->setEnabled(false);
+                        btnLayout->addWidget(closeBtns);
+                        pLayout->addLayout(btnLayout);
+
+                        QPointer<QLabel>          statusLabelPtr(statusLabel);
+                        QPointer<QProgressBar>    progressBarPtr(progressBar);
+                        QPointer<QTextEdit>       logEditPtr(logEdit);
+                        QPointer<QPushButton>     closeBtnPtr(closeBtn);
+
+                        connect(copyBtn, &QPushButton::clicked, progressDlg,
+                            [logEditPtr]() {
+                                if (logEditPtr)
+                                    QGuiApplication::clipboard()->setText(
+                                        logEditPtr->toPlainText());
+                            });
+                        connect(closeBtns, &QDialogButtonBox::rejected,
+                                progressDlg, &QDialog::close);
+
+                        progressDlg->show();
+
+                        auto appendLog = [logEditPtr](const QString &line) {
+                            if (!logEditPtr) return;
+                            const QString ts = QDateTime::currentDateTime()
+                                .toString(QStringLiteral("HH:mm:ss"));
+                            logEditPtr->append(
+                                QStringLiteral("[%1] %2").arg(ts, line));
+                        };
+
+                        auto onTaskStart = [statusLabelPtr, progressBarPtr, appendLog]
+                            (int step, int total, const QString &label) {
+                                if (statusLabelPtr) statusLabelPtr->setText(
+                                    QStringLiteral("(%1/%2) %3")
+                                        .arg(step).arg(total).arg(label));
+                                if (progressBarPtr) progressBarPtr->setValue(step - 1);
+                                appendLog(QStringLiteral("▶ %1").arg(label));
+                            };
+
+                        auto onTaskDone = [statusLabelPtr, progressBarPtr,
+                                           closeBtnPtr, appendLog]
+                            (int step, int total, const QString &label,
+                             CliRunResult r) {
+                                if (step == total + 1) {
+                                    if (statusLabelPtr)
+                                        statusLabelPtr->setText(QObject::tr("Done."));
+                                    if (progressBarPtr)
+                                        progressBarPtr->setValue(progressBarPtr->maximum());
+                                    if (closeBtnPtr) closeBtnPtr->setEnabled(true);
+                                    return;
+                                }
+                                const QString outcome = r.output.trimmed().isEmpty()
+                                    ? QObject::tr("no output")
+                                    : QObject::tr("ok");
+                                appendLog(QStringLiteral("[%1/%2] %3 — %4 (%5ms)")
+                                    .arg(step).arg(total).arg(label)
+                                    .arg(outcome).arg(r.durationMs));
+                            };
+
+                        _runSequentially(std::move(tasks),
+                                         std::move(onTaskStart),
+                                         std::move(onTaskDone));
+                    }
                 }
             }
         }
@@ -1202,7 +1301,7 @@ static QString sizeChartTitle(const QString &locale)
         {QStringLiteral("en-GB"), QStringLiteral("Size guide")},
         {QStringLiteral("en-US"), QStringLiteral("Size chart")},
     };
-    return t.value(locale, QStringLiteral("Size chart"));
+    return t.value(locale, QStringLiteral("Size chart")).toUpper();
 }
 
 static QString apparelSlogan(const QString &locale)
@@ -1217,7 +1316,7 @@ static QString apparelSlogan(const QString &locale)
         {QStringLiteral("en-GB"), QStringLiteral("Raise your aura")},
         {QStringLiteral("en-US"), QStringLiteral("Raise your aura")},
     };
-    return t.value(locale, QStringLiteral("Raise your aura"));
+    return t.value(locale, QStringLiteral("Raise your aura")).toUpper();
 }
 
 static QJsonObject buildHeadlineModule(const QString &title)
@@ -1506,33 +1605,12 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                         tr("▶ Uploading size chart: %1").arg(sc->displayName));
                     QImage img(sc->imagePath);
                     if (!img.isNull()) {
-                        img = [&locale](QImage src) {
+                        img = [](QImage src) {
                             if (src.width() > 970) src = src.scaledToWidth(970, Qt::SmoothTransformation);
-                            // Bake the localised title into the image so the module has no
-                            // headline field — Amazon's module headline adds a large fixed gap.
-                            const QString title = sizeChartTitle(locale);
-                            if (!title.isEmpty()) {
-                                const int hdr = 60;
-                                QImage canvas(src.width(), src.height() + hdr, QImage::Format_ARGB32);
-                                canvas.fill(Qt::white);
-                                QPainter pp(&canvas);
-                                pp.drawImage(0, hdr, src);
-                                QFont f;
-                                f.setBold(true);
-                                f.setPixelSize(26);
-                                pp.setFont(f);
-                                pp.setPen(Qt::black);
-                                pp.drawText(QRect(16, 0, src.width() - 16, hdr),
-                                            Qt::AlignVCenter | Qt::AlignLeft, title);
-                                pp.end();
-                                src = canvas;
-                            }
-                            if (src.height() < 600) {
-                                QImage p(src.width(), 600, QImage::Format_ARGB32);
-                                p.fill(Qt::white);
-                                QPainter(&p).drawImage(0, (600 - src.height()) / 2, src);
-                                src = p;
-                            }
+                            // No extra height padding here: _renderAndSaveChart already
+                            // saves with 400 px minimum (table centered, ~50 px white each
+                            // side).  Adding another 600 px floor creates ~250 px of dead
+                            // white below the table in the A+ module.
                             return src;
                         }(img);
                         const int imgW = img.width(), imgH = img.height();
@@ -1548,8 +1626,9 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                         }
                         appendAplusLog(progressUi.logPtr,
                             tr("  ✓ Uploaded — ID: %1").arg(uploadId.left(40)));
-                        // No module headline — title is baked into the image.
-                        moduleList.append(buildImageModule(uploadId, sc->displayName, imgW, imgH));
+                        // Module headline used (same Amazon font/style as FAQ headline).
+                        moduleList.append(buildImageModule(uploadId, sc->displayName, imgW, imgH,
+                                                           sizeChartTitle(locale)));
                     } else {
                         appendAplusLog(progressUi.logPtr,
                             tr("  ⚠ Cannot load size chart image — skipped"));
@@ -1575,34 +1654,12 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                     appendAplusLog(progressUi.logPtr, tr("  ⚠ Cannot load image — skipped"));
                     continue;
                 }
-                img = [&, ii](QImage src) {
+                img = [](QImage src) {
                     if (src.width() > 970) src = src.scaledToWidth(970, Qt::SmoothTransformation);
-                    // Bake the slogan into the first lifestyle image using the same
-                    // 60 px header approach as the size chart, so both titles are
-                    // rendered identically (same font, same spacing, no module headline).
-                    if (ii == 0 && useSlogan) {
-                        const QString slogan = apparelSlogan(locale);
-                        if (!slogan.isEmpty()) {
-                            const int hdr = 60;
-                            QImage canvas(src.width(), src.height() + hdr, QImage::Format_ARGB32);
-                            canvas.fill(Qt::white);
-                            QPainter pp(&canvas);
-                            pp.drawImage(0, hdr, src);
-                            QFont f;
-                            f.setBold(true);
-                            f.setPixelSize(26);
-                            pp.setFont(f);
-                            pp.setPen(Qt::black);
-                            pp.drawText(QRect(16, 0, src.width() - 16, hdr),
-                                        Qt::AlignVCenter | Qt::AlignLeft, slogan);
-                            pp.end();
-                            src = canvas;
-                        }
-                    }
                     if (src.height() < 600) {
                         QImage p(src.width(), 600, QImage::Format_ARGB32);
                         p.fill(Qt::white);
-                        QPainter(&p).drawImage(0, (600 - src.height()) / 2, src);
+                        QPainter(&p).drawImage(0, 0, src);
                         src = p;
                     }
                     return src;
@@ -1620,8 +1677,9 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                 }
                 appendAplusLog(progressUi.logPtr,
                     tr("  ✓ Uploaded — ID: %1").arg(uploadId.left(40)));
-                // No module headline — title is baked into the image for ii==0.
-                moduleList.append(buildImageModule(uploadId, info.displayName, imgW, imgH));
+                // Module headline — same Amazon font/style as the size chart and FAQ.
+                const QString imgHeadline = (ii == 0 && useSlogan) ? apparelSlogan(locale) : QString{};
+                moduleList.append(buildImageModule(uploadId, info.displayName, imgW, imgH, imgHeadline));
             }
 
             // --- FAQ ---
@@ -2816,13 +2874,14 @@ void PaneSizing::_refreshSizeGroupList()
     ui->listWidgetSizeGroups->setCurrentRow(restoreRow);
 }
 
-static QImage padImageToMinHeight(const QImage &src, int minH)
+static QImage padImageToMinHeight(const QImage &src, int minH,
+                                   const QColor &fill = Qt::white)
 {
     if (src.height() >= minH) return src;
     QImage padded(src.width(), minH, QImage::Format_ARGB32);
-    padded.fill(Qt::white);
+    padded.fill(fill);
     QPainter p(&padded);
-    p.drawImage(0, (minH - src.height()) / 2, src);
+    p.drawImage(0, (minH - src.height()) / 2, src);  // centered
     p.end();
     return padded;
 }
@@ -2910,8 +2969,11 @@ void PaneSizing::_renderAndSaveChart(const AbstractSizeCategory *cat,
 
     const QDir aplusDir = m_aplusContent->dir();
     aplusDir.mkpath(elemId);
-    QImage desktop = padImageToMinHeight(img.scaledToWidth(970, Qt::SmoothTransformation), 400);
-    QImage mobile  = padImageToMinHeight(img.scaledToWidth(600, Qt::SmoothTransformation), 400);
+    // Fill padding with the table's lighter alternating-row teal so top/bottom
+    // breathing room blends with the table instead of showing as white gaps.
+    const QColor tableBg(QStringLiteral("#e8f6f3"));
+    QImage desktop = padImageToMinHeight(img.scaledToWidth(970, Qt::SmoothTransformation), 400, tableBg);
+    QImage mobile  = padImageToMinHeight(img.scaledToWidth(600, Qt::SmoothTransformation), 400, tableBg);
     const QString relD = elemId + QStringLiteral("/size_chart.png");
     const QString relM = elemId + QStringLiteral("/size_chart_mobile.png");
     desktop.save(aplusDir.filePath(relD));
