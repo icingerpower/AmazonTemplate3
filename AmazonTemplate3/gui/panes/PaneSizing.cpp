@@ -1390,6 +1390,52 @@ QJsonObject buildFaqModule(const QString &text)
     };
 }
 
+// Returns the ASIN with the smallest size from asinList by querying the tree model.
+// Numeric sizes are compared as numbers; letter sizes follow XS<S<M<L<XL<XXL order.
+// Falls back to the first entry if the tree model is null or has no matching rows.
+static QString smallestSizeAsin(TreeSizingAsins *model, const QStringList &asinList)
+{
+    if (asinList.isEmpty()) return {};
+    if (!model || asinList.size() == 1) return asinList.first();
+
+    static const QStringList kLetterOrder = {
+        QStringLiteral("XXXS"), QStringLiteral("XXS"), QStringLiteral("XS"),
+        QStringLiteral("S"),    QStringLiteral("M"),   QStringLiteral("L"),
+        QStringLiteral("XL"),   QStringLiteral("XXL"), QStringLiteral("XXXL"),
+        QStringLiteral("3XL"),  QStringLiteral("4XL"), QStringLiteral("5XL")
+    };
+
+    QList<QPair<QString, QString>> sizeToAsin;
+    const int famCount = model->rowCount();
+    for (int f = 0; f < famCount; ++f) {
+        const QModelIndex famIdx = model->index(f, 0);
+        const int childCount = model->rowCount(famIdx);
+        for (int c = 0; c < childCount; ++c) {
+            const QString asin = model->data(
+                model->index(c, TreeSizingAsins::ASIN, famIdx)).toString().trimmed();
+            if (!asinList.contains(asin)) continue;
+            const QString size = model->data(
+                model->index(c, TreeSizingAsins::Size, famIdx)).toString().trimmed();
+            sizeToAsin.append({size, asin});
+        }
+    }
+    if (sizeToAsin.isEmpty()) return asinList.first();
+
+    std::sort(sizeToAsin.begin(), sizeToAsin.end(),
+        [](const QPair<QString,QString> &a, const QPair<QString,QString> &b) {
+            bool okA, okB;
+            const double dA = a.first.toDouble(&okA);
+            const double dB = b.first.toDouble(&okB);
+            if (okA && okB) return dA < dB;
+            const int iA = kLetterOrder.indexOf(a.first.toUpper());
+            const int iB = kLetterOrder.indexOf(b.first.toUpper());
+            if (iA >= 0 && iB >= 0) return iA < iB;
+            return a.first < b.first;
+        });
+
+    return sizeToAsin.first().second;
+}
+
 // headline is optional — pass empty string to omit it.
 QJsonObject buildImageModule(const QString &uploadId,
                               const QString &caption,
@@ -1710,13 +1756,32 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
             setAplusStatus(progressUi, tr("Creating A+ content document…"), step - 1);
             appendAplusLog(progressUi.logPtr,
                 tr("▶ Creating document (locale: %1)").arg(locale));
-            // Build a per-color document name so each color set is identifiable in Seller Central.
+            // --- Resolve child ASINs for this color set (needed for name + association) ---
+            QStringList asinList;
+            {
+                const QString colorKey = (colorIdx < colorNames.size())
+                    ? colorNames.at(colorIdx).toLower() : QString{};
+                if (!colorKey.isEmpty() && m_colorAsins.contains(colorKey)) {
+                    asinList = m_colorAsins.value(colorKey);
+                } else {
+                    for (const auto &asins : std::as_const(m_colorAsins))
+                        for (const QString &a : asins)
+                            if (!asinList.contains(a)) asinList << a;
+                }
+            }
+
+            // Build a per-color document name prefixed with the smallest-size child ASIN
+            // so the document is findable by ASIN in the Seller Central search bar.
             QString docName = m_productTitle.isEmpty() ? QStringLiteral("A+ Content") : m_productTitle;
             if (colorIdx < colorNames.size() && !colorNames.at(colorIdx).isEmpty()) {
-                // Strip any existing parenthetical (e.g. "(Orange, S=8)") and replace with current color.
                 const int paren = docName.indexOf(QLatin1Char('('));
                 const QString base = (paren > 0 ? docName.left(paren) : docName).trimmed();
                 docName = base + QStringLiteral(" (") + colorNames.at(colorIdx) + QLatin1Char(')');
+            }
+            {
+                const QString smallAsin = smallestSizeAsin(m_treeModel.get(), asinList);
+                if (!smallAsin.isEmpty())
+                    docName = smallAsin + QStringLiteral(" - ") + docName;
             }
             QJsonObject contentDoc{
                 {QStringLiteral("name"),              docName.left(100)},
@@ -1734,23 +1799,6 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
             }
             appendAplusLog(progressUi.logPtr,
                 tr("  ✓ Document created — key: %1").arg(contentReferenceKey.left(40)));
-
-            // --- Resolve child ASINs for this color set ---
-            // A+ content must be associated with child (purchasable) ASINs,
-            // not the parent variation ASIN which doesn't exist in the catalog.
-            QStringList asinList;
-            {
-                const QString colorKey = (colorIdx < colorNames.size())
-                    ? colorNames.at(colorIdx).toLower() : QString{};
-                if (!colorKey.isEmpty() && m_colorAsins.contains(colorKey)) {
-                    asinList = m_colorAsins.value(colorKey);
-                } else {
-                    // Size-only or single-color product: use all children.
-                    for (const auto &asins : std::as_const(m_colorAsins))
-                        for (const QString &a : asins)
-                            if (!asinList.contains(a)) asinList << a;
-                }
-            }
 
             // --- Associate with ASINs ---
             ++step;

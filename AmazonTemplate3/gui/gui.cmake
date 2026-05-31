@@ -9,6 +9,9 @@ SET(GUI_FILES
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneSizing.cpp
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneSizing.h
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneSizing.ui
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneWarnings.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneWarnings.h
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneWarnings.ui
     ${CMAKE_CURRENT_LIST_DIR}/panes/SizeRangeWidget.h
     ${CMAKE_CURRENT_LIST_DIR}/panes/SizeRangeWidget.cpp
     ${CMAKE_CURRENT_LIST_DIR}/panes/MiddleTruncateDelegate.h
