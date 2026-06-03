@@ -44,6 +44,10 @@ public:
     QCoro::Task<void> recordAPlusUploaded(const QString& asin, const QDate& date,
                                           const QString& marketplaceId);
 
+    // Updates the SKU column for a given ASIN (parent or child) in-place.
+    // Emits dataChanged so the view refreshes. No-op if the ASIN is not found.
+    void setSku(const QString& asin, const QString& sku);
+
     // QAbstractItemModel interface
     QModelIndex index(int row, int col, const QModelIndex& parent = {}) const override;
     QModelIndex parent(const QModelIndex& index) const override;

@@ -19,6 +19,7 @@
 #include "aplus/APlusWorkflow.h"
 #include "SizeRangeWidget.h"
 #include "sizecategories/SizingTableTemplateModel.h"
+#include "BrokenChildTable.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class PaneSizing; }
@@ -69,6 +70,7 @@ private slots:
     void onVariantImageSelected(int row);
     void onOpenSizeTableFolderClicked();
     void onAddSkusFromTemplateClicked();
+    void onFactorizeSizeTables();
 
     // A+ content slots
     void onAplusGenerateAll();
@@ -85,6 +87,12 @@ private slots:
     void onSavedSizeSaveClicked();
     void onSavedSizeLoadClicked();
     void onSavedSizeEditClicked();
+
+    // Broken-child fix workflow (Broken child tab)
+    void onFixAllClicked();
+    void onFixParentsClicked();
+    void onFixImagesClicked();
+    void onFixLogClicked();
 
 private:
     struct AsinSku {
@@ -126,10 +134,15 @@ private:
     bool                          m_aplusDesktop = true;
     QMenu                        *m_aplusMenu    = nullptr;
 
-    SizingTableTemplateModel     *m_templateModel = nullptr;
+    SizingTableTemplateModel     *m_templateModel    = nullptr;
+    BrokenChildTable             *m_brokenChildTable = nullptr;
 
     void _ensureModel(const QDir &dir);
     void _refreshApi();
+    QCoro::Task<void> _loadBrokenChildData(bool forceRefresh = false);
+    void _appendFixLog(const QString &asin, const QString &marketplace, const QString &details);
+    // Runs the parent/image fix workflow on the Broken child table.
+    QCoro::Task<void> _runBrokenChildFix(bool fixParents, bool fixImages);
     void _refreshTemplateCombo();
     QDir _resolveProductDir(const QString &asin, const QString &title);
     void _saveProductSettings();
@@ -138,6 +151,7 @@ private:
     void _tryGuessSizeRange();
     void _tryGuessBrandRangeFromTitle();
     void _rebuildMeasurementForm();
+    bool _rebuildSizeTable();
     const AbstractSizeCategory* _currentCategory() const;
     QCoro::Task<void> _uploadSizeImage(int imageIndex);
     QCoro::Task<void> _saveToSizeTableFolder();

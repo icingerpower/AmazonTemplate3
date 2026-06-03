@@ -13,6 +13,8 @@
 #include "aplus/APlusUploadDialog.h"
 #include "sizecategories/AbstractSizeCategory.h"
 #include "sizecategories/SizingTableTemplateModel.h"
+#include "BrokenChildTable.h"
+#include "AmazonMarketplace.h"
 #include <QTableView>
 #include <QHeaderView>
 #include <QUuid>
@@ -43,6 +45,7 @@
 #include <QPushButton>
 #include <QProgressBar>
 #include <QTimer>
+#include <QScrollBar>
 #include <QTextEdit>
 #include <QProgressBar>
 #include <QFontDatabase>
@@ -228,6 +231,8 @@ PaneSizing::PaneSizing(QWidget *parent)
             this, &PaneSizing::onOpenSizeTableFolderClicked);
     connect(ui->buttonAddSkusFromTemplate, &QPushButton::clicked,
             this, &PaneSizing::onAddSkusFromTemplateClicked);
+    connect(ui->buttonFactorize, &QPushButton::clicked,
+            this, &PaneSizing::onFactorizeSizeTables);
 
     ui->treeViewAsins->setItemDelegateForColumn(
         TreeSizingAsins::Title, new MiddleTruncateDelegate(this));
@@ -237,6 +242,19 @@ PaneSizing::PaneSizing(QWidget *parent)
     connect(ui->buttonSavedSizeSave, &QPushButton::clicked, this, &PaneSizing::onSavedSizeSaveClicked);
     connect(ui->buttonSavedSizeLoad, &QPushButton::clicked, this, &PaneSizing::onSavedSizeLoadClicked);
     connect(ui->buttonSavedSizeEdit, &QPushButton::clicked, this, &PaneSizing::onSavedSizeEditClicked);
+
+    connect(ui->buttonBrokenCheck, &QPushButton::clicked,
+            this, [this]() { _loadBrokenChildData(true); });
+
+    // Broken child fix buttons
+    connect(ui->buttonFixAll,    &QPushButton::clicked,
+            this, &PaneSizing::onFixAllClicked);
+    connect(ui->buttonFixParent, &QPushButton::clicked,
+            this, &PaneSizing::onFixParentsClicked);
+    connect(ui->buttonFixImages, &QPushButton::clicked,
+            this, &PaneSizing::onFixImagesClicked);
+    connect(ui->buttonFixLog, &QPushButton::clicked,
+            this, &PaneSizing::onFixLogClicked);
 
     _rebuildMeasurementForm();
     updateButtonStates();
@@ -287,6 +305,7 @@ void PaneSizing::setWorkingDir(const QDir &workingDir)
         m_templateModel->setWorkingDir(m_workingDir);
         _refreshTemplateCombo();
     }
+    ui->buttonFactorize->setEnabled(m_workingDir.exists());
 }
 
 void PaneSizing::_refreshApi()
@@ -503,6 +522,11 @@ void PaneSizing::_loadProductSettings()
     }
 
     _initAplusContent();
+
+    if (_currentCategory() && ui->sizeRangeMain->isRangeSelected()) {
+        _rebuildSizeTable();
+        updateButtonStates();
+    }
 }
 
 void PaneSizing::_ensureModel(const QDir &dir)
@@ -514,12 +538,53 @@ void PaneSizing::_ensureModel(const QDir &dir)
     ui->treeViewAsins->setModel(m_treeModel.get());
     ui->treeViewAsins->expandAll();
 
+    if (!m_brokenChildTable) {
+        m_brokenChildTable = new BrokenChildTable(this);
+        QList<BrokenChildTable::MarketplaceSpec> specs;
+        for (const AmazonMarketplace &mp : AmazonMarketplace::all())
+            specs.append({mp.marketplaceId(), mp.countryCode()});
+        m_brokenChildTable->setMarketplaces(specs);
+        ui->tableViewBrokenChild->setModel(m_brokenChildTable);
+        ui->tableViewBrokenChild->horizontalHeader()->setStretchLastSection(true);
+        ui->tableViewBrokenChild->verticalHeader()->hide();
+    }
+
     connect(m_treeModel.get(), &TreeSizingAsins::marketplacesChecked,
             this, [this](const QStringList &codes) {
                 ui->listWidgetCountries->clear();
                 for (const QString &c : codes)
                     ui->listWidgetCountries->addItem(c);
                 _refreshSizeGroupList();
+
+                // Sync active/inactive state into the broken child table so that
+                // marketplaces marked "(missing)" are excluded from fix targets.
+                if (m_brokenChildTable) {
+                    static const QHash<QString, QString> kCodeToMp = {
+                        {QStringLiteral("fr"), QStringLiteral("A13V1IB3VIYZZH")},
+                        {QStringLiteral("de"), QStringLiteral("A1PA6795UKMFR9")},
+                        {QStringLiteral("it"), QStringLiteral("APJ6JRA9NG5V4")},
+                        {QStringLiteral("es"), QStringLiteral("A1RKKUPIHCS9HS")},
+                        {QStringLiteral("uk"), QStringLiteral("A1F83G8C2ARO7P")},
+                        {QStringLiteral("nl"), QStringLiteral("A1805IZSGTT6HS")},
+                        {QStringLiteral("se"), QStringLiteral("A2NODRKZP88ZB9")},
+                        {QStringLiteral("pl"), QStringLiteral("A1C3SOZRARQ6R3")},
+                        {QStringLiteral("be"), QStringLiteral("AMEN7PMS3EDWL")},
+                        {QStringLiteral("ie"), QStringLiteral("A28R8C7NBKEWEA")},
+                        {QStringLiteral("tr"), QStringLiteral("A33AVAJ2PDY3EV")},
+                        {QStringLiteral("us"), QStringLiteral("ATVPDKIKX0DER")},
+                        {QStringLiteral("ca"), QStringLiteral("A2EUQ1WTGCTBG2")},
+                        {QStringLiteral("mx"), QStringLiteral("A1AM78C64UM0Y8")},
+                        {QStringLiteral("jp"), QStringLiteral("A1VC38T7YXB528")},
+                    };
+                    for (const QString &c : codes) {
+                        const bool missing = c.contains(QStringLiteral("(missing)"),
+                                                        Qt::CaseInsensitive);
+                        const QString code = c.trimmed().toLower().split(QLatin1Char(' ')).first();
+                        const QString mpId = kCodeToMp.value(code);
+                        if (!mpId.isEmpty())
+                            m_brokenChildTable->setMarketplaceActive(mpId, !missing);
+                    }
+                }
             });
 
     connect(m_treeModel.get(), &QAbstractItemModel::modelReset,
@@ -565,6 +630,9 @@ void PaneSizing::_ensureModel(const QDir &dir)
                 // the tree model is fully populated and all child titles are scannable.
                 if (!ui->sizeRangeBrand->isRangeSelected())
                     _tryGuessBrandRangeFromTitle();
+
+                // Kick off per-child, per-marketplace health checks for the broken-child tab.
+                _loadBrokenChildData();
             });
 
     connect(m_treeModel.get(), &TreeSizingAsins::variantImagesFetched,
@@ -633,6 +701,7 @@ void PaneSizing::updateButtonStates()
     ui->buttonAplusUpload->setEnabled(hasProduct && m_aplusContent != nullptr);
     ui->buttonOpenSizeTableFolder->setEnabled(hasProduct);
     ui->buttonAddSkusFromTemplate->setEnabled(hasProduct);
+    ui->buttonFactorize->setEnabled(m_workingDir.exists());
 }
 
 void PaneSizing::onSizeTypeChanged(int index)
@@ -762,15 +831,12 @@ void PaneSizing::_rebuildMeasurementForm()
     }
 }
 
-void PaneSizing::onGenSizeTablesClicked()
+bool PaneSizing::_rebuildSizeTable()
 {
-    m_generatedSuccessfully = false;
-
     const auto *cat = _currentCategory();
-    if (!cat) {
-        updateButtonStates();
-        return;
-    }
+    if (!cat)
+        return false;
+
     const bool useLetters = ui->sizeRangeMain->mode() == QLatin1String("letters");
     const bool useHeight  = ui->sizeRangeMain->mode() == QLatin1String("height");
     QString keyFrom, keyTo;
@@ -829,7 +895,25 @@ void PaneSizing::onGenSizeTablesClicked()
         ui->labelGeneratedImage->setAlignment(Qt::AlignTop | Qt::AlignLeft);
 
         m_generatedSuccessfully = true;
+        return true;
+    } catch (const std::exception &e) {
+        QMessageBox::warning(this, tr("Generation failed"), QString::fromUtf8(e.what()));
+        return false;
+    }
+}
 
+void PaneSizing::onGenSizeTablesClicked()
+{
+    m_generatedSuccessfully = false;
+
+    if (!_rebuildSizeTable()) {
+        updateButtonStates();
+        return;
+    }
+
+    const auto *cat = _currentCategory();
+
+    try {
         _saveToSizeTableFolder();
 
         _saveProductSettings();
@@ -1049,6 +1133,148 @@ void PaneSizing::onOpenSizeTableFolderClicked()
 void PaneSizing::onAddSkusFromTemplateClicked()
 {
     _addSkusFromTemplate();
+}
+
+void PaneSizing::onFactorizeSizeTables()
+{
+    if (!m_workingDir.exists()) return;
+
+    const QDir sizingRoot(m_workingDir.filePath(QStringLiteral("sizing")));
+    if (!sizingRoot.exists()) {
+        QMessageBox::information(this, tr("Factorize"),
+            tr("No sizing directory found."));
+        return;
+    }
+
+    // --- Scan all product subdirs for size table txt files ---
+    struct ProductInfo {
+        QString dirPath;
+        QString parentAsin;
+        QString title;
+        QStringList childAsins;
+        QMap<QString, QString> groupTxtContents; // group key → file content
+    };
+
+    QList<ProductInfo> products;
+
+    const QStringList entries = sizingRoot.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString &entry : entries) {
+        if (entry == QStringLiteral("factorized-size-tables")) continue;
+
+        const QString productDirPath = sizingRoot.filePath(entry);
+        const QDir sizeTableDir(productDirPath + QStringLiteral("/size-table"));
+        if (!sizeTableDir.exists()) continue;
+
+        // Parse dir name: "{parentAsin}-{title}" or just "{parentAsin}"
+        const int dashIdx = entry.indexOf(QLatin1Char('-'));
+        const QString parentAsin = (dashIdx > 0) ? entry.left(dashIdx) : entry;
+        const QString title      = (dashIdx > 0) ? entry.mid(dashIdx + 1) : QString{};
+
+        // Read size_table_*.txt files
+        const QStringList txtFiles = sizeTableDir.entryList(
+            QStringList{QStringLiteral("size_table_*.txt")}, QDir::Files);
+        if (txtFiles.isEmpty()) continue;
+
+        ProductInfo info;
+        info.dirPath    = productDirPath;
+        info.parentAsin = parentAsin;
+        info.title      = title;
+
+        for (const QString &txtFile : txtFiles) {
+            // "size_table_" = 11 chars, ".txt" = 4 chars
+            const QString group = txtFile.mid(11, txtFile.length() - 15);
+            QFile f(sizeTableDir.filePath(txtFile));
+            if (f.open(QIODevice::ReadOnly | QIODevice::Text))
+                info.groupTxtContents.insert(group, QString::fromUtf8(f.readAll()));
+        }
+        if (info.groupTxtContents.isEmpty()) continue;
+
+        // Read asin.txt
+        QFile asinFile(sizeTableDir.filePath(QStringLiteral("asin.txt")));
+        if (asinFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            const QString content = QString::fromUtf8(asinFile.readAll());
+            for (const QString &line : content.split(QLatin1Char('\n'), Qt::SkipEmptyParts))
+                info.childAsins << line.trimmed();
+        }
+
+        products << info;
+    }
+
+    if (products.isEmpty()) {
+        QMessageBox::information(this, tr("Factorize"),
+            tr("No size tables found. Generate size tables first."));
+        return;
+    }
+
+    // --- Group by fingerprint ---
+    // Fingerprint = sorted concatenation of "group|||content===" for all groups.
+    QMap<QString, QList<int>> fingerprints;
+    for (int i = 0; i < products.size(); ++i) {
+        QString fp;
+        for (auto it = products[i].groupTxtContents.constBegin();
+             it != products[i].groupTxtContents.constEnd(); ++it) {
+            fp += it.key() + QStringLiteral("|||") + it.value() + QStringLiteral("===");
+        }
+        fingerprints[fp].append(i);
+    }
+
+    // --- Create factorized-size-tables output ---
+    m_workingDir.mkpath(QStringLiteral("sizing/factorized-size-tables"));
+    const QDir factDir(m_workingDir.filePath(QStringLiteral("sizing/factorized-size-tables")));
+
+    int groupCount = 0;
+    for (auto it = fingerprints.constBegin(); it != fingerprints.constEnd(); ++it) {
+        const QList<int> &indices = it.value();
+        const ProductInfo &rep = products[indices.first()];
+
+        // Merge and sort child ASINs from all products in this group
+        QStringList allAsins;
+        for (int idx : indices)
+            for (const QString &a : products[idx].childAsins)
+                if (!a.isEmpty() && !allAsins.contains(a))
+                    allAsins << a;
+        allAsins.sort();
+
+        // Dir name: first child ASIN (or parent ASIN) + title from representative
+        const QString firstAsin = allAsins.isEmpty() ? rep.parentAsin : allAsins.first();
+        QString dirName = firstAsin;
+        if (!rep.title.isEmpty())
+            dirName += QLatin1Char('-') + rep.title;
+
+        const QString factSubdirPath = factDir.filePath(dirName);
+        QDir().mkpath(factSubdirPath);
+
+        // Write merged asin.txt
+        if (!allAsins.isEmpty()) {
+            QFile f(factSubdirPath + QStringLiteral("/asin.txt"));
+            if (f.open(QIODevice::WriteOnly | QIODevice::Text))
+                f.write(allAsins.join(QLatin1Char('\n')).toUtf8());
+        }
+
+        // Copy xlsx + txt from representative product
+        const QDir repSizeTableDir(rep.dirPath + QStringLiteral("/size-table"));
+        const QStringList xlsxFiles = repSizeTableDir.entryList(
+            QStringList{QStringLiteral("filled_template_*.xlsx")}, QDir::Files);
+        for (const QString &xlsx : xlsxFiles) {
+            const QString dst = factSubdirPath + QLatin1Char('/') + xlsx;
+            QFile::remove(dst);
+            QFile::copy(repSizeTableDir.filePath(xlsx), dst);
+        }
+        for (auto git = rep.groupTxtContents.constBegin();
+             git != rep.groupTxtContents.constEnd(); ++git) {
+            const QString txtName = QStringLiteral("size_table_%1.txt").arg(git.key());
+            QFile f(factSubdirPath + QLatin1Char('/') + txtName);
+            if (f.open(QIODevice::WriteOnly | QIODevice::Text))
+                f.write(git.value().toUtf8());
+        }
+
+        ++groupCount;
+    }
+
+    QMessageBox::information(this, tr("Factorize"),
+        tr("Scanned %1 product(s) → %2 unique size table group(s).\n"
+           "Output: sizing/factorized-size-tables/")
+        .arg(products.size()).arg(groupCount));
 }
 
 void PaneSizing::onUploadSizeImageClicked()
@@ -3802,23 +4028,69 @@ QCoro::Task<void> PaneSizing::_saveToSizeTableFolder()
         m_productType = ps.value(QStringLiteral("sizing/productType")).toString();
     }
 
-    // Try API if still empty and we can find a SKU
-    if (m_productType.isEmpty() && !childAsins.isEmpty() && m_productWorkingDir.exists()) {
-        // Look for a cached SKU in settings.ini
+    // Try API if still empty: resolve a SKU, then call fetchListingProductType.
+    if (m_productType.isEmpty() && !childAsins.isEmpty()) {
         QString sku;
-        QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
-                     QSettings::IniFormat);
-        for (const QString &asin : childAsins) {
-            sku = ps.value(QStringLiteral("sizing/skus/") + asin).toString();
-            if (!sku.isEmpty()) break;
+
+        // 1. Tree model (populated when loaded from xlsx with SKU column).
+        if (m_treeModel) {
+            for (int fi = 0; fi < m_treeModel->rowCount() && sku.isEmpty(); ++fi) {
+                const QModelIndex pi = m_treeModel->index(fi, 0);
+                for (int ci = 0; ci < m_treeModel->rowCount(pi) && sku.isEmpty(); ++ci)
+                    sku = m_treeModel->data(
+                              m_treeModel->index(ci, TreeSizingAsins::SKU, pi)).toString().trimmed();
+            }
+        }
+
+        // 2. settings.ini cache from a previous upload.
+        if (sku.isEmpty() && m_productWorkingDir.exists()) {
+            QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                         QSettings::IniFormat);
+            for (const QString &asin : childAsins) {
+                sku = ps.value(QStringLiteral("sizing/skus/") + asin).toString();
+                if (!sku.isEmpty()) break;
+            }
+        }
+
+        // 3. Reports API — fetches all FBA+MFN listings (may take up to ~3 min).
+        if (sku.isEmpty()) {
+            const QString mpId = firstMarketplaceIdFromCountryList(ui->listWidgetCountries);
+            if (!mpId.isEmpty()) {
+                QMessageBox infoBox(QMessageBox::Information, tr("Fetching SKUs"),
+                                    tr("Requesting all-listings report from Amazon to determine"
+                                       " product type…\nThis can take up to 3 minutes."),
+                                    QMessageBox::NoButton, this);
+                infoBox.setStandardButtons(QMessageBox::NoButton);
+                infoBox.show();
+                QCoreApplication::processEvents();
+
+                QHash<QString, QString> reportMap;
+                co_await m_api->fetchAllSkusViaReport(mpId, &reportMap);
+                infoBox.hide();
+
+                for (const QString &asin : childAsins) {
+                    sku = reportMap.value(asin);
+                    if (!sku.isEmpty()) break;
+                }
+
+                // Cache resolved SKUs for subsequent runs.
+                if (!sku.isEmpty() && m_productWorkingDir.exists()) {
+                    QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                                 QSettings::IniFormat);
+                    for (auto it = reportMap.constBegin(); it != reportMap.constEnd(); ++it) {
+                        if (childAsins.contains(it.key()))
+                            ps.setValue(QStringLiteral("sizing/skus/") + it.key(), it.value());
+                    }
+                }
+            }
         }
 
         if (!sku.isEmpty()) {
             const QString mpId = firstMarketplaceIdFromCountryList(ui->listWidgetCountries);
-
             co_await m_api->fetchListingProductType(mpId, sku, &m_productType);
-
-            if (!m_productType.isEmpty()) {
+            if (!m_productType.isEmpty() && m_productWorkingDir.exists()) {
+                QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                             QSettings::IniFormat);
                 ps.setValue(QStringLiteral("sizing/productType"), m_productType);
             }
         }
@@ -3842,9 +4114,9 @@ QCoro::Task<void> PaneSizing::_saveToSizeTableFolder()
     }
 
     // --- Get/ask for the template for this product type ---
-    auto wdSettings = WorkingDirectoryManager::instance()->settings();
-    const QString templateKey = QStringLiteral("productTypeTemplates/") + m_productType;
-    QString templatePath = wdSettings->value(templateKey).toString();
+    // Stored in app-wide QSettings so it persists across products and sessions.
+    const QString templateKey = QStringLiteral("sizing/productTypeTemplates/") + m_productType;
+    QString templatePath = QSettings().value(templateKey).toString();
 
     if (templatePath.isEmpty() || !QFileInfo::exists(templatePath)) {
         templatePath = QFileDialog::getOpenFileName(
@@ -3853,7 +4125,11 @@ QCoro::Task<void> PaneSizing::_saveToSizeTableFolder()
             {}, tr("Excel (*.xlsx)"));
         if (templatePath.isEmpty())
             co_return;
-        wdSettings->setValue(templateKey, templatePath);
+        {
+            QSettings appSettings;
+            appSettings.setValue(templateKey, templatePath);
+            appSettings.sync();
+        }
     }
 
     // --- Create size-table/ folder ---
@@ -4077,6 +4353,40 @@ QCoro::Task<void> PaneSizing::_saveToSizeTableFolder()
             if (!gDoc.saveAs(destPath)) {
                 QMessageBox::warning(this, tr("Template error"),
                     tr("Could not save filled template to:\n%1").arg(destPath));
+            }
+
+            // --- Write size_table_{group}.txt alongside the xlsx ---
+            {
+                QString tsv;
+                QTextStream ts(&tsv);
+
+                // Header: empty corner + one column per brand size
+                ts << QStringLiteral("BrandSize");
+                for (const QString &bl : brandLabels)
+                    ts << QLatin1Char('\t') << bl;
+                ts << QLatin1Char('\n');
+
+                // Row for this country group
+                ts << modelRowLabels.value(g);
+                for (int si = 0; si < nSizes; ++si) {
+                    auto *it = m_sizeTableModel->item(g, si + 1);
+                    ts << QLatin1Char('\t') << (it ? it->text() : QString{});
+                }
+                ts << QLatin1Char('\n');
+
+                // Measurement rows (shared across all groups)
+                for (int r = nGroupRows; r < m_sizeTableModel->rowCount(); ++r) {
+                    ts << modelRowLabels.value(r);
+                    for (int si = 0; si < nSizes; ++si) {
+                        auto *it = m_sizeTableModel->item(r, si + 1);
+                        ts << QLatin1Char('\t') << extractCmValue(it ? it->text() : QString{});
+                    }
+                    ts << QLatin1Char('\n');
+                }
+
+                QFile f(sizeTablePath + QStringLiteral("/size_table_%1.txt").arg(groupKey));
+                if (f.open(QIODevice::WriteOnly | QIODevice::Text))
+                    f.write(tsv.toUtf8());
             }
         }
         perGroupSaved = true;
@@ -4661,4 +4971,592 @@ void PaneSizing::onSavedSizeEditClicked()
 
     dlg.exec();
     _refreshTemplateCombo();
+}
+
+// ---------------------------------------------------------------------------
+// BrokenChildTable population
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> PaneSizing::_loadBrokenChildData(bool forceRefresh)
+{
+    if (!m_treeModel || !m_brokenChildTable) co_return;
+
+    // Try the on-disk cache first (avoids all API calls on repeat loads).
+    bool usedCache = false;
+    if (!forceRefresh && m_productWorkingDir.exists())
+        usedCache = m_brokenChildTable->loadFromDir(m_productWorkingDir);
+
+    if (!usedCache) {
+        // Fresh load: collect child entries from the tree model.
+        QList<BrokenChildTable::ChildEntry> entries;
+        for (int fi = 0; fi < m_treeModel->rowCount(); ++fi) {
+            const QModelIndex parentIdx = m_treeModel->index(fi, 0);
+            const QString parentAsin = m_treeModel->data(
+                m_treeModel->index(fi, TreeSizingAsins::ASIN)).toString();
+            const QString parentSku  = m_treeModel->data(
+                m_treeModel->index(fi, TreeSizingAsins::SKU)).toString();
+
+            for (int ci = 0; ci < m_treeModel->rowCount(parentIdx); ++ci) {
+                BrokenChildTable::ChildEntry e;
+                e.asin       = m_treeModel->data(
+                    m_treeModel->index(ci, TreeSizingAsins::ASIN,  parentIdx)).toString();
+                e.sku        = m_treeModel->data(
+                    m_treeModel->index(ci, TreeSizingAsins::SKU,   parentIdx)).toString();
+                e.color      = m_treeModel->data(
+                    m_treeModel->index(ci, TreeSizingAsins::Color, parentIdx)).toString();
+                e.size       = m_treeModel->data(
+                    m_treeModel->index(ci, TreeSizingAsins::Size,  parentIdx)).toString();
+                e.parentAsin = parentAsin;
+                e.parentSku  = parentSku;
+                if (!e.asin.isEmpty())
+                    entries.append(e);
+            }
+        }
+        if (entries.isEmpty()) co_return;
+
+        co_await m_brokenChildTable->populate(m_api.get(), std::move(entries));
+    }
+
+    // ── SKU resolution (runs regardless of cache/fresh) ────────────────────
+    // The catalog API never returns seller SKUs, so SKU/parentSku are empty
+    // until resolved. Strategy: settings.ini (free) → listing report (once).
+
+    // Build current asinToSku map from what the table already knows.
+    QHash<QString, QString> asinToSku;
+    for (const auto &row : m_brokenChildTable->rows()) {
+        if (!row.sku.isEmpty())       asinToSku.insert(row.asin,       row.sku);
+        if (!row.parentSku.isEmpty()) asinToSku.insert(row.parentAsin, row.parentSku);
+    }
+
+    // 1. Check settings.ini for previously resolved SKUs.
+    if (m_productWorkingDir.exists()) {
+        QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                     QSettings::IniFormat);
+        for (const auto &row : m_brokenChildTable->rows()) {
+            if (asinToSku.value(row.asin).isEmpty()) {
+                const QString s = ps.value(QStringLiteral("sizing/skus/") + row.asin).toString();
+                if (!s.isEmpty()) asinToSku.insert(row.asin, s);
+            }
+            if (!row.parentAsin.isEmpty() && asinToSku.value(row.parentAsin).isEmpty()) {
+                const QString s = ps.value(QStringLiteral("sizing/skus/") + row.parentAsin).toString();
+                if (!s.isEmpty()) asinToSku.insert(row.parentAsin, s);
+            }
+        }
+    }
+
+    // 2. If any child SKU is still missing, run the listing report to fill the gaps.
+    bool anyChildSkuMissing = false;
+    for (const auto &row : m_brokenChildTable->rows())
+        if (asinToSku.value(row.asin).isEmpty()) { anyChildSkuMissing = true; break; }
+
+    if (anyChildSkuMissing && m_api) {
+        const QString reportMpId = firstMarketplaceIdFromCountryList(ui->listWidgetCountries);
+        if (!reportMpId.isEmpty()) {
+            QHash<QString, QString> reportMap;
+            co_await m_api->fetchAllSkusViaReport(reportMpId, &reportMap);
+
+            for (const auto &row : m_brokenChildTable->rows()) {
+                if (asinToSku.value(row.asin).isEmpty()) {
+                    const QString s = reportMap.value(row.asin);
+                    if (!s.isEmpty()) asinToSku.insert(row.asin, s);
+                }
+            }
+        }
+    }
+
+    // 3. For parent ASINs still missing a SKU, derive it from a child listing's
+    //    attributes (child_parent_sku_relationships). Virtual parents never appear
+    //    in listing reports; the child always carries the parent SKU in its attributes.
+    //    Try every child until one succeeds — don't give up after the first failure
+    //    since a broken child may not have the attribute set.
+    if (m_api) {
+        QSet<QString> resolvedParents;
+        for (const auto &row : m_brokenChildTable->rows()) {
+            if (row.parentAsin.isEmpty()) continue;
+            if (!asinToSku.value(row.parentAsin).isEmpty()) continue;
+            if (resolvedParents.contains(row.parentAsin)) continue;
+            const QString childSku = asinToSku.value(row.asin);
+            if (childSku.isEmpty()) continue;
+
+            // Use the seller's primary marketplace (first in country list = FR).
+            // GB and other auto-mirrored marketplaces have no child_parent_sku_relationships.
+            const QString mpId = firstMarketplaceIdFromCountryList(ui->listWidgetCountries);
+            if (mpId.isEmpty()) continue;
+
+            QString parentSku;
+            co_await m_api->fetchParentSku(mpId, childSku, &parentSku);
+            if (!parentSku.isEmpty()) {
+                asinToSku.insert(row.parentAsin, parentSku);
+                resolvedParents.insert(row.parentAsin); // success → don't retry
+            }
+            // On failure: do NOT insert into resolvedParents so the next child is tried.
+        }
+    }
+
+    // 4. Apply resolved SKUs: update table, tree model, and settings.ini cache.
+    if (!asinToSku.isEmpty()) {
+        m_brokenChildTable->updateSkus(asinToSku);
+        if (m_treeModel) {
+            for (auto it = asinToSku.constBegin(); it != asinToSku.constEnd(); ++it)
+                if (!it.value().isEmpty()) m_treeModel->setSku(it.key(), it.value());
+        }
+        if (m_productWorkingDir.exists()) {
+            QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                         QSettings::IniFormat);
+            for (auto it = asinToSku.constBegin(); it != asinToSku.constEnd(); ++it)
+                if (!it.value().isEmpty())
+                    ps.setValue(QStringLiteral("sizing/skus/") + it.key(), it.value());
+        }
+    }
+
+    // Persist health + SKUs so the next non-forced load uses the cache.
+    if (m_productWorkingDir.exists())
+        m_brokenChildTable->saveToDir(m_productWorkingDir);
+
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
+// Broken-child fix workflow
+// ---------------------------------------------------------------------------
+
+void PaneSizing::onFixAllClicked()
+{
+    _runBrokenChildFix(true, true);
+}
+
+void PaneSizing::onFixParentsClicked()
+{
+    _runBrokenChildFix(true, false);
+}
+
+void PaneSizing::onFixImagesClicked()
+{
+    _runBrokenChildFix(false, true);
+}
+
+void PaneSizing::_appendFixLog(const QString &asin, const QString &marketplace,
+                               const QString &details)
+{
+    const QString logPath = m_workingDir.filePath(QStringLiteral("sizing/fix_log.txt"));
+    QFile f(logPath);
+    if (!f.open(QIODevice::Append | QIODevice::Text)) return;
+    QTextStream s(&f);
+    s << QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
+      << "  " << asin << "  " << marketplace << "  " << details << '\n';
+}
+
+void PaneSizing::onFixLogClicked()
+{
+    const QString logPath = m_workingDir.filePath(QStringLiteral("sizing/fix_log.txt"));
+    QFile f(logPath);
+
+    auto *dlg = new QDialog(this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setWindowTitle(tr("Fix log — sizing/fix_log.txt"));
+    dlg->resize(900, 500);
+    auto *layout = new QVBoxLayout(dlg);
+
+    auto *edit = new QTextEdit(dlg);
+    edit->setReadOnly(true);
+    edit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+
+    if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        edit->setPlainText(QString::fromUtf8(f.readAll()));
+        // Scroll to bottom (most recent entries)
+        auto *bar = edit->verticalScrollBar();
+        if (bar) bar->setValue(bar->maximum());
+    } else {
+        edit->setPlainText(tr("No fix log found at:\n%1\n\n"
+                              "Run \"Fix parents\" or \"Fix images\" first.").arg(logPath));
+    }
+
+    layout->addWidget(edit);
+
+    auto *btnBox = new QDialogButtonBox(QDialogButtonBox::Close, dlg);
+    auto *copyBtn = new QPushButton(tr("Copy"), dlg);
+    btnBox->addButton(copyBtn, QDialogButtonBox::ActionRole);
+    connect(copyBtn, &QPushButton::clicked, dlg, [edit]() {
+        QGuiApplication::clipboard()->setText(edit->toPlainText());
+    });
+    connect(btnBox, &QDialogButtonBox::rejected, dlg, &QDialog::close);
+    layout->addWidget(btnBox);
+
+    dlg->show();
+}
+
+QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages)
+{
+    if (!m_brokenChildTable) co_return;
+
+    // ── 1. Collect fix targets ──────────────────────────────────────────────
+    QList<BrokenChildTable::FixTarget> targets =
+        m_brokenChildTable->getFixTargets(fixParents, fixImages);
+    if (targets.isEmpty()) {
+        QMessageBox::information(this, tr("Fix"), tr("Nothing to fix."));
+        co_return;
+    }
+
+    // ── 2. Progress dialog (same pattern as PaneWarnings) ───────────────────
+    auto *progressDlg = new QDialog(this);
+    progressDlg->setAttribute(Qt::WA_DeleteOnClose);
+    progressDlg->setWindowModality(Qt::ApplicationModal);
+    progressDlg->setWindowTitle(tr("Fixing broken children…"));
+    progressDlg->resize(640, 460);
+    auto *pLayout = new QVBoxLayout(progressDlg);
+
+    auto *statusLabel = new QLabel(tr("Starting…"), progressDlg);
+    QFont boldFont = statusLabel->font();
+    boldFont.setBold(true);
+    statusLabel->setFont(boldFont);
+    pLayout->addWidget(statusLabel);
+
+    auto *progressBar = new QProgressBar(progressDlg);
+    progressBar->setRange(0, qMax(1, targets.size()));
+    progressBar->setValue(0);
+    pLayout->addWidget(progressBar);
+
+    auto *logEdit = new QTextEdit(progressDlg);
+    logEdit->setReadOnly(true);
+    logEdit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    pLayout->addWidget(logEdit);
+
+    auto *btnLayout = new QHBoxLayout();
+    auto *copyBtn = new QPushButton(tr("Copy log"), progressDlg);
+    btnLayout->addWidget(copyBtn);
+    btnLayout->addStretch();
+    auto *closeBtns = new QDialogButtonBox(QDialogButtonBox::Close, progressDlg);
+    QPushButton *closeBtn = closeBtns->button(QDialogButtonBox::Close);
+    if (closeBtn) closeBtn->setEnabled(false);
+    btnLayout->addWidget(closeBtns);
+    pLayout->addLayout(btnLayout);
+
+    QPointer<QLabel>       statusLabelPtr(statusLabel);
+    QPointer<QProgressBar> progressBarPtr(progressBar);
+    QPointer<QTextEdit>    logEditPtr(logEdit);
+    QPointer<QPushButton>  closeBtnPtr(closeBtn);
+    QPointer<QDialog>      dlgPtr(progressDlg);
+
+    auto appendLog = [logEditPtr](const QString &line) {
+        if (!logEditPtr) return;
+        const QString ts = QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss"));
+        logEditPtr->append(QStringLiteral("[%1] %2").arg(ts, line));
+    };
+
+    connect(copyBtn, &QPushButton::clicked, progressDlg, [logEditPtr]() {
+        if (logEditPtr)
+            QGuiApplication::clipboard()->setText(logEditPtr->toPlainText());
+    });
+    connect(closeBtns, &QDialogButtonBox::rejected, progressDlg, &QDialog::close);
+
+    progressDlg->show();
+
+    appendLog(tr("Found %1 cell(s) to fix.").arg(targets.size()));
+
+    // ── 3. Determine product type ───────────────────────────────────────────
+    if (m_productType.isEmpty() && m_productWorkingDir.exists()) {
+        QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                     QSettings::IniFormat);
+        m_productType = ps.value(QStringLiteral("sizing/productType")).toString();
+    }
+
+    // ── 4. Collect all unique child + parent ASINs that appear in targets ──
+    QSet<QString> uniqueAsins;
+    for (const auto &t : targets) {
+        const auto &row = m_brokenChildTable->rows().at(t.rowIdx);
+        if (!row.asin.isEmpty()) uniqueAsins.insert(row.asin);
+        if (!row.parentAsin.isEmpty()) uniqueAsins.insert(row.parentAsin);
+    }
+
+    // Map asin → sku (resolved from tree, settings.ini, or report)
+    QMap<QString, QString> asinToSku;
+
+    // 4a. Tree model first
+    if (m_treeModel) {
+        for (int fi = 0; fi < m_treeModel->rowCount(); ++fi) {
+            const QModelIndex pi = m_treeModel->index(fi, 0);
+            const QString pAsin = m_treeModel->data(
+                m_treeModel->index(fi, TreeSizingAsins::ASIN)).toString().trimmed();
+            const QString pSku = m_treeModel->data(
+                m_treeModel->index(fi, TreeSizingAsins::SKU)).toString().trimmed();
+            if (!pAsin.isEmpty() && !pSku.isEmpty())
+                asinToSku.insert(pAsin, pSku);
+            for (int ci = 0; ci < m_treeModel->rowCount(pi); ++ci) {
+                const QString cAsin = m_treeModel->data(
+                    m_treeModel->index(ci, TreeSizingAsins::ASIN, pi)).toString().trimmed();
+                const QString cSku = m_treeModel->data(
+                    m_treeModel->index(ci, TreeSizingAsins::SKU, pi)).toString().trimmed();
+                if (!cAsin.isEmpty() && !cSku.isEmpty())
+                    asinToSku.insert(cAsin, cSku);
+            }
+        }
+    }
+
+    // 4b. settings.ini cache
+    if (m_productWorkingDir.exists()) {
+        QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                     QSettings::IniFormat);
+        for (const QString &asin : std::as_const(uniqueAsins)) {
+            if (asinToSku.value(asin).isEmpty()) {
+                const QString sku = ps.value(QStringLiteral("sizing/skus/") + asin).toString();
+                if (!sku.isEmpty()) asinToSku.insert(asin, sku);
+            }
+        }
+    }
+
+    // 4c. Check if anything is still missing → Reports API fallback
+    bool anyMissing = false;
+    for (const QString &asin : std::as_const(uniqueAsins)) {
+        if (asinToSku.value(asin).isEmpty()) { anyMissing = true; break; }
+    }
+
+    if (anyMissing) {
+        if (statusLabelPtr) statusLabelPtr->setText(tr("Fetching all listings…"));
+        appendLog(tr("Some SKUs unknown — fetching all-listings report (up to ~3 min)…"));
+
+        // Use the seller's primary marketplace (first in country list = FR for EU
+        // sellers). Broken target marketplaces (ES, IT, GB mirror…) often don't
+        // carry the parent virtual listing, making their reports return 0.
+        const QString reportMpId = firstMarketplaceIdFromCountryList(ui->listWidgetCountries);
+
+        QHash<QString, QString> reportMap;
+        co_await m_api->fetchAllSkusViaReport(reportMpId, &reportMap);
+
+        if (reportMap.isEmpty() && !m_api->lastError().isEmpty()) {
+            appendLog(tr("Reports API error: %1").arg(m_api->lastError()));
+        } else {
+            int filled = 0;
+            for (const QString &asin : std::as_const(uniqueAsins)) {
+                if (asinToSku.value(asin).isEmpty()) {
+                    const QString sku = reportMap.value(asin);
+                    if (!sku.isEmpty()) {
+                        asinToSku.insert(asin, sku);
+                        ++filled;
+                    }
+                }
+            }
+            appendLog(tr("Report resolved %1 new SKU(s).").arg(filled));
+
+            // Cache resolved SKUs to settings.ini
+            if (m_productWorkingDir.exists()) {
+                QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                             QSettings::IniFormat);
+                for (auto it = asinToSku.constBegin(); it != asinToSku.constEnd(); ++it) {
+                    if (uniqueAsins.contains(it.key()) && !it.value().isEmpty())
+                        ps.setValue(QStringLiteral("sizing/skus/") + it.key(), it.value());
+                }
+            }
+        }
+    }
+
+    // ── 4d. Derive missing parent SKUs from child listing attributes ───────────
+    // Virtual parents never appear in listing reports.
+    // Try every candidate child until one returns a parentSku — a broken child
+    // may not have child_parent_sku_relationships set, but a sibling will.
+    for (const QString &missingAsin : std::as_const(uniqueAsins)) {
+        if (!asinToSku.value(missingAsin).isEmpty()) continue;
+
+        bool resolved = false;
+        QSet<QString> triedChildSkus;
+        for (const auto &t2 : targets) {
+            if (resolved) break;
+            const auto &row2 = m_brokenChildTable->rows().at(t2.rowIdx);
+            if (row2.parentAsin != missingAsin) continue;
+            const QString knownChildSku = asinToSku.value(row2.asin);
+            if (knownChildSku.isEmpty()) continue;
+            if (triedChildSkus.contains(knownChildSku)) continue; // already tried this child
+            triedChildSkus.insert(knownChildSku);
+
+            // Use the seller's primary marketplace — GB and other auto-mirrored
+            // marketplaces often have no child_parent_sku_relationships attribute.
+            const QString mpId2 = firstMarketplaceIdFromCountryList(ui->listWidgetCountries);
+            if (mpId2.isEmpty()) continue;
+
+            appendLog(tr("Looking up parent SKU for %1 via child %2 (%3) on %4…")
+                          .arg(missingAsin, row2.asin, knownChildSku, mpId2));
+
+            QString parentSku;
+            QString rawResponse;
+            co_await m_api->fetchParentSku(mpId2, knownChildSku, &parentSku, &rawResponse);
+
+            if (!parentSku.isEmpty()) {
+                asinToSku.insert(missingAsin, parentSku);
+                appendLog(tr("  → parent SKU: %1").arg(parentSku));
+                if (m_productWorkingDir.exists()) {
+                    QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                                 QSettings::IniFormat);
+                    ps.setValue(QStringLiteral("sizing/skus/") + missingAsin, parentSku);
+                }
+                resolved = true;
+            } else {
+                appendLog(tr("  → no parentSku via %1 — trying next child…").arg(row2.asin));
+                // Log raw response once (first failure) so we can see what the API actually returns
+                if (!resolved && !rawResponse.isEmpty())
+                    appendLog(tr("  [raw] %1").arg(rawResponse.left(800)));
+            }
+        }
+        if (!resolved)
+            appendLog(tr("  ✗ Could not resolve parent SKU for %1").arg(missingAsin));
+    }
+
+    // ── 4e. Push all resolved SKUs back into the tree model ─────────────────
+    // The tree is populated from the Catalog API which never returns seller SKUs.
+    // Updating it here means the SKU column is visible after the first fix run,
+    // and step 4a will find them on subsequent runs without needing the report.
+    if (m_treeModel) {
+        for (auto it = asinToSku.constBegin(); it != asinToSku.constEnd(); ++it) {
+            if (!it.value().isEmpty())
+                m_treeModel->setSku(it.key(), it.value());
+        }
+    }
+
+    // ── 5. If still no product type, try to derive from a known SKU ─────────
+    if (m_productType.isEmpty() && !asinToSku.isEmpty()) {
+        QString anySku;
+        QString anyMpId;
+        for (const auto &t : targets) {
+            const auto &row = m_brokenChildTable->rows().at(t.rowIdx);
+            const QString sku = asinToSku.value(row.asin);
+            if (!sku.isEmpty()) {
+                anySku  = sku;
+                anyMpId = m_brokenChildTable->marketplaceAt(t.mktIdx).id;
+                break;
+            }
+        }
+        if (!anySku.isEmpty() && !anyMpId.isEmpty()) {
+            appendLog(tr("Detecting product type from SKU %1…").arg(anySku));
+            co_await m_api->fetchListingProductType(anyMpId, anySku, &m_productType);
+            if (!m_productType.isEmpty()) {
+                appendLog(tr("Product type: %1").arg(m_productType));
+                if (m_productWorkingDir.exists()) {
+                    QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                                 QSettings::IniFormat);
+                    ps.setValue(QStringLiteral("sizing/productType"), m_productType);
+                }
+            }
+        }
+    }
+
+    if (m_productType.isEmpty()) {
+        // Ask the user once
+        bool ok = false;
+        const QString entered = QInputDialog::getText(
+            this, tr("Product Type"),
+            tr("Could not auto-detect the product type.\n"
+               "Enter the Amazon product type (e.g. DRESS, SHIRT, SHOES):"),
+            QLineEdit::Normal, {}, &ok);
+        if (ok && !entered.trimmed().isEmpty()) {
+            m_productType = entered.trimmed().toUpper();
+            if (m_productWorkingDir.exists()) {
+                QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                             QSettings::IniFormat);
+                ps.setValue(QStringLiteral("sizing/productType"), m_productType);
+            }
+        }
+    }
+
+    if (m_productType.isEmpty()) {
+        appendLog(tr("No product type — aborting."));
+        if (statusLabelPtr) statusLabelPtr->setText(tr("Aborted."));
+        if (closeBtnPtr)    closeBtnPtr->setEnabled(true);
+        co_return;
+    }
+
+    // ── 6. Process each target sequentially ─────────────────────────────────
+    int done = 0;
+    for (const auto &target : targets) {
+        if (!dlgPtr) co_return; // user closed dialog (shouldn't happen — disabled)
+
+        const auto &row = m_brokenChildTable->rows().at(target.rowIdx);
+        const auto &spec = m_brokenChildTable->marketplaceAt(target.mktIdx);
+        const QString mpId   = spec.id;
+        const QString mpCode = spec.code;
+        const QString childSku = asinToSku.value(row.asin);
+
+        if (statusLabelPtr) {
+            statusLabelPtr->setText(tr("[%1/%2] %3 in %4")
+                                        .arg(done + 1)
+                                        .arg(targets.size())
+                                        .arg(row.asin, mpCode));
+        }
+
+        if (childSku.isEmpty()) {
+            appendLog(tr("[%1] %2: no SKU — skipping").arg(mpCode, row.asin));
+            ++done;
+            if (progressBarPtr) progressBarPtr->setValue(done);
+            continue;
+        }
+
+        // 6a. Parent fix
+        if (target.needsParent && fixParents) {
+            const QString parentSku = asinToSku.value(row.parentAsin);
+            if (row.parentAsin.isEmpty() || parentSku.isEmpty()) {
+                appendLog(tr("[%1] %2: parent SKU unknown — skipping parent fix")
+                              .arg(mpCode, row.asin));
+                _appendFixLog(row.asin, mpCode,
+                              QStringLiteral("SKIP — parent SKU unknown (parentAsin=%1)")
+                              .arg(row.parentAsin));
+            } else {
+                bool ok = false;
+                QString details;
+                co_await m_api->patchListingParent(mpId, childSku, m_productType,
+                                                   parentSku, &ok, &details);
+                if (ok) {
+                    appendLog(tr("[%1] %2: ✓ parent fix sent — %3")
+                                  .arg(mpCode, row.asin, details));
+                    _appendFixLog(row.asin, mpCode,
+                                  QStringLiteral("PARENT OK — parentSku=%1 | %2")
+                                  .arg(parentSku, details));
+                } else {
+                    appendLog(tr("[%1] %2: ✗ parent fix REJECTED — %3")
+                                  .arg(mpCode, row.asin, details));
+                    _appendFixLog(row.asin, mpCode,
+                                  QStringLiteral("PARENT FAILED — parentSku=%1 | %2")
+                                  .arg(parentSku, details));
+                }
+            }
+        }
+
+        // 6b. Image fix
+        if (target.needsImages && fixImages) {
+            const QString sourceAsin =
+                m_brokenChildTable->bestImageSourceAsin(row.color.toLower(), target.mktIdx);
+            if (sourceAsin.isEmpty() || sourceAsin == row.asin) {
+                appendLog(tr("[%1] %2: no better image source — skipping image fix")
+                              .arg(mpCode, row.asin));
+            } else {
+                QStringList imageUrls;
+                co_await m_api->fetchItemImages(sourceAsin, mpId, &imageUrls);
+                if (imageUrls.isEmpty()) {
+                    appendLog(tr("[%1] %2: could not fetch images from %3 (%4)")
+                                  .arg(mpCode, row.asin, sourceAsin, m_api->lastError()));
+                } else {
+                    bool ok = false;
+                    co_await m_api->patchListingImageUrls(mpId, childSku, m_productType,
+                                                          imageUrls, &ok);
+                    if (ok) {
+                        appendLog(tr("[%1] %2: images fixed (%3 slot(s) from %4)")
+                                      .arg(mpCode, row.asin).arg(imageUrls.size())
+                                      .arg(sourceAsin));
+                    } else {
+                        appendLog(tr("[%1] %2: image fix failed: %3")
+                                      .arg(mpCode, row.asin, m_api->lastError()));
+                    }
+                }
+            }
+        }
+
+        ++done;
+        if (progressBarPtr) progressBarPtr->setValue(done);
+    }
+
+    // ── 7. Refresh table health from API ───────────────────────────────────
+    if (statusLabelPtr) statusLabelPtr->setText(tr("Refreshing health…"));
+    appendLog(tr("Refreshing health table from Amazon…"));
+    co_await _loadBrokenChildData(true);
+
+    appendLog(tr("Done."));
+    if (statusLabelPtr) statusLabelPtr->setText(tr("Done."));
+    if (closeBtnPtr)    closeBtnPtr->setEnabled(true);
+    co_return;
 }

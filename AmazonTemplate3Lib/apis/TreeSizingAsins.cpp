@@ -515,6 +515,30 @@ QCoro::Task<void> TreeSizingAsins::recordAPlusUploaded(
 // QAbstractItemModel implementation
 // ---------------------------------------------------------------------------
 
+void TreeSizingAsins::setSku(const QString& asin, const QString& sku)
+{
+    for (int fi = 0; fi < m_families.size(); ++fi) {
+        ParentItem& p = m_families[fi];
+        if (p.asin == asin) {
+            if (p.sku == sku) return;
+            p.sku = sku;
+            const QModelIndex idx = _makeTopIndex(fi, SKU);
+            emit dataChanged(idx, idx, {Qt::DisplayRole});
+            return;
+        }
+        for (int ci = 0; ci < p.children.size(); ++ci) {
+            ChildItem& c = p.children[ci];
+            if (c.asin == asin) {
+                if (c.sku == sku) return;
+                c.sku = sku;
+                const QModelIndex idx = _makeChildIndex(fi, ci, SKU);
+                emit dataChanged(idx, idx, {Qt::DisplayRole});
+                return;
+            }
+        }
+    }
+}
+
 QModelIndex TreeSizingAsins::index(int row, int col, const QModelIndex& parent) const
 {
     if (row < 0 || col < 0 || col >= COLUMN_COUNT)

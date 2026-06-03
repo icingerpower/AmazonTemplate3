@@ -75,6 +75,59 @@ public:
     // GCC 13 ICE workaround: params passed by value.
     QCoro::Task<void> checkAsinExists(QString asin, QString marketplaceId, bool* out);
 
+    // Per-marketplace child health snapshot: parent assignment + image count + size label.
+    // Used by BrokenChildTable to populate its per-marketplace columns.
+    // GCC 13 ICE workaround: params passed by value.
+    struct ChildHealthInfo {
+        bool    exists     = false;  // false if ASIN not found in this marketplace
+        QString parentAsin;
+        QString size;
+        int     imageCount = 0;
+    };
+    QCoro::Task<void> fetchChildHealth(QString asin, QString marketplaceId,
+                                       ChildHealthInfo* out);
+
+    // Fetch image CDN URLs for asin in marketplace, in variant order (MAIN first,
+    // then PT01, PT02…). One URL per variant, best representative size.
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> fetchItemImages(QString asin, QString marketplaceId,
+                                      QStringList* imageUrls);
+
+    // PATCH parentage_level=child + child_parent_sku_relationships on a child
+    // listing. Used by the "Fix parents" workflow.
+    // GCC 13 ICE workaround: params by value.
+    // detailsOut (optional): receives a human-readable summary of the Amazon
+    // response — HTTP status, Amazon's "status" field, submissionId, issues.
+    // Populated on both success and failure so the caller can log and persist it.
+    QCoro::Task<void> patchListingParent(QString marketplaceId,
+                                         QString childSku,
+                                         QString productType,
+                                         QString parentSku,
+                                         bool* success,
+                                         QString* detailsOut = nullptr);
+
+    // Fetches the parent SKU for a child listing by reading its variation
+    // relationships. Virtual parent ASINs never appear in listing reports, so
+    // this is the only reliable way to resolve a parent SKU from a child SKU.
+    // *parentSkuOut is empty on error or when no parent relationship is found.
+    // GCC 13 ICE workaround: params by value.
+    // rawResponseOut (optional): receives the raw JSON body for diagnostic logging
+    // when parentSkuOut comes back empty.
+    QCoro::Task<void> fetchParentSku(QString marketplaceId,
+                                     QString childSku,
+                                     QString* parentSkuOut,
+                                     QString* rawResponseOut = nullptr);
+
+    // PATCH all image slots on a listing using CDN URLs (no binary upload).
+    // imageUrls[0] → main_product_image_locator,
+    // imageUrls[1..] → other_product_image_locator_1..8 (clipped to 8 others).
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> patchListingImageUrls(QString marketplaceId,
+                                            QString sku,
+                                            QString productType,
+                                            QStringList imageUrls,
+                                            bool* success);
+
     // PATCH the size chart attribute for a single SKU via the Listings Items API.
     // headerCells: full header row — first cell is the label-column header (usually ""),
     //              remaining cells are size labels (e.g. "", "S", "M", "L").
