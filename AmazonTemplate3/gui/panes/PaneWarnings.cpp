@@ -5,25 +5,30 @@
 #include "Attribute.h"
 #include "AttributeFlagsTable.h"
 #include "SettingsTable.h"
+#include "apis/AmazonCatalogApi.h"
 #include "apis/AmazonWarningsApi.h"
 #include "TreeProductWarnings.h"
 
 #include <QDateTime>
+#include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFont>
 #include <QHash>
 #include <QSet>
 #include <QTextStream>
 #include <QFontDatabase>
 #include <QApplication>
+#include <QBuffer>
 #include <QClipboard>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QImage>
 #include <QItemSelectionModel>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -52,6 +57,8 @@
 #include <QTextEdit>
 #include <QUrl>
 #include <QVBoxLayout>
+
+#include <QCoro/QCoroNetworkReply>
 
 #include <xlsxdocument.h>
 
@@ -100,13 +107,14 @@ public:
         const TreeProductWarnings::ChildNode &child = vn->children[index.row()];
         if (child.isCurrentValue) return nullptr; // "Current value" rows: never editable
 
-        // Only the value column (ColError) opens an editor.
-        if (index.column() != TreeProductWarnings::ColError)
+        // Both the label column (ColAttribute) and the value column (ColError)
+        // open an editor — clicking either one edits the value stored in ColError.
+        const int col = index.column();
+        if (col != TreeProductWarnings::ColAttribute && col != TreeProductWarnings::ColError)
             return nullptr;
 
         const QStringList values = m_validValues.value(vn->row.attributeId.toLower());
         if (!values.isEmpty()) {
-            // Constrained attribute: show a combo with the valid values list.
             auto *combo = new QComboBox(parent);
             combo->setEditable(true);
             combo->setInsertPolicy(QComboBox::NoInsert);
@@ -114,29 +122,37 @@ public:
             return combo;
         }
 
-        // Free-text attribute: plain line editor on the value column.
-        return QStyledItemDelegate::createEditor(parent, option, index);
+        // Free-text: plain line editor, but only on the value column.
+        if (col == TreeProductWarnings::ColError)
+            return QStyledItemDelegate::createEditor(parent, option, index);
+        return nullptr;
     }
 
     void setEditorData(QWidget *editor, const QModelIndex &index) const override
     {
-        const QString cur = index.data(Qt::EditRole).toString();
+        // Value lives in ColError — redirect reads from ColAttribute.
+        const QModelIndex src = (index.column() == TreeProductWarnings::ColAttribute)
+            ? index.siblingAtColumn(TreeProductWarnings::ColError) : index;
+        const QString cur = src.data(Qt::EditRole).toString();
         if (auto *combo = qobject_cast<QComboBox *>(editor)) {
             const int idx = combo->findText(cur);
             combo->setCurrentIndex(idx >= 0 ? idx : 0);
             if (idx < 0) combo->setCurrentText(cur);
         } else {
-            QStyledItemDelegate::setEditorData(editor, index);
+            QStyledItemDelegate::setEditorData(editor, src);
         }
     }
 
     void setModelData(QWidget *editor, QAbstractItemModel *model,
                       const QModelIndex &index) const override
     {
+        // Always write to ColError.
+        const QModelIndex target = (index.column() == TreeProductWarnings::ColAttribute)
+            ? index.siblingAtColumn(TreeProductWarnings::ColError) : index;
         if (auto *combo = qobject_cast<QComboBox *>(editor))
-            model->setData(index, combo->currentText(), Qt::EditRole);
+            model->setData(target, combo->currentText(), Qt::EditRole);
         else
-            QStyledItemDelegate::setModelData(editor, model, index);
+            QStyledItemDelegate::setModelData(editor, model, target);
     }
 
 private:
@@ -279,6 +295,25 @@ AmazonWarningsApi *PaneWarnings::_api()
     return m_api;
 }
 
+AmazonCatalogApi *PaneWarnings::_catalogApi()
+{
+    if (!m_catalogApi) {
+        auto *st = SettingsTable::instance();
+        m_catalogApi = new AmazonCatalogApi(
+            st->value(SettingsTable::KEY_LWA_CLIENT_ID),
+            st->value(SettingsTable::KEY_LWA_CLIENT_SECRET),
+            st->value(SettingsTable::KEY_EU_LWA_REFRESH_TOKEN),
+            st->value(SettingsTable::KEY_NA_LWA_REFRESH_TOKEN),
+            st->value(SettingsTable::KEY_JP_LWA_REFRESH_TOKEN),
+            st->value(SettingsTable::KEY_EU_SELLER_ID),
+            st->value(SettingsTable::KEY_NA_SELLER_ID),
+            st->value(SettingsTable::KEY_JP_SELLER_ID),
+            st->value(SettingsTable::KEY_IMGBB_API_KEY),
+            this);
+    }
+    return m_catalogApi;
+}
+
 QNetworkAccessManager *PaneWarnings::_imageNam()
 {
     if (!m_imageNam) {
@@ -298,12 +333,15 @@ QString PaneWarnings::_selectedMarketplaceId() const
     return mp ? mp->marketplaceId() : QString{};
 }
 
-void PaneWarnings::_downloadMainImage(const QString &url, const QString &asin, const QString &mktSubdir)
+void PaneWarnings::_downloadMainImage(const QString &url, const QString &asin, const QString &/*mktSubdir*/)
 {
     if (url.isEmpty() || asin.isEmpty()) return;
 
+    // Shared path — not per-marketplace, so the same ASIN is only downloaded once
+    // even when it appears in violations for multiple marketplaces.
+    m_workingDir.mkpath(QStringLiteral("warnings/%1").arg(asin));
     const QString path = m_workingDir.filePath(
-        QStringLiteral("%1/%2/%2_main.jpg").arg(mktSubdir, asin));
+        QStringLiteral("warnings/%1/%1_main.jpg").arg(asin));
 
     if (QFileInfo::exists(path)) return;
 
@@ -330,9 +368,9 @@ QCoro::Task<void> PaneWarnings::_onLoadWarnings()
     // -------------------------------------------------------------------
     // Build progress dialog (same pattern as PaneSizing)
     // -------------------------------------------------------------------
-    auto *progressDlg = new QDialog(this);
+    auto *progressDlg = new QDialog(parentWidget());
     progressDlg->setAttribute(Qt::WA_DeleteOnClose);
-    progressDlg->setWindowModality(Qt::ApplicationModal);
+    // Non-modal: PaneWarnings is disabled via setEnabled(false); other panes stay active.
     progressDlg->setWindowTitle(tr("Loading warnings…"));
     progressDlg->resize(560, 400);
     auto *pLayout = new QVBoxLayout(progressDlg);
@@ -393,7 +431,9 @@ QCoro::Task<void> PaneWarnings::_onLoadWarnings()
         progressBarPtr->setValue(current);
     });
 
+    m_progressDlg = progressDlg;
     progressDlg->show();
+    setEnabled(false);
 
     ui->buttonLoadWarnings->setEnabled(false);
     m_model->clear();
@@ -493,7 +533,12 @@ QCoro::Task<void> PaneWarnings::_onLoadWarnings()
         }
     }
 
+    const int loadedCount     = m_model->violationCount();
+    const int suppressedCount = static_cast<int>(recentlyUploaded.size());
     appendLog(tr("Loaded %1 violation row(s) into table.").arg(violations.size()));
+    ui->labelWarningsInfo->setText(
+        tr("%1 warning(s) loaded  •  %2 suppressed (uploaded < 4 days)")
+        .arg(loadedCount).arg(suppressedCount));
 
     // -------------------------------------------------------------------
     // Pre-fetch valid enum values so the combo box delegate works immediately
@@ -562,6 +607,7 @@ QCoro::Task<void> PaneWarnings::_onLoadWarnings()
         ui->tableViewWarnings->resizeColumnToContents(col);
     ui->tableViewWarnings->header()->setStretchLastSection(true);
     ui->buttonLoadWarnings->setEnabled(true);
+    setEnabled(true);
 }
 
 // ---------------------------------------------------------------------------
@@ -820,9 +866,9 @@ QCoro::Task<void> PaneWarnings::_onAskAi()
     // Build progress dialog (same layout as _onLoadWarnings).
     // Shown BEFORE the pre-fetch step so the user sees per-attribute logs.
     // -------------------------------------------------------------------
-    auto *progressDlg = new QDialog(this);
+    auto *progressDlg = new QDialog(parentWidget());
     progressDlg->setAttribute(Qt::WA_DeleteOnClose);
-    progressDlg->setWindowModality(Qt::ApplicationModal);
+    // Non-modal: PaneWarnings is disabled via setEnabled(false); other panes stay active.
     progressDlg->setWindowTitle(tr("Asking AI…"));
     progressDlg->resize(560, 400);
     auto *pLayout = new QVBoxLayout(progressDlg);
@@ -869,7 +915,9 @@ QCoro::Task<void> PaneWarnings::_onAskAi()
     });
     connect(closeBtns, &QDialogButtonBox::rejected, progressDlg, &QDialog::close);
 
+    m_progressDlg = progressDlg;
     progressDlg->show();
+    setEnabled(false);
     ui->buttonAskAi->setEnabled(false);
 
     // Pipe API log messages into the progress dialog for the duration of this
@@ -1045,7 +1093,24 @@ QCoro::Task<void> PaneWarnings::_onAskAi()
             if (statusLabelPtr) statusLabelPtr->setText(tr("Done."));
             if (closeBtnPtr)    closeBtnPtr->setEnabled(true);
             ui->buttonAskAi->setEnabled(true);
+            setEnabled(true);
             ui->tableViewWarnings->expandAll();
+
+            // Count how many AI value cells are now filled and update the status label.
+            int filled = 0;
+            for (int vi = 0; vi < m_model->violationCount(); ++vi) {
+                const auto *vn = m_model->violationAt(vi);
+                if (!vn) continue;
+                for (const auto &child : vn->children)
+                    if (!child.isCurrentValue && !child.aiValue.isEmpty())
+                        ++filled;
+            }
+            const QString existing = ui->labelWarningsInfo->text();
+            if (existing.isEmpty())
+                ui->labelWarningsInfo->setText(tr("%1 AI value(s) filled").arg(filled));
+            else
+                ui->labelWarningsInfo->setText(
+                    existing + tr("  •  %1 AI value(s) filled").arg(filled));
             return;
         }
 
@@ -1219,9 +1284,9 @@ QCoro::Task<void> PaneWarnings::_onUpload()
     // -------------------------------------------------------------------
     // Build progress dialog (same pattern)
     // -------------------------------------------------------------------
-    auto *progressDlg = new QDialog(this);
+    auto *progressDlg = new QDialog(parentWidget());
     progressDlg->setAttribute(Qt::WA_DeleteOnClose);
-    progressDlg->setWindowModality(Qt::ApplicationModal);
+    // Non-modal: PaneWarnings is disabled via setEnabled(false); other panes stay active.
     progressDlg->setWindowTitle(tr("Uploading fixes…"));
     progressDlg->resize(560, 400);
     auto *pLayout = new QVBoxLayout(progressDlg);
@@ -1269,13 +1334,20 @@ QCoro::Task<void> PaneWarnings::_onUpload()
     });
     connect(closeBtns, &QDialogButtonBox::rejected, progressDlg, &QDialog::close);
 
+    m_progressDlg = progressDlg;
     progressDlg->show();
+    setEnabled(false);
 
     ui->buttonUpload->setEnabled(false);
 
     AmazonWarningsApi *api = _api();
     const int total = toUpload.size();
     int processed   = 0;
+
+    // Detect local image file paths (POSIX abs path, ~/, Windows drive, or any
+    // existing file ending in .jpg/.jpeg/.png).
+    static const QRegularExpression kImagePath(
+        QStringLiteral("(?i)^(?:[~/]|[A-Za-z]:\\\\).+\\.(?:jpe?g|png)$"));
 
     for (const UploadItem &item : std::as_const(toUpload)) {
         ++processed;
@@ -1303,9 +1375,46 @@ QCoro::Task<void> PaneWarnings::_onUpload()
         }
         appendLog(tr("    productType = %1, patching\xe2\x80\xa6").arg(productType));
 
+        // ------------------------------------------------------------------
+        // Detect whether item.value is a local image file path. If so, read
+        // (and convert to JPEG if needed) and upload as the MAIN product image
+        // via the dedicated AmazonCatalogApi helper.
+        // ------------------------------------------------------------------
+        const bool isImagePath = kImagePath.match(item.value).hasMatch()
+                              || QFileInfo::exists(item.value);
+
         bool ok = false;
-        co_await api->patchListingAttribute(item.marketplaceId, item.sku, productType,
-                                            item.attributeId, item.value, &ok);
+        if (isImagePath) {
+            QFile imgFile(item.value);
+            if (!imgFile.open(QIODevice::ReadOnly)) {
+                appendLog(tr("    FAIL %1 [%2]: cannot open image file %3")
+                          .arg(item.asin, itemCc, item.value));
+                if (progressBarPtr) progressBarPtr->setValue(processed);
+                continue;
+            }
+            QByteArray jpegData = imgFile.readAll();
+            imgFile.close();
+
+            // Convert PNG → JPEG (Amazon rejects PNG for main_product_image_locator).
+            if (item.value.endsWith(QStringLiteral(".png"), Qt::CaseInsensitive)) {
+                QImage img;
+                if (img.load(item.value)) {
+                    QBuffer buf;
+                    buf.open(QIODevice::WriteOnly);
+                    if (img.save(&buf, "JPEG", 90))
+                        jpegData = buf.data();
+                }
+            }
+
+            appendLog(tr("    uploading main image %1 (%2 bytes)\xe2\x80\xa6")
+                      .arg(QFileInfo(item.value).fileName())
+                      .arg(jpegData.size()));
+            co_await _catalogApi()->patchListingMainImage(
+                item.marketplaceId, item.sku, productType, jpegData, &ok);
+        } else {
+            co_await api->patchListingAttribute(item.marketplaceId, item.sku, productType,
+                                                item.attributeId, item.value, &ok);
+        }
 
         if (ok) {
             appendLog(tr("    OK %1 / %2 [%3] = \"%4\"")
@@ -1322,8 +1431,10 @@ QCoro::Task<void> PaneWarnings::_onUpload()
                 }
             }
         } else {
+            const QString errMsg = isImagePath ? _catalogApi()->lastError()
+                                               : api->lastError();
             appendLog(tr("    FAIL %1 / %2 [%3]: %4")
-                      .arg(item.asin, item.attributeId, itemCc, api->lastError()));
+                      .arg(item.asin, item.attributeId, itemCc, errMsg));
         }
 
         if (progressBarPtr) progressBarPtr->setValue(processed);
@@ -1333,13 +1444,280 @@ QCoro::Task<void> PaneWarnings::_onUpload()
     if (closeBtnPtr)    closeBtnPtr->setEnabled(true);
 
     ui->buttonUpload->setEnabled(true);
+    setEnabled(true);
 }
 
+
+// ---------------------------------------------------------------------------
+// _onRetrieveImages — download every violation row's main image (high-res)
+// into {workingDir}/images-main-to-fix/{sanitizedSku}_main.jpg
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> PaneWarnings::_onRetrieveImages()
+{
+    QListWidgetItem *selItem = ui->listWidgetAmazon->currentItem();
+    if (!selItem || !(selItem->flags() & Qt::ItemIsSelectable)) {
+        QMessageBox::warning(this, tr("No marketplace"),
+                             tr("Please select a marketplace first."));
+        co_return;
+    }
+
+    // Ensure the output folder exists.
+    m_workingDir.mkpath(QStringLiteral("images-main-to-fix"));
+    const QString imageDir = m_workingDir.filePath(QStringLiteral("images-main-to-fix"));
+
+    // -------------------------------------------------------------------
+    // Get the ASIN from the currently selected tree row.
+    // -------------------------------------------------------------------
+    const QModelIndex sel = ui->tableViewWarnings->currentIndex();
+    if (!sel.isValid()) {
+        QMessageBox::warning(this, tr("Retrieve image"),
+                             tr("Please select a product row in the warnings table first."));
+        co_return;
+    }
+    // Walk up to the top-level violation row (internalPointer == nullptr).
+    QModelIndex topIdx = sel;
+    while (topIdx.isValid() && topIdx.internalPointer() != nullptr)
+        topIdx = topIdx.parent();
+    if (!topIdx.isValid()) {
+        QMessageBox::warning(this, tr("Retrieve image"),
+                             tr("Could not determine the selected violation."));
+        co_return;
+    }
+
+    const TreeProductWarnings::ViolationNode *selVn = m_model->violationAt(topIdx.row());
+    if (!selVn || selVn->row.mainImageUrl.isEmpty()) {
+        QMessageBox::warning(this, tr("Retrieve image"),
+                             tr("No main image URL available for the selected product."));
+        co_return;
+    }
+
+    struct Entry { QString asin; QString sku; QString url; };
+    const QList<Entry> entries = {{selVn->row.asin, selVn->row.sku, selVn->row.mainImageUrl}};
+
+    // -------------------------------------------------------------------
+    // Build progress dialog (same layout as _onLoadWarnings).
+    // -------------------------------------------------------------------
+    auto *progressDlg = new QDialog(parentWidget());
+    progressDlg->setAttribute(Qt::WA_DeleteOnClose);
+    // Non-modal: PaneWarnings is disabled via setEnabled(false); other panes stay active.
+    progressDlg->setWindowTitle(tr("Retrieving images…"));
+    progressDlg->resize(560, 400);
+    auto *pLayout = new QVBoxLayout(progressDlg);
+
+    auto *statusLabel = new QLabel(tr("Starting…"), progressDlg);
+    QFont boldFont = statusLabel->font();
+    boldFont.setBold(true);
+    statusLabel->setFont(boldFont);
+    pLayout->addWidget(statusLabel);
+
+    auto *progressBar = new QProgressBar(progressDlg);
+    progressBar->setRange(0, entries.size());
+    progressBar->setValue(0);
+    pLayout->addWidget(progressBar);
+
+    auto *logEdit = new QTextEdit(progressDlg);
+    logEdit->setReadOnly(true);
+    logEdit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    pLayout->addWidget(logEdit);
+
+    auto *btnLayout = new QHBoxLayout();
+    auto *copyBtn = new QPushButton(tr("Copy log"), progressDlg);
+    btnLayout->addWidget(copyBtn);
+    btnLayout->addStretch();
+    auto *closeBtns = new QDialogButtonBox(QDialogButtonBox::Close, progressDlg);
+    QPushButton *closeBtn = closeBtns->button(QDialogButtonBox::Close);
+    if (closeBtn) closeBtn->setEnabled(false);
+    btnLayout->addWidget(closeBtns);
+    pLayout->addLayout(btnLayout);
+
+    QPointer<QLabel>       statusLabelPtr(statusLabel);
+    QPointer<QProgressBar> progressBarPtr(progressBar);
+    QPointer<QTextEdit>    logEditPtr(logEdit);
+    QPointer<QPushButton>  closeBtnPtr(closeBtn);
+
+    auto appendLog = [logEditPtr](const QString &line) {
+        if (!logEditPtr) return;
+        const QString ts = QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss"));
+        logEditPtr->append(QStringLiteral("[%1] %2").arg(ts, line));
+    };
+
+    connect(copyBtn, &QPushButton::clicked, progressDlg, [logEditPtr]() {
+        if (logEditPtr)
+            QGuiApplication::clipboard()->setText(logEditPtr->toPlainText());
+    });
+    connect(closeBtns, &QDialogButtonBox::rejected, progressDlg, &QDialog::close);
+
+    m_progressDlg = progressDlg;
+    progressDlg->show();
+    setEnabled(false);
+
+    ui->buttonRetrieveImages->setEnabled(false);
+
+    // Sanitize a SKU for use as a filename — replace invalid path chars with '_'.
+    auto sanitize = [](const QString &s) {
+        QString out = s;
+        static const QString kBad = QStringLiteral("/\\*?\"<>|:");
+        for (QChar &c : out) {
+            if (kBad.contains(c)) c = QLatin1Char('_');
+        }
+        return out;
+    };
+
+    // Use the selected marketplace ID for the catalog image fetch.
+    const QString mpId = _selectedMarketplaceId();
+
+    int downloaded = 0;
+    int processed  = 0;
+    for (const Entry &e : std::as_const(entries)) {
+        ++processed;
+
+        const QString baseName = sanitize(e.sku.isEmpty() ? e.asin : e.sku);
+        const QString destPath = QDir(imageDir).filePath(
+            QStringLiteral("%1_main.jpg").arg(baseName));
+
+        if (statusLabelPtr)
+            statusLabelPtr->setText(tr("[%1/%2] %3 — %4")
+                                    .arg(processed).arg(entries.size())
+                                    .arg(e.asin, baseName));
+
+        if (QFileInfo::exists(destPath)) {
+            appendLog(tr("[%1/%2] %3 — SKIP (already exists)")
+                      .arg(processed).arg(entries.size())
+                      .arg(e.asin));
+            if (progressBarPtr) progressBarPtr->setValue(processed);
+            continue;
+        }
+
+        // Fetch full-quality image URLs via the Catalog Items API (same source
+        // as PaneSizing). imageUrls[0] is the MAIN image at best available size.
+        appendLog(tr("[%1/%2] %3 — fetching high-res URL…")
+                  .arg(processed).arg(entries.size()).arg(e.asin));
+        QStringList imageUrls;
+        co_await _catalogApi()->fetchItemImages(mpId, e.asin, &imageUrls);
+
+        QString hiresUrl = imageUrls.isEmpty() ? QString{} : imageUrls.first();
+        if (hiresUrl.isEmpty()) {
+            appendLog(tr("  ⚠ no image URL returned — skipping"));
+            if (progressBarPtr) progressBarPtr->setValue(processed);
+            continue;
+        }
+
+        appendLog(tr("  GET %1").arg(hiresUrl));
+        QNetworkReply *reply = _imageNam()->get(QNetworkRequest(QUrl(hiresUrl)));
+        co_await qCoro(reply).waitForFinished();
+
+        const QByteArray data = reply->readAll();
+        const QNetworkReply::NetworkError netErr = reply->error();
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QString errString = reply->errorString();
+        reply->deleteLater();
+
+        if (netErr != QNetworkReply::NoError || data.isEmpty()) {
+            appendLog(tr("    FAIL %1 (HTTP %2): %3")
+                      .arg(e.asin).arg(httpStatus).arg(errString));
+            if (progressBarPtr) progressBarPtr->setValue(processed);
+            continue;
+        }
+
+        QFile f(destPath);
+        if (!f.open(QIODevice::WriteOnly)) {
+            appendLog(tr("    FAIL %1: cannot open %2 for write")
+                      .arg(e.asin, destPath));
+            if (progressBarPtr) progressBarPtr->setValue(processed);
+            continue;
+        }
+        f.write(data);
+        f.close();
+
+        ++downloaded;
+        appendLog(tr("    OK %1 → %2 (%3 bytes)")
+                  .arg(e.asin, destPath).arg(data.size()));
+
+        if (progressBarPtr) progressBarPtr->setValue(processed);
+    }
+
+    if (statusLabelPtr)
+        statusLabelPtr->setText(tr("Done. %1 image(s) downloaded.").arg(downloaded));
+    appendLog(tr("Done. %1 image(s) downloaded into %2")
+              .arg(downloaded).arg(imageDir));
+    if (closeBtnPtr) closeBtnPtr->setEnabled(true);
+
+    ui->buttonRetrieveImages->setEnabled(true);
+    setEnabled(true);
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
+// _onOpenImageDir — open {workingDir}/images-main-to-fix/ in the file manager
+// ---------------------------------------------------------------------------
+
+void PaneWarnings::_onOpenImageDir() const
+{
+    const QString path = m_workingDir.filePath(QStringLiteral("images-main-to-fix"));
+    if (!QDir(path).exists())
+        QDir().mkpath(path);
+    QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+}
+
+
+void PaneWarnings::hideEvent(QHideEvent *event)
+{
+    // When the tab is switched away, hide the floating progress dialog so it
+    // doesn't linger over other panes. It will reappear when we come back.
+    if (m_progressDlg) m_progressDlg->hide();
+    QWidget::hideEvent(event);
+}
+
+void PaneWarnings::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    if (m_progressDlg) m_progressDlg->show();
+}
 
 void PaneWarnings::_connectSlots()
 {
     connect(ui->buttonLoadWarnings, &QPushButton::clicked,
-            this, [this]() { m_loadTask   = _onLoadWarnings(); });
+            this, [this]() { m_loadTask = _onLoadWarnings(); });
+
+    // Show cache stats immediately when a marketplace is selected — no load needed.
+    connect(ui->listWidgetAmazon, &QListWidget::currentItemChanged,
+            this, [this](QListWidgetItem *current, QListWidgetItem *) {
+        if (!current || !(current->flags() & Qt::ItemIsSelectable)) {
+            ui->labelWarningsInfo->clear();
+            return;
+        }
+        const QString cc = current->data(Qt::UserRole).toString();
+        if (cc.isEmpty()) { ui->labelWarningsInfo->clear(); return; }
+
+        const QString cursorPath = m_workingDir.filePath(
+            QStringLiteral("warnings/%1/processed_asins.txt").arg(cc.toLower()));
+
+        int suppressed = 0;
+        QFile f(cursorPath);
+        if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            const QDate cutoff = QDate::currentDate().addDays(-4);
+            QTextStream in(&f);
+            while (!in.atEnd()) {
+                const QStringList parts = in.readLine().trimmed().split(QLatin1Char(','));
+                if (parts.size() < 3) continue;
+                const QDate d = QDate::fromString(parts[2].trimmed(), Qt::ISODate);
+                if (d.isValid() && d >= cutoff) ++suppressed;
+            }
+        }
+
+        const int loaded = m_model->violationCount();
+        if (loaded > 0 || suppressed > 0) {
+            ui->labelWarningsInfo->setText(
+                loaded > 0
+                ? tr("%1 warning(s) loaded  •  %2 suppressed (uploaded < 4 days)")
+                      .arg(loaded).arg(suppressed)
+                : tr("%1 suppressed in cache for %2 (uploaded < 4 days)")
+                      .arg(suppressed).arg(cc));
+        } else {
+            ui->labelWarningsInfo->clear();
+        }
+    });
 
 
     connect(ui->buttonAskAi, &QPushButton::clicked,
@@ -1347,6 +1725,11 @@ void PaneWarnings::_connectSlots()
 
     connect(ui->buttonUpload, &QPushButton::clicked,
             this, [this]() { m_uploadTask = _onUpload(); });
+
+    connect(ui->buttonRetrieveImages, &QPushButton::clicked,
+            this, [this]() { m_retrieveTask = _onRetrieveImages(); });
+    connect(ui->buttonOpenImageDir, &QPushButton::clicked,
+            this, [this]() { _onOpenImageDir(); });
 
     // Template folder: browse + manual edit, both persisted to QSettings.
     connect(ui->buttonBrowseTemplateDir, &QPushButton::clicked, this, [this]() {

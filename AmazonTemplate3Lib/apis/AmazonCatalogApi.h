@@ -93,9 +93,20 @@ public:
     QCoro::Task<void> fetchItemImages(QString asin, QString marketplaceId,
                                       QStringList* imageUrls);
 
-    // PATCH parentage_level=child + child_parent_sku_relationships on a child
+    // PATCH parentage_level=parent on a parent/virtual listing so it has a
+    // recognised presence on the target marketplace before children link to it.
+    // GCC 13 ICE workaround: params by value.
+    // variationTheme: if non-empty, also PATCHes /attributes/variation_theme.
+    QCoro::Task<void> patchListingAsParent(QString marketplaceId,
+                                            QString parentSku,
+                                            QString productType,
+                                            QString variationTheme,
+                                            QString* detailsOut = nullptr);
+
+    // PATCH parentage_level=child + child_parent_sku_relationship on a child
     // listing. Used by the "Fix parents" workflow.
     // GCC 13 ICE workaround: params by value.
+    // variationTheme: if non-empty, also PATCHes /attributes/variation_theme.
     // detailsOut (optional): receives a human-readable summary of the Amazon
     // response — HTTP status, Amazon's "status" field, submissionId, issues.
     // Populated on both success and failure so the caller can log and persist it.
@@ -103,6 +114,7 @@ public:
                                          QString childSku,
                                          QString productType,
                                          QString parentSku,
+                                         QString variationTheme,
                                          bool* success,
                                          QString* detailsOut = nullptr);
 
@@ -117,6 +129,36 @@ public:
                                      QString childSku,
                                      QString* parentSkuOut,
                                      QString* rawResponseOut = nullptr);
+
+    // Fetches brand_name and variation_theme from a listing's attributes.
+    // Used to populate flat-file feeds without inventing data.
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> fetchListingBrandAndTheme(QString marketplaceId,
+                                                 QString sku,
+                                                 QString* brand,
+                                                 QString* variationTheme);
+
+    struct VariationFeedEntry {
+        QString sku;
+        QString asin;       // may be empty for parent rows with per-marketplace ASINs
+        bool    isParent = false;
+        QString parentSku;  // empty for parent rows
+    };
+
+    // Builds and uploads a flat-file variation relationship feed via the Feeds API.
+    // Fetches nothing — all data is passed in. Polls until DONE (3 min max).
+    // Returns a human-readable status string in *resultOut.
+    // GCC 13 ICE workaround: all non-trivially-destructible params by value.
+    // updateDelete: the "update_delete" column value for this template/marketplace
+    // (e.g. "PartialUpdate"). Ask the CLI — it varies by country and product type.
+    // All other values must be fetched from the live listing; do not invent them.
+    QCoro::Task<void> uploadVariationFeed(QStringList marketplaceIds,
+                                           QString feedProductType,
+                                           QString brand,
+                                           QString updateDelete,
+                                           QString variationTheme,
+                                           QList<VariationFeedEntry> entries,
+                                           QString* resultOut);
 
     // PATCH all image slots on a listing using CDN URLs (no binary upload).
     // imageUrls[0] → main_product_image_locator,
@@ -156,6 +198,15 @@ public:
                                         QByteArray jpegData,
                                         int imageIndex,
                                         bool* success);
+
+    // Upload a JPEG as the MAIN product image (main_product_image_locator).
+    // Uses imgBB to host the binary, then PATCHes the listing with the public URL.
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> patchListingMainImage(QString marketplaceId,
+                                            QString sku,
+                                            QString productType,
+                                            QByteArray jpegData,
+                                            bool* success);
 
     // Fetch ALL FBA inventory items for a marketplace, filling *asinToSku with
     // ASIN → sellerSku pairs. Handles pagination automatically.

@@ -16,10 +16,16 @@ QList<MeasurementField> ShoesWomenCategory::measurementFields() const
 QList<CountryGroup> ShoesWomenCategory::countryGroups() const
 {
     return {
-        {QStringLiteral("EU"),         QStringLiteral("FR"),  false, true},
-        {QStringLiteral("US/CA"),      QStringLiteral("COM"), false, true,  true},
-        {QStringLiteral("UK/AU"),      QStringLiteral("UK"),  false, true,  true},
-        {QStringLiteral("JP/MX (cm)"), QStringLiteral("JP"),  true,  false},
+        {QStringLiteral("EU"),         QStringLiteral("FR"),  false, true,  false,
+         {QStringLiteral("fr"), QStringLiteral("de"), QStringLiteral("it"), QStringLiteral("es"),
+          QStringLiteral("nl"), QStringLiteral("se"), QStringLiteral("pl"), QStringLiteral("be"),
+          QStringLiteral("tr")}},
+        {QStringLiteral("US/CA"),      QStringLiteral("COM"), false, true,  true,
+         {QStringLiteral("us"), QStringLiteral("ca")}},
+        {QStringLiteral("UK/AU"),      QStringLiteral("UK"),  false, true,  true,
+         {QStringLiteral("uk"), QStringLiteral("au"), QStringLiteral("ie")}},
+        {QStringLiteral("JP/MX (cm)"), QStringLiteral("JP"),  true,  false, false,
+         {QStringLiteral("jp"), QStringLiteral("mx")}},
     };
 }
 

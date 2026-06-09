@@ -19,6 +19,7 @@ QT_END_NAMESPACE
 #include "TreeProductWarnings.h"
 
 class AmazonWarningsApi;
+class AmazonCatalogApi;
 class QNetworkAccessManager;
 class WarningsValueDelegate;
 
@@ -37,21 +38,26 @@ private:
     QDir                     m_workingDir;
     QList<AbstractCli *>     m_availableClis;
     AmazonWarningsApi       *m_api     = nullptr;
+    AmazonCatalogApi        *m_catalogApi = nullptr;
     QNetworkAccessManager   *m_imageNam = nullptr;
     TreeProductWarnings     *m_model   = nullptr;
     AttributeFlagsTable     *m_flagsTable = nullptr;
     WarningsValueDelegate   *m_valueDelegate = nullptr;
     QHash<QString, QStringList> m_validValues; // attrId (lower) → enum list
 
+    QPointer<QDialog>  m_progressDlg; // active progress dialog — hidden/shown with this pane
+
     // Held alive so the coroutine frame is not destroyed mid-execution.
     QCoro::Task<void> m_loadTask;
     QCoro::Task<void> m_askAiTask;
     QCoro::Task<void> m_uploadTask;
+    QCoro::Task<void> m_retrieveTask;
 
     void _populateMarketplaces();
     void _loadSettings();
 
     AmazonWarningsApi *_api();
+    AmazonCatalogApi *_catalogApi();
     QNetworkAccessManager *_imageNam();
     QString _selectedMarketplaceId() const;
     void _downloadMainImage(const QString &url, const QString &asin, const QString &mktSubdir);
@@ -59,8 +65,12 @@ private:
     QCoro::Task<void> _onLoadWarnings();
     QCoro::Task<void> _onAskAi();
     QCoro::Task<void> _onUpload();
+    QCoro::Task<void> _onRetrieveImages();
+    void _onOpenImageDir() const;
     void _connectSlots();
 
+    void hideEvent(QHideEvent *event) override;
+    void showEvent(QShowEvent *event) override;
 };
 
 #endif // PANEWARNINGS_H

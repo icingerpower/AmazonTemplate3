@@ -36,10 +36,13 @@
             <number>20</number>
            </property>
            <property name="maximum">
-            <number>50</number>
+            <number>10000</number>
            </property>
            <property name="singleStep">
             <number>10</number>
+           </property>
+           <property name="value">
+            <number>50</number>
            </property>
           </widget>
          </item>
@@ -102,6 +105,23 @@
           </widget>
          </item>
          <item>
+          <widget class="QPushButton" name="buttonRetrieveImages">
+           <property name="toolTip">
+            <string>Download main product images (high resolution) to images-main-to-fix/</string>
+           </property>
+           <property name="text">
+            <string>Retrieve image</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="buttonOpenImageDir">
+           <property name="text">
+            <string>Open image dir</string>
+           </property>
+          </widget>
+         </item>
+         <item>
           <spacer name="horizontalSpacer">
            <property name="orientation">
             <enum>Qt::Orientation::Horizontal</enum>
@@ -115,6 +135,16 @@
           </spacer>
          </item>
         </layout>
+       </item>
+       <item>
+        <widget class="QLabel" name="labelWarningsInfo">
+         <property name="styleSheet">
+          <string>color: #aaaaaa;</string>
+         </property>
+         <property name="text">
+          <string/>
+         </property>
+        </widget>
        </item>
        <item>
         <layout class="QHBoxLayout" name="horizontalLayoutTemplateFolder">

@@ -236,23 +236,37 @@ public:
                 ? QString{}
                 : QCoreApplication::translate("APlusWorkflow", " in %1").arg(focusColor);
 
+            // If a reference image is available the close-up must be faithful to it;
+            // if not, the detail can be impressionistic / suggested.
+            const QString fabricAccuracy = mainImageHint.isEmpty()
+                ? QCoreApplication::translate("APlusWorkflow",
+                    "No reference photo is available, so the close-up may suggest fabric "
+                    "texture and craftsmanship freely — keep it plausible but do not "
+                    "over-invent intricate patterns.")
+                : QCoreApplication::translate("APlusWorkflow",
+                    "The close-up must faithfully reproduce the actual fabric texture and "
+                    "design details visible in the reference image — do not invent, add or "
+                    "alter the fabric pattern, weave or stitching.");
+
             const QString desktopSpec = QCoreApplication::translate("APlusWorkflow",
                 "Generate a professional Amazon A+ desktop image (970x600 px, landscape) "
                 "showing one model wearing the product%1, paired with a prominent close-up "
                 "of the fabric texture or a key design feature (stitching, weave, hardware, "
                 "trim — whichever best highlights craftsmanship). "
+                "%2 "
                 "Goal: convey quality, craftsmanship and premium feel. "
                 "No text overlays, no watermarks. "
                 "Save as desktop.png in the current directory.")
-                .arg(colorMention);
+                .arg(colorMention, fabricAccuracy);
 
             const QString mobileSpec = QCoreApplication::translate("APlusWorkflow",
                 "Generate a professional Amazon A+ mobile image (600x600 px, square) "
                 "showing one model wearing the product%1 with a prominent close-up of "
                 "the fabric texture or key design feature. "
+                "%2 "
                 "Convey quality and craftsmanship, no text overlays. "
                 "Save as mobile.png in the current directory.")
-                .arg(colorMention);
+                .arg(colorMention, fabricAccuracy);
 
             spec.desktopPrompt = buildPreamble(productDesc, mainImageHint, detailInstr) + desktopSpec;
             spec.mobilePrompt  = buildPreamble(productDesc, mainImageHint, detailInstr) + mobileSpec;

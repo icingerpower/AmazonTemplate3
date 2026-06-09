@@ -35,6 +35,9 @@
 #include <QStandardItem>
 #include <QListWidget>
 #include <QListView>
+#include <QCheckBox>
+#include <QFont>
+#include <QIcon>
 #include <QStringListModel>
 #include <QTableWidget>
 #include <QDialog>
@@ -46,8 +49,10 @@
 #include <QProgressBar>
 #include <QTimer>
 #include <QScrollBar>
+#include <QSplitter>
 #include <QTextEdit>
 #include <QProgressBar>
+#include <QProgressDialog>
 #include <QFontDatabase>
 #include <QGuiApplication>
 #include <QCoreApplication>
@@ -78,6 +83,8 @@
 #include <QDir>
 #include <QBuffer>
 #include <QSet>
+#include <QCoro/QCoroTimer>
+#include <QTabWidget>
 #include <xlsxdocument.h>
 
 PaneSizing::PaneSizing(QWidget *parent)
@@ -233,6 +240,10 @@ PaneSizing::PaneSizing(QWidget *parent)
             this, &PaneSizing::onAddSkusFromTemplateClicked);
     connect(ui->buttonFactorize, &QPushButton::clicked,
             this, &PaneSizing::onFactorizeSizeTables);
+    connect(ui->buttonPickSizeTableTemplate, &QPushButton::clicked,
+            this, &PaneSizing::onPickSizeTableTemplateClicked);
+    connect(ui->buttonGenerateSizeTableXlsx, &QPushButton::clicked,
+            this, &PaneSizing::onGenerateSizeTableXlsxClicked);
 
     ui->treeViewAsins->setItemDelegateForColumn(
         TreeSizingAsins::Title, new MiddleTruncateDelegate(this));
@@ -481,6 +492,10 @@ void PaneSizing::_loadProductSettings()
     if (!m_productWorkingDir.exists())
         return;
 
+    // Always initialise A+ content from disk so that m_groupImages is populated
+    // even when sizing settings have never been saved for this product.
+    _initAplusContent();
+
     QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
                  QSettings::IniFormat);
 
@@ -520,8 +535,6 @@ void PaneSizing::_loadProductSettings()
             w.rangeSpinBox->setValue(s.value(base + QStringLiteral("/range")).toDouble());
         }
     }
-
-    _initAplusContent();
 
     if (_currentCategory() && ui->sizeRangeMain->isRangeSelected()) {
         _rebuildSizeTable();
@@ -595,6 +608,23 @@ void PaneSizing::_ensureModel(const QDir &dir)
                 // already holds the current product's title when this lambda runs.
                 // We need it for _tryGuessBrandRangeFromTitle() below, which must
                 // run after the model is populated (i.e. after endResetModel).
+
+                // Reset product-specific state so the previous product's A+ content
+                // is not shown while the new product loads. The working dir is either
+                // restored below (if the folder already exists) or set by attributesFetched.
+                m_productWorkingDir = QDir{};
+                ui->lineEditSubWorkingDir->clear();
+                m_aplusContent.reset();
+                if (m_aplusModel) {
+                    ui->aplusTreeView->setModel(nullptr);
+                    delete m_aplusModel;
+                    m_aplusModel = nullptr;
+                }
+                m_groupImages.clear();
+                ui->listWidgetSizeGroups->clear();
+                ui->buttonAplusDeleteVersion->setEnabled(false);
+                _refreshAplusPreview();
+
                 ui->listWidgetCountries->clear();
                 ui->treeViewAsins->expandAll();
                 updateButtonStates();
@@ -702,6 +732,8 @@ void PaneSizing::updateButtonStates()
     ui->buttonOpenSizeTableFolder->setEnabled(hasProduct);
     ui->buttonAddSkusFromTemplate->setEnabled(hasProduct);
     ui->buttonFactorize->setEnabled(m_workingDir.exists());
+    ui->buttonGenerateSizeTableXlsx->setEnabled(
+        m_generatedSuccessfully && !m_sizeTableTemplatePath.isEmpty());
 }
 
 void PaneSizing::onSizeTypeChanged(int index)
@@ -914,8 +946,6 @@ void PaneSizing::onGenSizeTablesClicked()
     const auto *cat = _currentCategory();
 
     try {
-        _saveToSizeTableFolder();
-
         _saveProductSettings();
 
         // Persist spinbox values for this category (generic fallback)
@@ -1128,6 +1158,22 @@ void PaneSizing::onOpenSizeTableFolderClicked()
     else
         QMessageBox::information(this, tr("Size-table folder"),
                                  tr("Load a product first."));
+}
+
+void PaneSizing::onPickSizeTableTemplateClicked()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Select size table template"), {}, tr("Excel (*.xlsx)"));
+    if (path.isEmpty())
+        return;
+    m_sizeTableTemplatePath = path;
+    ui->lineEditSizeTableTemplate->setText(path);
+    updateButtonStates();
+}
+
+void PaneSizing::onGenerateSizeTableXlsxClicked()
+{
+    _saveToSizeTableFolder();
 }
 
 void PaneSizing::onAddSkusFromTemplateClicked()
@@ -1760,6 +1806,29 @@ AplusProgressUi createAplusProgressDialog(QWidget *parent, int totalSteps)
 
     progressDlg->show();
 
+    // Hide/show this dialog when the user switches tabs.
+    // currentChanged fires after Qt has already updated page visibility, so
+    // panePtr->isVisible() reliably reflects whether the pane is the active tab.
+    // This avoids currentWidget() comparison (which can fail when the page is
+    // wrapped by an internal QStackedWidget entry) and avoids QEvent::Hide (which
+    // some window managers emit spuriously during exec() calls).
+    {
+        QTabWidget *tabWgt = nullptr;
+        for (QWidget *p = parent; p && !tabWgt; p = p->parentWidget())
+            tabWgt = qobject_cast<QTabWidget *>(p);
+        if (tabWgt) {
+            QPointer<QDialog>  dlgPtr(progressDlg);
+            QPointer<QWidget>  panePtr(parent);
+            auto *conn = new QObject(progressDlg);
+            QObject::connect(tabWgt, &QTabWidget::currentChanged, conn,
+                [dlgPtr, panePtr](int) {
+                    if (!dlgPtr || !panePtr) return;
+                    if (panePtr->isVisible()) dlgPtr->show();
+                    else                      dlgPtr->hide();
+                });
+        }
+    }
+
     return AplusProgressUi{
         QPointer<QLabel>(statusLabel),
         QPointer<QProgressBar>(progressBar),
@@ -2116,6 +2185,9 @@ void PaneSizing::_rebuildAplusMenu()
     QAction *genAllAct = m_aplusMenu->addAction(tr("Generate All (images + FAQ)"));
     connect(genAllAct, &QAction::triggered, this, &PaneSizing::onAplusGenerateAll);
 
+    QAction *genSelectedAct = m_aplusMenu->addAction(tr("Select images to regenerate…"));
+    connect(genSelectedAct, &QAction::triggered, this, &PaneSizing::onAplusGenerateSelected);
+
     m_aplusMenu->addSeparator();
 
     QAction *sizeChartAct = m_aplusMenu->addAction(
@@ -2455,10 +2527,15 @@ static QList<PaneSizing::SizeChartTarget> buildSizeChartTargets(
 
         int groupRow = -1;
         for (int g = 0; g < groups.size() && groupRow < 0; ++g) {
-            const QStringList parts = groups[g].label.split(QLatin1Char('/'));
-            for (const QString &part : parts)
-                if (part.compare(code, Qt::CaseInsensitive) == 0)
-                    { groupRow = g; break; }
+            if (!groups[g].codes.isEmpty()) {
+                if (groups[g].codes.contains(code))
+                    groupRow = g;
+            } else {
+                const QStringList parts = groups[g].label.split(QLatin1Char('/'));
+                for (const QString &part : parts)
+                    if (part.compare(code, Qt::CaseInsensitive) == 0)
+                        { groupRow = g; break; }
+            }
         }
         if (groupRow < 0) continue;
 
@@ -2647,7 +2724,9 @@ void PaneSizing::onAplusGenerateAll()
     if (!faqInstructions.isEmpty())
         faqPrompt += tr("Instructions:\n") + faqInstructions + QStringLiteral("\n\n");
     faqPrompt += tr("Generate a concise, engaging Amazon A+ Content FAQ section for "
-                    "this product in English. Output as a list of question/answer pairs in plain text.");
+                    "this product in English. Output as a list of question/answer pairs in plain text. "
+                    "For any measurements (height, chest, weight, foot length, etc.), always include "
+                    "both metric and imperial equivalents, e.g. \"165–175 cm (65–69 in)\" or \"86 cm (34 in)\".");
 
     // --- Prompt review dialog ---
     // For clothing: show one representative prompt per workflow step (desktop only).
@@ -2731,7 +2810,9 @@ void PaneSizing::onAplusGenerateAll()
     // Accumulates absolute paths of every image file produced, for the assessment step.
     auto generatedImages = QSharedPointer<QStringList>::create();
 
-    // One desktop + mobile task pair per workflow slot
+    // One desktop + mobile task pair per workflow slot.
+    // If the current version has exactly one side (the other was explicitly deleted),
+    // only regenerate the missing side and inherit the surviving file into the new version.
     for (const ImageSlotSpec &spec : slotSpecs) {
         const QString elemId = spec.elementId;
         const QString displayName = spec.displayName;
@@ -2739,79 +2820,129 @@ void PaneSizing::onAplusGenerateAll()
         elemDir.mkpath(QStringLiteral("."));
         const QString elemWorkDir = elemDir.absolutePath();
 
-        auto filePair  = QSharedPointer<QPair<QString,QString>>::create();
+        const APlusElement *elemPtr    = m_aplusContent->findElement(elemId);
+        const APlusVersion *curVer     = elemPtr ? elemPtr->current() : nullptr;
+        const bool curHasDesktop = curVer && !curVer->desktopFile.isEmpty();
+        const bool curHasMobile  = curVer && !curVer->mobileFile.isEmpty();
+        // Only skip one side when the current version has that side but lacks the other.
+        const bool doDesktop = !curHasDesktop || curHasMobile;
+        const bool doMobile  = !curHasMobile  || curHasDesktop;
+        // Relative paths to carry over from the surviving side (when regenerating only one).
+        const QString inheritedDesktopRel = !doDesktop ? curVer->desktopFile : QString{};
+        const QString inheritedMobileRel  = !doMobile  ? curVer->mobileFile  : QString{};
+
+        auto filePair   = QSharedPointer<QPair<QString,QString>>::create();
         auto beforeSnap = QSharedPointer<QStringList>::create();
 
-        CliTask desktopTask;
-        desktopTask.label   = tr("Desktop image — %1").arg(displayName);
-        desktopTask.prompt  = spec.desktopPrompt;
-        desktopTask.workDir = elemWorkDir;
-        desktopTask.onBefore = [beforeSnap, elemDir]() {
-            *beforeSnap = elemDir.entryList({QStringLiteral("*.png"),
-                QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files);
-        };
-        desktopTask.onDone = [this, elemDir, beforeSnap, filePair, elemId,
-                               generatedImages](CliRunResult r) {
-            const QString preferred = elemDir.filePath(QStringLiteral("desktop.png"));
-            if (QFileInfo::exists(preferred)) {
-                filePair->first = preferred;
-            } else {
-                for (const QString &f : elemDir.entryList(
-                         {QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")},
-                         QDir::Files)) {
-                    if (!beforeSnap->contains(f)) { filePair->first = elemDir.filePath(f); break; }
+        if (doDesktop) {
+            CliTask desktopTask;
+            desktopTask.label   = tr("Desktop image — %1").arg(displayName);
+            desktopTask.prompt  = spec.desktopPrompt;
+            desktopTask.workDir = elemWorkDir;
+            desktopTask.onBefore = [beforeSnap, elemDir]() {
+                *beforeSnap = elemDir.entryList({QStringLiteral("*.png"),
+                    QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files);
+            };
+            desktopTask.onDone = [this, elemDir, beforeSnap, filePair, elemId, displayName,
+                                   generatedImages, doMobile, inheritedMobileRel](CliRunResult r) {
+                const QString preferred = elemDir.filePath(QStringLiteral("desktop.png"));
+                if (QFileInfo::exists(preferred)) {
+                    filePair->first = preferred;
+                } else {
+                    for (const QString &f : elemDir.entryList(
+                             {QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")},
+                             QDir::Files)) {
+                        if (!beforeSnap->contains(f)) { filePair->first = elemDir.filePath(f); break; }
+                    }
                 }
-            }
-            if (filePair->first.isEmpty() && !r.output.trimmed().isEmpty()) {
-                const QString p = elemDir.filePath(QStringLiteral("v_") + _aplusTimestamp()
-                                                   + QStringLiteral("_desktop.txt"));
-                QFile f(p); if (f.open(QIODevice::WriteOnly)) f.write(r.output.toUtf8());
-                filePair->first = p;
-            }
-            if (!filePair->first.isEmpty())
-                generatedImages->append(filePair->first);
-        };
-        tasks.append(desktopTask);
-
-        CliTask mobileTask;
-        mobileTask.label   = tr("Mobile image — %1").arg(displayName);
-        mobileTask.prompt  = spec.mobilePrompt;
-        mobileTask.workDir = elemWorkDir;
-        mobileTask.onBefore = [beforeSnap, elemDir]() {
-            *beforeSnap = elemDir.entryList({QStringLiteral("*.png"),
-                QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files);
-        };
-        mobileTask.onDone = [this, elemDir, beforeSnap, filePair, elemId, displayName,
-                              generatedImages](CliRunResult r) {
-            const QString preferred = elemDir.filePath(QStringLiteral("mobile.png"));
-            if (QFileInfo::exists(preferred)) {
-                filePair->second = preferred;
-            } else {
-                for (const QString &f : elemDir.entryList(
-                         {QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")},
-                         QDir::Files)) {
-                    if (!beforeSnap->contains(f)) { filePair->second = elemDir.filePath(f); break; }
+                if (filePair->first.isEmpty() && !r.output.trimmed().isEmpty()) {
+                    const QString p = elemDir.filePath(QStringLiteral("v_") + _aplusTimestamp()
+                                                       + QStringLiteral("_desktop.txt"));
+                    QFile f(p); if (f.open(QIODevice::WriteOnly)) f.write(r.output.toUtf8());
+                    filePair->first = p;
                 }
-            }
-            if (filePair->second.isEmpty() && !r.output.trimmed().isEmpty()) {
-                const QString p = elemDir.filePath(QStringLiteral("v_") + _aplusTimestamp()
-                                                   + QStringLiteral("_mobile.txt"));
-                QFile f(p); if (f.open(QIODevice::WriteOnly)) f.write(r.output.toUtf8());
-                filePair->second = p;
-            }
-            if (!filePair->second.isEmpty())
-                generatedImages->append(filePair->second);
+                if (!doMobile) {
+                    // Desktop-only regeneration: create the version record now.
+                    if (!m_aplusContent) return;
+                    const QString ts = _aplusTimestamp();
+                    const QFileInfo fi(filePair->first);
+                    if (!fi.suffix().isEmpty() && fi.suffix() != QLatin1String("txt")
+                            && !fi.fileName().startsWith(QStringLiteral("v_"))) {
+                        const QString vp = elemDir.filePath(QStringLiteral("v_") + ts
+                            + QStringLiteral("_desktop.") + fi.suffix());
+                        if (QFile::rename(filePair->first, vp)) filePair->first = vp;
+                    }
+                    if (!filePair->first.isEmpty()) generatedImages->append(filePair->first);
+                    const QDir aplusDir = m_aplusContent->dir();
+                    APlusVersion ver;
+                    ver.generated   = QDateTime::currentDateTime();
+                    ver.desktopFile = aplusDir.relativeFilePath(filePair->first);
+                    ver.mobileFile  = inheritedMobileRel;
+                    m_aplusContent->pushVersion(elemId, APlusElementType::Image, displayName, ver);
+                    if (m_aplusModel) _rebuildAplusModel();
+                }
+            };
+            tasks.append(desktopTask);
+        }
 
-            if (!m_aplusContent) return;
-            const QDir aplusDir = m_aplusContent->dir();
-            APlusVersion ver;
-            ver.generated   = QDateTime::currentDateTime();
-            ver.desktopFile = aplusDir.relativeFilePath(filePair->first);
-            ver.mobileFile  = aplusDir.relativeFilePath(filePair->second);
-            m_aplusContent->pushVersion(elemId, APlusElementType::Image, displayName, ver);
-            if (m_aplusModel) _rebuildAplusModel();
-        };
-        tasks.append(mobileTask);
+        if (doMobile) {
+            CliTask mobileTask;
+            mobileTask.label   = tr("Mobile image — %1").arg(displayName);
+            mobileTask.prompt  = spec.mobilePrompt;
+            mobileTask.workDir = elemWorkDir;
+            mobileTask.onBefore = [beforeSnap, elemDir]() {
+                *beforeSnap = elemDir.entryList({QStringLiteral("*.png"),
+                    QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files);
+            };
+            mobileTask.onDone = [this, elemDir, beforeSnap, filePair, elemId, displayName,
+                                  generatedImages, doDesktop, inheritedDesktopRel](CliRunResult r) {
+                const QString preferred = elemDir.filePath(QStringLiteral("mobile.png"));
+                if (QFileInfo::exists(preferred)) {
+                    filePair->second = preferred;
+                } else {
+                    for (const QString &f : elemDir.entryList(
+                             {QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")},
+                             QDir::Files)) {
+                        if (!beforeSnap->contains(f)) { filePair->second = elemDir.filePath(f); break; }
+                    }
+                }
+                if (filePair->second.isEmpty() && !r.output.trimmed().isEmpty()) {
+                    const QString p = elemDir.filePath(QStringLiteral("v_") + _aplusTimestamp()
+                                                       + QStringLiteral("_mobile.txt"));
+                    QFile f(p); if (f.open(QIODevice::WriteOnly)) f.write(r.output.toUtf8());
+                    filePair->second = p;
+                }
+
+                if (!m_aplusContent) return;
+                // Rename CLI's fixed-name outputs to versioned files so each version record
+                // points to its own unique file instead of all sharing desktop.png/mobile.png.
+                const QString ts = _aplusTimestamp();
+                auto versionFile = [&ts, &elemDir](QString &path, const QString &suffix) {
+                    if (path.isEmpty()) return;
+                    const QFileInfo fi(path);
+                    if (fi.suffix() == QLatin1String("txt")
+                            || fi.fileName().startsWith(QStringLiteral("v_")))
+                        return;
+                    const QString vp = elemDir.filePath(QStringLiteral("v_") + ts
+                        + QStringLiteral("_") + suffix + QStringLiteral(".") + fi.suffix());
+                    if (QFile::rename(path, vp)) path = vp;
+                };
+                if (doDesktop) versionFile(filePair->first,  QStringLiteral("desktop"));
+                versionFile(filePair->second, QStringLiteral("mobile"));
+                if (doDesktop && !filePair->first.isEmpty())  generatedImages->append(filePair->first);
+                if (!filePair->second.isEmpty()) generatedImages->append(filePair->second);
+
+                const QDir aplusDir = m_aplusContent->dir();
+                APlusVersion ver;
+                ver.generated   = QDateTime::currentDateTime();
+                ver.desktopFile = doDesktop ? aplusDir.relativeFilePath(filePair->first)
+                                            : inheritedDesktopRel;
+                ver.mobileFile  = aplusDir.relativeFilePath(filePair->second);
+                m_aplusContent->pushVersion(elemId, APlusElementType::Image, displayName, ver);
+                if (m_aplusModel) _rebuildAplusModel();
+            };
+            tasks.append(mobileTask);
+        }
     }
 
     // FAQ task — generates English FAQ and stores the result for translation tasks.
@@ -2878,6 +3009,8 @@ void PaneSizing::onAplusGenerateAll()
             return QStringLiteral("Translate the following Amazon A+ Content FAQ to ")
                    + capturedLangName
                    + QStringLiteral(". Keep the question/answer format. "
+                                    "Use metric units only — remove any imperial equivalents "
+                                    "(e.g. write \"165–175 cm\" not \"165–175 cm (65–69 in)\"). "
                                     "Return only the translated text, no extra commentary.\n\n")
                    + base;
         };
@@ -3218,10 +3351,14 @@ void PaneSizing::_renderAndSaveChart(const AbstractSizeCategory *cat,
         }
     }
 
-    // Temporarily remove non-target group rows (high→low to keep indices stable)
+    // Temporarily remove non-target group rows (high→low to keep indices stable).
+    // In letter mode the country-group rows were already removed from the model by
+    // _rebuildSizeTable (only "Size" + measurement rows remain), so groupRow no longer
+    // maps to real model rows — skip the filtering entirely.
+    const bool lettersMode = ui->sizeRangeMain->mode() == QLatin1String("letters");
     using RowData = QList<QStandardItem *>;
     QList<QPair<int, RowData>> removedGroupRows;
-    if (groupRow >= 0 && groupRow < groupCount) {
+    if (!lettersMode && groupRow >= 0 && groupRow < groupCount) {
         for (int i = groupCount - 1; i >= 0; --i) {
             if (i == groupRow) continue;
             RowData rowItems;
@@ -3454,7 +3591,9 @@ void PaneSizing::onAplusGenerateFaq()
     if (!userPrompt.isEmpty())
         prompt += QStringLiteral("Instructions:\n") + userPrompt + QStringLiteral("\n\n");
     prompt += QStringLiteral("Generate a concise, engaging Amazon A+ Content FAQ section for this product in English. "
-                             "Output as a list of question/answer pairs in plain text.");
+                             "Output as a list of question/answer pairs in plain text. "
+                             "For any measurements (height, chest, weight, foot length, etc.), always include "
+                             "both metric and imperial equivalents, e.g. \"165-175 cm (65-69 in)\" or \"86 cm (34 in)\".");
 
     // --- Prompt review dialog ---
     QDialog reviewDlg(this);
@@ -3607,6 +3746,8 @@ void PaneSizing::onAplusGenerateFaq()
                         QStringLiteral("Translate the following Amazon A+ Content FAQ to ")
                         + cLN
                         + QStringLiteral(". Keep the question/answer format. "
+                                         "Use metric units only — remove any imperial equivalents "
+                                         "(e.g. write \"165–175 cm\" not \"165–175 cm (65–69 in)\"). "
                                          "Return only the translated text, no extra commentary.\n\n")
                         + finalText;
                     transTask.onDone = [rawHolder](CliRunResult r) {
@@ -3779,6 +3920,433 @@ void PaneSizing::onAplusGenerateImage(const QString &elementId)
     });
 }
 
+void PaneSizing::onAplusGenerateSelected()
+{
+    if (!m_aplusContent) {
+        QMessageBox::information(this, tr("Generate Selected"), tr("Load a product first."));
+        return;
+    }
+    AbstractCli *cli = ui->comboBoxCli->currentData().value<AbstractCli *>();
+    if (!cli) {
+        QMessageBox::warning(this, tr("Generate Selected"), tr("No CLI tool selected."));
+        return;
+    }
+    APlusWorkflow *workflow = _currentWorkflow();
+    if (!workflow) {
+        QMessageBox::warning(this, tr("Generate Selected"), tr("No workflow selected."));
+        return;
+    }
+
+    // --- Selection dialog (table with per-slot Desktop / Mobile checkboxes) ---
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Select images to regenerate"));
+    dlg.resize(960, 540);
+    auto *lay = new QVBoxLayout(&dlg);
+
+    // Toolbar row
+    auto *toolBar = new QHBoxLayout();
+    auto *selectAllBtn    = new QPushButton(tr("Select all"),        &dlg);
+    auto *skipExistingBtn = new QPushButton(tr("Deselect existing"), &dlg);
+    toolBar->addWidget(selectAllBtn);
+    toolBar->addWidget(skipExistingBtn);
+    toolBar->addStretch();
+    lay->addLayout(toolBar);
+
+    // Splitter: table left, preview right
+    auto *splitter = new QSplitter(Qt::Horizontal, &dlg);
+    lay->addWidget(splitter, 1);
+
+    auto *table = new QTableWidget(splitter);
+    table->setColumnCount(3);
+    table->setHorizontalHeaderLabels({tr("Image"), tr("Desktop"), tr("Mobile")});
+    table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Fixed);
+    table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
+    table->setColumnWidth(1, 90);
+    table->setColumnWidth(2, 90);
+    table->verticalHeader()->setVisible(false);
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table->setSelectionMode(QAbstractItemView::SingleSelection);
+    table->setIconSize(QSize(60, 40));
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    splitter->addWidget(table);
+
+    auto *previewLabel = new QLabel(splitter);
+    previewLabel->setAlignment(Qt::AlignCenter);
+    previewLabel->setText(tr("(select an image to preview)"));
+    previewLabel->setMinimumWidth(300);
+    splitter->addWidget(previewLabel);
+    splitter->setStretchFactor(0, 0);
+    splitter->setStretchFactor(1, 1);
+
+    const QDir aplusDir = m_aplusContent->dir();
+    QStringList elementIds;
+    QStringList imagePaths;
+    QVector<bool> hasCurrentVersion;
+
+    for (const APlusElement &e : m_aplusContent->elements()) {
+        if (e.type != APlusElementType::Image) continue;
+        const APlusVersion *ver = e.current();
+        const int row = table->rowCount();
+        table->insertRow(row);
+        table->setRowHeight(row, 50);
+
+        auto *nameItem = new QTableWidgetItem(e.displayName);
+        nameItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+        QString imgPath;
+        if (ver) {
+            imgPath = aplusDir.filePath(ver->desktopFile);
+            nameItem->setToolTip(tr("Generated: %1")
+                .arg(ver->generated.toString(QStringLiteral("yyyy-MM-dd HH:mm"))));
+            const QImage thumb(imgPath);
+            if (!thumb.isNull())
+                nameItem->setIcon(QIcon(QPixmap::fromImage(
+                    thumb.scaled(60, 40, Qt::KeepAspectRatio, Qt::SmoothTransformation))));
+        }
+        table->setItem(row, 0, nameItem);
+
+        auto *dItem = new QTableWidgetItem();
+        dItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable | Qt::ItemIsSelectable);
+        dItem->setCheckState(Qt::Checked);
+        dItem->setTextAlignment(Qt::AlignCenter);
+        table->setItem(row, 1, dItem);
+
+        auto *mItem = new QTableWidgetItem();
+        mItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable | Qt::ItemIsSelectable);
+        mItem->setCheckState(Qt::Checked);
+        mItem->setTextAlignment(Qt::AlignCenter);
+        table->setItem(row, 2, mItem);
+
+        elementIds << e.id;
+        imagePaths << imgPath;
+        hasCurrentVersion.push_back(ver != nullptr);
+    }
+
+    if (table->rowCount() == 0) {
+        QMessageBox::information(this, tr("Generate Selected"),
+            tr("No image slots found. Run Generate All first or add image slots."));
+        return;
+    }
+
+    connect(selectAllBtn, &QPushButton::clicked, &dlg, [table]() {
+        for (int r = 0; r < table->rowCount(); ++r) {
+            table->item(r, 1)->setCheckState(Qt::Checked);
+            table->item(r, 2)->setCheckState(Qt::Checked);
+        }
+    });
+    connect(skipExistingBtn, &QPushButton::clicked, &dlg,
+        [table, hasCurrentVersion]() {
+            for (int r = 0; r < table->rowCount() && r < (int)hasCurrentVersion.size(); ++r) {
+                if (hasCurrentVersion[r]) {
+                    table->item(r, 1)->setCheckState(Qt::Unchecked);
+                    table->item(r, 2)->setCheckState(Qt::Unchecked);
+                }
+            }
+        });
+
+    connect(table, &QTableWidget::currentCellChanged, &dlg,
+        [previewLabel, imagePaths](int row, int, int, int) {
+            if (row < 0 || row >= imagePaths.size() || imagePaths.at(row).isEmpty()) {
+                previewLabel->setPixmap({});
+                previewLabel->setText(QObject::tr("(no image)"));
+                return;
+            }
+            const QPixmap pm(imagePaths.at(row));
+            if (pm.isNull()) {
+                previewLabel->setPixmap({});
+                previewLabel->setText(QObject::tr("(image not available)"));
+                return;
+            }
+            const QSize available = previewLabel->contentsRect().size() - QSize(8, 8);
+            const QSize cap = available.isEmpty() ? QSize(560, 400) : available;
+            previewLabel->setPixmap(pm.scaled(cap, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        });
+
+    if (table->rowCount() > 0)
+        table->selectRow(0);
+
+    auto *btns = new QDialogButtonBox(&dlg);
+    btns->addButton(tr("Generate Selected"), QDialogButtonBox::AcceptRole);
+    btns->addButton(QDialogButtonBox::Cancel);
+    connect(btns, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(btns, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    lay->addWidget(btns);
+
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    // Collect per-slot desktop/mobile selections
+    struct SlotSel { QString elemId; bool desktop; bool mobile; };
+    QList<SlotSel> selections;
+    for (int r = 0; r < table->rowCount(); ++r) {
+        const bool d = table->item(r, 1)->checkState() == Qt::Checked;
+        const bool m = table->item(r, 2)->checkState() == Qt::Checked;
+        if (d || m)
+            selections.append({elementIds.at(r), d, m});
+    }
+
+    if (selections.isEmpty()) {
+        QMessageBox::information(this, tr("Generate Selected"), tr("No images selected."));
+        return;
+    }
+
+    // --- Build slot specs ---
+    const QString description = ui->textEditAttributes->toPlainText().trimmed();
+    QStringList colors;
+    for (const auto &[color, urls] : std::as_const(m_colorVariants))
+        if (!color.isEmpty()) colors << color;
+    const QString focusColor = colors.isEmpty() ? QString{} : colors.first();
+    const QString mainImageHint = m_mainImageLocalPath.isEmpty() ? QString{}
+        : tr("A product photo is available in the working directory as \"%1\". "
+             "You may use it as reference.")
+          .arg(QFileInfo(m_mainImageLocalPath).fileName());
+
+    QMap<QString, ImageSlotSpec> slotByElemId;
+    for (const ImageSlotSpec &spec : workflow->buildSlots(
+             m_aplusContent.get(), colors, focusColor,
+             description, mainImageHint, _stepInstructions()))
+        slotByElemId.insert(spec.elementId, spec);
+
+    QList<SlotSel> finalSels;
+    for (const SlotSel &sel : std::as_const(selections))
+        if (slotByElemId.contains(sel.elemId))
+            finalSels.append(sel);
+
+    if (finalSels.isEmpty()) {
+        QMessageBox::information(this, tr("Generate Selected"),
+            tr("The selected image slots are not produced by the current workflow. "
+               "Try Generate All instead."));
+        return;
+    }
+
+    for (const SlotSel &sel : std::as_const(finalSels))
+        m_aplusContent->dir().mkpath(sel.elemId);
+    if (m_aplusModel) { _rebuildAplusModel(); _rebuildAplusMenu(); }
+
+    // --- Build sequential tasks (respecting per-slot desktop/mobile selection) ---
+    QList<CliTask> tasks;
+
+    for (const SlotSel &sel : std::as_const(finalSels)) {
+        const ImageSlotSpec &spec = slotByElemId[sel.elemId];
+        const QString elemId      = sel.elemId;
+        const QString displayName = spec.displayName;
+        const bool    doDesktop   = sel.desktop;
+        const bool    doMobile    = sel.mobile;
+
+        const QDir elemDir(m_aplusContent->dir().filePath(elemId));
+        elemDir.mkpath(QStringLiteral("."));
+        const QString elemWorkDir = elemDir.absolutePath();
+
+        // Capture existing version paths at task-build time for partial-regen reuse
+        const APlusElement *elem = m_aplusContent->findElement(elemId);
+        const QString existingDesktopRel = (elem && elem->current())
+            ? elem->current()->desktopFile : QString{};
+        const QString existingMobileRel  = (elem && elem->current())
+            ? elem->current()->mobileFile  : QString{};
+
+        auto filePair   = QSharedPointer<QPair<QString,QString>>::create();
+        auto beforeSnap = QSharedPointer<QStringList>::create();
+        // Shared timestamp so both tasks for the same slot produce matching versioned names
+        auto tsPtr = QSharedPointer<QString>::create();
+
+        if (doDesktop) {
+            CliTask dt;
+            dt.label   = tr("Desktop image — %1").arg(displayName);
+            dt.prompt  = spec.desktopPrompt;
+            dt.workDir = elemWorkDir;
+            dt.onBefore = [beforeSnap, elemDir]() {
+                *beforeSnap = elemDir.entryList(
+                    {QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")},
+                    QDir::Files);
+            };
+            dt.onDone = [this, elemDir, beforeSnap, filePair, tsPtr,
+                         elemId, displayName, doMobile, existingMobileRel](CliRunResult r) {
+                const QString preferred = elemDir.filePath(QStringLiteral("desktop.png"));
+                if (QFileInfo::exists(preferred)) {
+                    filePair->first = preferred;
+                } else {
+                    for (const QString &f : elemDir.entryList(
+                             {QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")},
+                             QDir::Files)) {
+                        if (!beforeSnap->contains(f)) { filePair->first = elemDir.filePath(f); break; }
+                    }
+                }
+                if (filePair->first.isEmpty() && !r.output.trimmed().isEmpty()) {
+                    const QString p = elemDir.filePath(QStringLiteral("v_") + _aplusTimestamp()
+                                                       + QStringLiteral("_desktop.txt"));
+                    QFile f(p); if (f.open(QIODevice::WriteOnly)) f.write(r.output.toUtf8());
+                    filePair->first = p;
+                }
+                if (tsPtr->isEmpty()) *tsPtr = _aplusTimestamp();
+                {
+                    const QFileInfo fi(filePair->first);
+                    if (!fi.fileName().isEmpty() && fi.suffix() != QLatin1String("txt")
+                            && !fi.fileName().startsWith(QStringLiteral("v_"))) {
+                        const QString vp = elemDir.filePath(QStringLiteral("v_") + *tsPtr
+                            + QStringLiteral("_desktop.") + fi.suffix());
+                        if (QFile::rename(filePair->first, vp)) filePair->first = vp;
+                    }
+                }
+                if (!doMobile) {
+                    // Desktop only — create version now, reusing existing mobile
+                    if (!m_aplusContent) return;
+                    const QDir aDir = m_aplusContent->dir();
+                    APlusVersion ver;
+                    ver.generated   = QDateTime::currentDateTime();
+                    ver.desktopFile = aDir.relativeFilePath(filePair->first);
+                    ver.mobileFile  = existingMobileRel;
+                    m_aplusContent->pushVersion(elemId, APlusElementType::Image, displayName, ver);
+                    if (m_aplusModel) _rebuildAplusModel();
+                }
+            };
+            tasks.append(dt);
+        }
+
+        if (doMobile) {
+            CliTask mt;
+            mt.label   = tr("Mobile image — %1").arg(displayName);
+            mt.prompt  = spec.mobilePrompt;
+            mt.workDir = elemWorkDir;
+            mt.onBefore = [beforeSnap, elemDir]() {
+                *beforeSnap = elemDir.entryList(
+                    {QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")},
+                    QDir::Files);
+            };
+            mt.onDone = [this, elemDir, beforeSnap, filePair, tsPtr,
+                         elemId, displayName, doDesktop, existingDesktopRel](CliRunResult r) {
+                const QString preferred = elemDir.filePath(QStringLiteral("mobile.png"));
+                if (QFileInfo::exists(preferred)) {
+                    filePair->second = preferred;
+                } else {
+                    for (const QString &f : elemDir.entryList(
+                             {QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")},
+                             QDir::Files)) {
+                        if (!beforeSnap->contains(f)) { filePair->second = elemDir.filePath(f); break; }
+                    }
+                }
+                if (filePair->second.isEmpty() && !r.output.trimmed().isEmpty()) {
+                    const QString p = elemDir.filePath(QStringLiteral("v_") + _aplusTimestamp()
+                                                       + QStringLiteral("_mobile.txt"));
+                    QFile f(p); if (f.open(QIODevice::WriteOnly)) f.write(r.output.toUtf8());
+                    filePair->second = p;
+                }
+                if (tsPtr->isEmpty()) *tsPtr = _aplusTimestamp();
+                {
+                    const QFileInfo fi(filePair->second);
+                    if (!fi.fileName().isEmpty() && fi.suffix() != QLatin1String("txt")
+                            && !fi.fileName().startsWith(QStringLiteral("v_"))) {
+                        const QString vp = elemDir.filePath(QStringLiteral("v_") + *tsPtr
+                            + QStringLiteral("_mobile.") + fi.suffix());
+                        if (QFile::rename(filePair->second, vp)) filePair->second = vp;
+                    }
+                }
+                if (!m_aplusContent) return;
+                const QDir aDir = m_aplusContent->dir();
+                APlusVersion ver;
+                ver.generated   = QDateTime::currentDateTime();
+                ver.desktopFile = doDesktop ? aDir.relativeFilePath(filePair->first)
+                                            : existingDesktopRel;
+                ver.mobileFile  = aDir.relativeFilePath(filePair->second);
+                m_aplusContent->pushVersion(elemId, APlusElementType::Image, displayName, ver);
+                if (m_aplusModel) _rebuildAplusModel();
+            };
+            tasks.append(mt);
+        }
+    }
+
+    // --- Progress dialog ---
+    auto *progressDlg = new QDialog(this);
+    progressDlg->setAttribute(Qt::WA_DeleteOnClose);
+    progressDlg->setWindowTitle(
+        tr("Generating selected images — %1").arg(cli->getName()));
+    progressDlg->resize(560, 400);
+    auto *pLayout = new QVBoxLayout(progressDlg);
+
+    auto *statusLabel = new QLabel(tr("Starting…"), progressDlg);
+    QFont boldFont = statusLabel->font(); boldFont.setBold(true);
+    statusLabel->setFont(boldFont);
+    pLayout->addWidget(statusLabel);
+
+    auto *progressBar = new QProgressBar(progressDlg);
+    progressBar->setRange(0, tasks.size());
+    progressBar->setValue(0);
+    pLayout->addWidget(progressBar);
+
+    auto *logEdit = new QTextEdit(progressDlg);
+    logEdit->setReadOnly(true);
+    logEdit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    pLayout->addWidget(logEdit);
+
+    auto *btnLayout = new QHBoxLayout();
+    auto *copyBtn = new QPushButton(tr("Copy log"), progressDlg);
+    btnLayout->addWidget(copyBtn);
+    btnLayout->addStretch();
+    auto *closeBtns = new QDialogButtonBox(QDialogButtonBox::Close, progressDlg);
+    QPushButton *closeBtn = closeBtns->button(QDialogButtonBox::Close);
+    if (closeBtn) closeBtn->setEnabled(false);
+    btnLayout->addWidget(closeBtns);
+    pLayout->addLayout(btnLayout);
+
+    QPointer<QLabel>       statusPtr(statusLabel);
+    QPointer<QProgressBar> barPtr(progressBar);
+    QPointer<QTextEdit>    logPtr(logEdit);
+    QPointer<QPushButton>  closeBtnPtr(closeBtn);
+
+    connect(copyBtn, &QPushButton::clicked, progressDlg,
+        [logPtr]() { if (logPtr) QGuiApplication::clipboard()->setText(logPtr->toPlainText()); });
+    connect(closeBtns, &QDialogButtonBox::rejected, progressDlg, &QDialog::close);
+
+    progressDlg->show();
+
+    // Hide/show this dialog when the user switches tabs.
+    {
+        QTabWidget *tabWgt = nullptr;
+        for (QWidget *p = this; p && !tabWgt; p = p->parentWidget())
+            tabWgt = qobject_cast<QTabWidget *>(p);
+        if (tabWgt) {
+            QPointer<QDialog>  dlgPtr(progressDlg);
+            QPointer<QWidget>  selfPtr(this);
+            auto *conn = new QObject(progressDlg);
+            connect(tabWgt, &QTabWidget::currentChanged, conn,
+                [dlgPtr, selfPtr](int) {
+                    if (!dlgPtr || !selfPtr) return;
+                    if (selfPtr->isVisible()) dlgPtr->show();
+                    else                      dlgPtr->hide();
+                });
+        }
+    }
+
+    auto appendLog = [logPtr](const QString &line) {
+        if (!logPtr) return;
+        logPtr->append(QStringLiteral("[%1] %2")
+            .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")), line));
+    };
+
+    _runSequentially(
+        std::move(tasks),
+        [statusPtr, barPtr, appendLog](int step, int total, const QString &label) {
+            if (statusPtr) statusPtr->setText(
+                QObject::tr("Step %1 of %2: %3").arg(step).arg(total).arg(label));
+            if (barPtr) barPtr->setValue(step - 1);
+            appendLog(QObject::tr("▶ %1").arg(label));
+        },
+        [statusPtr, barPtr, closeBtnPtr, appendLog]
+        (int step, int total, const QString &label, CliRunResult r) {
+            if (step == total + 1) {
+                if (statusPtr) statusPtr->setText(QObject::tr("Done."));
+                if (barPtr)    barPtr->setValue(barPtr->maximum());
+                if (closeBtnPtr) closeBtnPtr->setEnabled(true);
+                return;
+            }
+            const qint64 secs = r.durationMs / 1000;
+            appendLog(QObject::tr("[%1/%2] %3 — %4 (%5s)")
+                .arg(step).arg(total).arg(label)
+                .arg(r.processStarted ? QObject::tr("ok") : QObject::tr("failed"))
+                .arg(secs));
+            if (barPtr) barPtr->setValue(step);
+        });
+}
+
 void PaneSizing::onAplusDeleteVersion()
 {
     if (!m_aplusContent || !m_aplusModel) return;
@@ -3789,7 +4357,35 @@ void PaneSizing::onAplusDeleteVersion()
     const int elemIdx = m_aplusModel->elementIndexForLocation(loc);
     const QList<APlusElement> &els = m_aplusContent->elements();
     if (elemIdx < 0 || elemIdx >= els.size()) return;
-    const QString id = els.at(elemIdx).id;
+    const APlusElement &el = els.at(elemIdx);
+    const QString id = el.id;
+
+    // For image versions that have both sides present, offer selective deletion.
+    if (el.type == APlusElementType::Image
+            && loc.version >= 0 && loc.version < el.versions.size()) {
+        const APlusVersion &ver = el.versions.at(loc.version);
+        if (!ver.desktopFile.isEmpty() && !ver.mobileFile.isEmpty()) {
+            QMessageBox msgBox(this);
+            msgBox.setWindowTitle(tr("Delete image"));
+            msgBox.setText(tr("Which part of this version do you want to delete?"));
+            QPushButton *btnDesktop = msgBox.addButton(tr("Desktop only"),        QMessageBox::DestructiveRole);
+            QPushButton *btnMobile  = msgBox.addButton(tr("Mobile only"),         QMessageBox::DestructiveRole);
+            QPushButton *btnBoth    = msgBox.addButton(tr("Delete entire version"), QMessageBox::DestructiveRole);
+            msgBox.addButton(QMessageBox::Cancel);
+            msgBox.exec();
+
+            QAbstractButton *clicked = msgBox.clickedButton();
+            if (!clicked || clicked == msgBox.button(QMessageBox::Cancel))
+                return;
+            if (clicked == btnDesktop || clicked == btnMobile) {
+                m_aplusContent->clearVersionFile(id, loc.version, clicked == btnDesktop);
+                _rebuildAplusModel();
+                _refreshAplusPreview(ui->aplusTreeView->currentIndex());
+                return;
+            }
+            Q_UNUSED(btnBoth) // falls through to full delete below
+        }
+    }
 
     m_aplusContent->deleteVersion(id, loc.version);
     _rebuildAplusModel();
@@ -4113,23 +4709,12 @@ QCoro::Task<void> PaneSizing::_saveToSizeTableFolder()
         }
     }
 
-    // --- Get/ask for the template for this product type ---
-    // Stored in app-wide QSettings so it persists across products and sessions.
-    const QString templateKey = QStringLiteral("sizing/productTypeTemplates/") + m_productType;
-    QString templatePath = QSettings().value(templateKey).toString();
-
+    // Template is set explicitly via the Pick button in the Size table page.
+    const QString templatePath = m_sizeTableTemplatePath;
     if (templatePath.isEmpty() || !QFileInfo::exists(templatePath)) {
-        templatePath = QFileDialog::getOpenFileName(
-            this,
-            tr("Select template for product type \"%1\"").arg(m_productType),
-            {}, tr("Excel (*.xlsx)"));
-        if (templatePath.isEmpty())
-            co_return;
-        {
-            QSettings appSettings;
-            appSettings.setValue(templateKey, templatePath);
-            appSettings.sync();
-        }
+        QMessageBox::warning(this, tr("Template error"),
+                             tr("No template selected. Use the Pick button to choose an xlsx template."));
+        co_return;
     }
 
     // --- Create size-table/ folder ---
@@ -4660,10 +5245,21 @@ QCoro::Task<void> PaneSizing::_uploadSizeImage(int imageIndex)
     // TODO: uncomment the block below to upload to all checked marketplaces.
     const QStringList marketplaceIds = {QStringLiteral("A13V1IB3VIYZZH")}; // FR only
 
+    // Progress dialog — shown throughout the entire upload flow.
+    auto *prog = new QProgressDialog(tr("Resolving SKUs…"), QString{}, 0, 0, this);
+    prog->setAttribute(Qt::WA_DeleteOnClose);
+    prog->setWindowTitle(tr("Upload"));
+    prog->setWindowModality(Qt::WindowModal);
+    prog->setMinimumDuration(0);
+    prog->show();
+    QPointer<QProgressDialog> progPtr(prog);
+
     bool cancelled = false;
     co_await _resolveSkus(treeItems, marketplaceIds.first(), &cancelled);
-    if (cancelled)
+    if (cancelled) {
+        if (progPtr) progPtr->close();
         co_return;
+    }
 
     QList<AsinSku> uploadItems;
     QStringList missingSkuAsins;
@@ -4675,17 +5271,20 @@ QCoro::Task<void> PaneSizing::_uploadSizeImage(int imageIndex)
         qWarning() << "PaneSizing: still no SKU for ASINs:" << missingSkuAsins;
 
     if (uploadItems.isEmpty()) {
+        if (progPtr) progPtr->close();
         QMessageBox::warning(this, tr("Upload"),
             tr("No SKUs resolved. Upload cancelled."));
         co_return;
     }
 
     // Auto-detect product type from the first listing
+    if (progPtr) progPtr->setLabelText(tr("Detecting product type…"));
     QString productType;
     co_await m_api->fetchListingProductType(
         marketplaceIds.first(), uploadItems.first().sku, &productType);
 
     if (productType.isEmpty()) {
+        if (progPtr) progPtr->close();
         bool ok = false;
         const QString entered = QInputDialog::getText(
             this, tr("Product Type"),
@@ -4695,14 +5294,33 @@ QCoro::Task<void> PaneSizing::_uploadSizeImage(int imageIndex)
         if (!ok || entered.trimmed().isEmpty())
             co_return;
         productType = entered.trimmed().toUpper();
+        // Re-show progress for the upload phase.
+        auto *prog2 = new QProgressDialog(QString{}, QString{}, 0, uploadItems.size(), this);
+        prog2->setAttribute(Qt::WA_DeleteOnClose);
+        prog2->setWindowTitle(tr("Upload"));
+        prog2->setWindowModality(Qt::WindowModal);
+        prog2->setMinimumDuration(0);
+        prog2->show();
+        progPtr = prog2;
+    } else {
+        if (progPtr) {
+            progPtr->setRange(0, uploadItems.size());
+            progPtr->setValue(0);
+        }
     }
 
     int successCount = 0;
     const int totalAttempts = marketplaceIds.size() * uploadItems.size();
     QStringList errors;
+    int step = 0;
 
     for (const QString &mpId : marketplaceIds) {
         for (const auto &item : uploadItems) {
+            if (progPtr) {
+                progPtr->setLabelText(
+                    tr("Uploading listing %1 / %2…").arg(step + 1).arg(uploadItems.size()));
+                progPtr->setValue(step);
+            }
             bool ok = false;
             co_await m_api->patchListingImage(mpId, item.sku, productType,
                                               jpegData, imageIndex, &ok);
@@ -4712,8 +5330,11 @@ QCoro::Task<void> PaneSizing::_uploadSizeImage(int imageIndex)
                 errors << QStringLiteral("%1 / %2 (%3): %4")
                               .arg(mpId, item.sku, item.asin, m_api->lastError());
             m_api->clearLastError();
+            ++step;
         }
     }
+
+    if (progPtr) progPtr->close();
 
     if (errors.isEmpty()) {
         QMessageBox::information(this, tr("Upload"),
@@ -5192,6 +5813,29 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
     // ── 1. Collect fix targets ──────────────────────────────────────────────
     QList<BrokenChildTable::FixTarget> targets =
         m_brokenChildTable->getFixTargets(fixParents, fixImages);
+
+    // Remove targets for marketplaces the seller has no active listing on.
+    // Read the country list widget at fix-time — it reflects marketplacesChecked
+    // output and marks absent marketplaces as "(missing)". This is more reliable
+    // than setMarketplaceActive() which depends on signal timing.
+    {
+        QSet<QString> missingCodes;
+        for (int i = 0; i < ui->listWidgetCountries->count(); ++i) {
+            const QString item = ui->listWidgetCountries->item(i)->text().toLower().trimmed();
+            if (item.contains(QLatin1String("(missing)")))
+                missingCodes.insert(item.split(QLatin1Char(' ')).first());
+        }
+        if (!missingCodes.isEmpty()) {
+            targets.erase(
+                std::remove_if(targets.begin(), targets.end(),
+                    [&](const BrokenChildTable::FixTarget &t) {
+                        return missingCodes.contains(
+                            m_brokenChildTable->marketplaceAt(t.mktIdx).code.toLower());
+                    }),
+                targets.end());
+        }
+    }
+
     if (targets.isEmpty()) {
         QMessageBox::information(this, tr("Fix"), tr("Nothing to fix."));
         co_return;
@@ -5462,6 +6106,167 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
         co_return;
     }
 
+    // ── 5e2. Fetch variation_theme to include in all parent + child patches ─────
+    // The flat file that works manually includes variation_theme on every row.
+    // Fetching it live ensures we use the exact value already stored on the listing.
+    QString feedBrand, variationTheme;
+    if (fixParents) {
+        const QString primaryMpId = firstMarketplaceIdFromCountryList(ui->listWidgetCountries);
+        QString parentSkuForFetch;
+        for (const auto &t : targets) {
+            parentSkuForFetch = asinToSku.value(m_brokenChildTable->rows().at(t.rowIdx).parentAsin);
+            if (!parentSkuForFetch.isEmpty()) break;
+        }
+        if (!primaryMpId.isEmpty() && !parentSkuForFetch.isEmpty()) {
+            co_await m_api->fetchListingBrandAndTheme(primaryMpId, parentSkuForFetch,
+                                                      &feedBrand, &variationTheme);
+            appendLog(tr("variation_theme for patches: %1").arg(
+                variationTheme.isEmpty() ? tr("(not found)") : variationTheme));
+        }
+    }
+
+    // ── 5f. Patch each parent listing as "parent" on every broken marketplace ──
+    // Before linking children to the parent, ensure the parent virtual listing has
+    // a recognised presence on those marketplaces. We patch once per (parentSku,
+    // marketplace) pair to avoid duplicate calls.
+    if (fixParents) {
+        QSet<QString> patchedParentMarkets;
+        for (const auto &target : targets) {
+            if (!target.needsParent) continue;
+            const auto &row = m_brokenChildTable->rows().at(target.rowIdx);
+            const QString parentSku = asinToSku.value(row.parentAsin);
+            if (parentSku.isEmpty()) continue;
+            const QString mpId   = m_brokenChildTable->marketplaceAt(target.mktIdx).id;
+            const QString mpCode = m_brokenChildTable->marketplaceAt(target.mktIdx).code;
+            const QString key    = parentSku + QLatin1Char('|') + mpId;
+            if (patchedParentMarkets.contains(key)) continue;
+            patchedParentMarkets.insert(key);
+
+            QString details;
+            co_await m_api->patchListingAsParent(mpId, parentSku, m_productType,
+                                                variationTheme, &details);
+            appendLog(tr("  [parent] %1 on %2 — %3").arg(parentSku, mpCode, details));
+        }
+    }
+
+    // ── 5g. Upload variation relationship flat file feed ─────────────────────
+    // Flat-file feed approach: programmatic equivalent of a Seller Central template upload.
+    // Fetches brand and variation_theme live from the parent listing on the primary marketplace.
+    if (fixParents) {
+        const QString primaryMpId = firstMarketplaceIdFromCountryList(ui->listWidgetCountries);
+        if (!primaryMpId.isEmpty()) {
+            // Find the parent SKU (resolved in step 4d)
+            QString feedParentSku;
+            for (const auto &t : targets) {
+                const auto &row = m_brokenChildTable->rows().at(t.rowIdx);
+                if (!row.parentAsin.isEmpty()) {
+                    feedParentSku = asinToSku.value(row.parentAsin);
+                    if (!feedParentSku.isEmpty()) break;
+                }
+            }
+
+            if (!feedParentSku.isEmpty()) {
+                // Reuse brand and variation_theme already fetched in step 5e2
+                const QString &brand = feedBrand;
+
+                // Build feed entries: parent + unique children that need fixing
+                QList<AmazonCatalogApi::VariationFeedEntry> feedEntries;
+
+                // Parent row (use parentAsin from first target)
+                {
+                    QString parentAsin;
+                    for (const auto &t : targets) {
+                        parentAsin = m_brokenChildTable->rows().at(t.rowIdx).parentAsin;
+                        if (!parentAsin.isEmpty()) break;
+                    }
+                    feedEntries.append({feedParentSku, parentAsin, true, {}});
+                }
+
+                // Child rows (deduplicated by child SKU)
+                QSet<QString> addedChildSkus;
+                for (const auto &t : targets) {
+                    if (!t.needsParent) continue;
+                    const auto &row = m_brokenChildTable->rows().at(t.rowIdx);
+                    const QString childSku = asinToSku.value(row.asin);
+                    if (childSku.isEmpty() || addedChildSkus.contains(childSku)) continue;
+                    addedChildSkus.insert(childSku);
+                    feedEntries.append({childSku, row.asin, false, feedParentSku});
+                }
+
+                // Collect unique broken marketplace IDs
+                QStringList brokenMpIds;
+                for (const auto &t : targets) {
+                    if (!t.needsParent) continue;
+                    const QString mpId = m_brokenChildTable->marketplaceAt(t.mktIdx).id;
+                    if (!brokenMpIds.contains(mpId)) brokenMpIds << mpId;
+                }
+
+                // Map SP-API product type to flat-file feed_product_type.
+                const QString feedProductType = QStringLiteral("Clothing");
+
+                // Ask the CLI for the update_delete value — it varies by country
+                // and product type ("PartialUpdate", "Update", etc.).
+                // Use runPromptAsync (safe callback version) rather than co_await
+                // cli->runPrompt() which nests Task<CliRunResult> and crashes due
+                // to the GCC 13 coroutine frame issue with non-trivially-destructible
+                // Task<T> return types. Poll until the callback fires.
+                QString updateDelete;
+                AbstractCli *cli = ui->comboBoxCli->currentData().value<AbstractCli *>();
+                if (cli) {
+                    const QString prompt = QStringLiteral(
+                        "You are helping fill an Amazon Seller Central flat file template.\n"
+                        "Product type: %1\n"
+                        "Marketplace region: EU\n"
+                        "What is the exact value for the 'update_delete' column to perform "
+                        "a partial update (update only the specified columns without clearing "
+                        "or deleting other fields)?\n"
+                        "Reply with only the value, no explanation."
+                    ).arg(m_productType);
+
+                    appendLog(tr("Asking CLI for update_delete value…"));
+
+                    QString cliResult;
+                    bool cliDone = false;
+                    cli->runPromptAsync(prompt, this, [&cliResult, &cliDone](CliRunResult res) {
+                        cliResult = res.output.trimmed();
+                        if (cliResult.startsWith(QLatin1Char('"')) &&
+                            cliResult.endsWith(QLatin1Char('"')))
+                            cliResult = cliResult.mid(1, cliResult.size() - 2);
+                        cliDone = true;
+                    });
+
+                    // Poll until the callback fires (200ms intervals).
+                    // Qt's single-threaded event loop prevents any race between the
+                    // callback and the timer — the callback fires during a poll wait.
+                    while (!cliDone) {
+                        QTimer pollTimer;
+                        pollTimer.setSingleShot(true);
+                        pollTimer.start(200);
+                        co_await qCoro(&pollTimer).waitForTimeout();
+                    }
+
+                    updateDelete = cliResult;
+                    appendLog(tr("  update_delete = \"%1\"").arg(updateDelete));
+                }
+                if (updateDelete.isEmpty()) {
+                    appendLog(tr("  (no CLI — defaulting to PartialUpdate)"));
+                    updateDelete = QStringLiteral("PartialUpdate");
+                }
+
+                appendLog(tr("Uploading variation feed for %1 marketplace(s), %2 entry(ies)…")
+                              .arg(brokenMpIds.size()).arg(feedEntries.size()));
+
+                QString feedResult;
+                co_await m_api->uploadVariationFeed(brokenMpIds, feedProductType, brand,
+                                                    updateDelete, variationTheme,
+                                                    feedEntries, &feedResult);
+                appendLog(tr("Feed result: %1").arg(feedResult));
+            } else {
+                appendLog(tr("Feed upload skipped: parent SKU not resolved."));
+            }
+        }
+    }
+
     // ── 6. Process each target sequentially ─────────────────────────────────
     int done = 0;
     for (const auto &target : targets) {
@@ -5500,7 +6305,8 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                 bool ok = false;
                 QString details;
                 co_await m_api->patchListingParent(mpId, childSku, m_productType,
-                                                   parentSku, &ok, &details);
+                                                   parentSku, variationTheme,
+                                                   &ok, &details);
                 if (ok) {
                     appendLog(tr("[%1] %2: ✓ parent fix sent — %3")
                                   .arg(mpCode, row.asin, details));
@@ -5550,12 +6356,10 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
         if (progressBarPtr) progressBarPtr->setValue(done);
     }
 
-    // ── 7. Refresh table health from API ───────────────────────────────────
-    if (statusLabelPtr) statusLabelPtr->setText(tr("Refreshing health…"));
-    appendLog(tr("Refreshing health table from Amazon…"));
-    co_await _loadBrokenChildData(true);
-
-    appendLog(tr("Done."));
+    // Refresh is omitted — Amazon propagates relationship changes over hours,
+    // so an immediate re-check would show the old state. Use "Re-run" manually
+    // after waiting (typically 1–24 h).
+    appendLog(tr("Done. Press Re-run after Amazon has had time to propagate the changes."));
     if (statusLabelPtr) statusLabelPtr->setText(tr("Done."));
     if (closeBtnPtr)    closeBtnPtr->setEnabled(true);
     co_return;

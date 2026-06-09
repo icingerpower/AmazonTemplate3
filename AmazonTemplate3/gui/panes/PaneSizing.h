@@ -74,6 +74,7 @@ private slots:
 
     // A+ content slots
     void onAplusGenerateAll();
+    void onAplusGenerateSelected();
     void onAplusGenerateSizeChart();
     void onAplusGenerateFaq();
     void onAplusGenerateImage(const QString &elementId);
@@ -82,6 +83,9 @@ private slots:
     void onAplusTreeClicked(const QModelIndex &idx);
     void onAplusSelectionChanged(const QModelIndex &current, const QModelIndex &previous);
     void onAplusUploadClicked();
+
+    void onPickSizeTableTemplateClicked();
+    void onGenerateSizeTableXlsxClicked();
 
     void onSavedSizeAddClicked();
     void onSavedSizeSaveClicked();
@@ -136,6 +140,7 @@ private:
 
     SizingTableTemplateModel     *m_templateModel    = nullptr;
     BrokenChildTable             *m_brokenChildTable = nullptr;
+    QString                       m_sizeTableTemplatePath;
 
     void _ensureModel(const QDir &dir);
     void _refreshApi();

@@ -36,7 +36,7 @@ const QList<QHash<QString, int>> FillerSize::CLOTHE_FEMALE_ADULT_SIZES = []() {
             , {"SG", 0}
         }}
     };
-    for (int i=2; i<20; i+=2)
+    for (int i=2; i<=20; i+=2)
     {
         QHash<QString, int> curSizes;
         for (auto it = _list_countryCode_size[0].begin();

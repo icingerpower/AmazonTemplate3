@@ -1,5 +1,7 @@
 #include "TreeProductWarnings.h"
 
+#include <QBrush>
+#include <QColor>
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
@@ -356,14 +358,21 @@ QVariant TreeProductWarnings::data(const QModelIndex &index, int role) const
         || index.column() == ColAllCountries
         || index.column() == ColAllSiblings) return {};
 
-    if (role != Qt::DisplayRole && role != Qt::EditRole && role != Qt::ToolTipRole)
-        return {};
-
     auto *vn = static_cast<ViolationNode *>(ptr);
     if (!vn) return {};
     if (index.row() < 0 || index.row() >= vn->children.size()) return {};
     const ChildNode &child = vn->children[index.row()];
     const WarningRow &row  = vn->row;
+
+    // Dark-red background on AI value cells that are still empty.
+    if (role == Qt::BackgroundRole
+            && index.column() == ColError
+            && !child.isCurrentValue
+            && child.aiValue.isEmpty())
+        return QBrush(QColor(120, 20, 20));
+
+    if (role != Qt::DisplayRole && role != Qt::EditRole && role != Qt::ToolTipRole)
+        return {};
 
     switch (index.column()) {
     case ColAttribute:

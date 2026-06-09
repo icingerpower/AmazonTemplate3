@@ -222,6 +222,22 @@ void APlusContent::deleteVersion(const QString &id, int versionIndex)
     emit elementChanged(id);
 }
 
+void APlusContent::clearVersionFile(const QString &id, int versionIndex, bool desktop)
+{
+    APlusElement *e = findElement(id);
+    if (!e || versionIndex < 0 || versionIndex >= e->versions.size()) return;
+    APlusVersion &ver = e->versions[versionIndex];
+    const QString rel = desktop ? ver.desktopFile : ver.mobileFile;
+    if (!rel.isEmpty())
+        QFile::remove(m_dir.filePath(rel));
+    if (desktop) ver.desktopFile.clear();
+    else         ver.mobileFile.clear();
+    if (ver.desktopFile.isEmpty() && ver.mobileFile.isEmpty())
+        e->versions.removeAt(versionIndex);
+    save();
+    emit elementChanged(id);
+}
+
 void APlusContent::promoteVersion(const QString &id, int versionIndex)
 {
     APlusElement *e = findElement(id);

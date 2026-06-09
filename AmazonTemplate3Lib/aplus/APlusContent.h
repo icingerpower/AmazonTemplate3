@@ -51,6 +51,9 @@ public:
     void setSingleVersion(const QString &id, APlusElementType type,
                           const QString &displayName, const APlusVersion &ver);
     void deleteVersion(const QString &id, int versionIndex);
+    // Clears only the desktop or mobile file of a version (deletes it from disk).
+    // If both sides end up empty the whole version is removed.
+    void clearVersionFile(const QString &id, int versionIndex, bool desktop);
     void promoteVersion(const QString &id, int versionIndex);
     void ensureImageElement(int index);
 

@@ -11,16 +11,22 @@ QString ClothingMenCategory::displayName() const
 QList<MeasurementField> ClothingMenCategory::measurementFields() const
 {
     return {
-        {QStringLiteral("chest"), QObject::tr("Chest (cm)"), 2.0, {}},
+        {QStringLiteral("chest"),      QObject::tr("Chest (cm)"),      2.0, {}},
+        {QStringLiteral("your_height"), QObject::tr("Your height (cm)"), 2.0, {}},
     };
 }
 
 QList<CountryGroup> ClothingMenCategory::countryGroups() const
 {
     return {
-        {QStringLiteral("EU (FR/DE/IT/...)"), QStringLiteral("FR"),  false, false},
-        {QStringLiteral("UK/IE/AU"),          QStringLiteral("UK"),  false, false, true},
-        {QStringLiteral("US/CA"),             QStringLiteral("COM"), false, false, true},
+        {QStringLiteral("EU (FR/DE/IT/...)"), QStringLiteral("FR"),  false, false, false,
+         {QStringLiteral("fr"), QStringLiteral("de"), QStringLiteral("it"), QStringLiteral("es"),
+          QStringLiteral("nl"), QStringLiteral("se"), QStringLiteral("pl"), QStringLiteral("be"),
+          QStringLiteral("tr")}},
+        {QStringLiteral("UK/IE/AU"),          QStringLiteral("UK"),  false, false, true,
+         {QStringLiteral("uk"), QStringLiteral("ie"), QStringLiteral("au")}},
+        {QStringLiteral("US/CA"),             QStringLiteral("COM"), false, false, true,
+         {QStringLiteral("us"), QStringLiteral("ca"), QStringLiteral("mx")}},
     };
 }
 

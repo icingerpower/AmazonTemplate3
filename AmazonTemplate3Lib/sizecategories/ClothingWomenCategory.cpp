@@ -45,7 +45,7 @@ QStringList ClothingWomenCategory::letterSizes() const {
     return {QStringLiteral("XXS"),  QStringLiteral("XS"),  QStringLiteral("S"),
             QStringLiteral("M"),    QStringLiteral("L"),   QStringLiteral("XL"),
             QStringLiteral("XXL"),  QStringLiteral("XXXL"),QStringLiteral("4XL"),
-            QStringLiteral("5XL")};
+            QStringLiteral("5XL"),  QStringLiteral("6XL")};
 }
 
 QString ClothingWomenCategory::letterToKey(const QString &letter) const {
@@ -60,6 +60,7 @@ QString ClothingWomenCategory::letterToKey(const QString &letter) const {
         {QStringLiteral("XXXL"), QStringLiteral("46")},
         {QStringLiteral("4XL"),  QStringLiteral("48")},
         {QStringLiteral("5XL"),  QStringLiteral("50")},
+        {QStringLiteral("6XL"),  QStringLiteral("52")},
     };
     return map.value(letter);
 }

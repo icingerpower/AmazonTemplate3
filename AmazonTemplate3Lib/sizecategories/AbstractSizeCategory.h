@@ -18,11 +18,12 @@ struct MeasurementField {
 };
 
 struct CountryGroup {
-    QString label;
-    QString key;
-    bool    isCm      = false;
-    bool    isFloat   = false;
-    bool    isEnglish = false;
+    QString     label;
+    QString     key;
+    bool        isCm      = false;
+    bool        isFloat   = false;
+    bool        isEnglish = false;
+    QStringList codes;  // explicit lowercase country codes belonging to this group
 };
 
 struct MeasurementInput {
