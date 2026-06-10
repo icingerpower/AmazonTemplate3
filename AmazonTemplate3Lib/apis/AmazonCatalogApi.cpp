@@ -336,59 +336,76 @@ QCoro::Task<void> AmazonCatalogApi::_doGet(const QString& marketplaceId,
     url.setPath(path);
     url.setQuery(query);
 
-    QNetworkRequest req(url);
-    QString token;
-    co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
-    if (token.isEmpty()) {
-        qWarning() << "AmazonCatalogApi: aborting GET, no access token";
-        co_return;   // *out stays empty
-    }
-    req.setRawHeader("x-amz-access-token", token.toUtf8());
-    req.setRawHeader("accept", "application/json");
+    for (int retry = 0; retry < 5; ++retry) {
+        QNetworkRequest req(url);
+        QString token;
+        co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
+        if (token.isEmpty()) {
+            qWarning() << "AmazonCatalogApi: aborting GET, no access token";
+            co_return;   // *out stays empty
+        }
+        req.setRawHeader("x-amz-access-token", token.toUtf8());
+        req.setRawHeader("accept", "application/json");
 
-    // Throttle: Amazon's catalog API allows ~2 req/s. Enforce at least 600 ms between
-    // consecutive requests so a family with many children never triggers a 429.
-    constexpr int kMinIntervalMs = 600;
-    const int elapsed = m_lastRequestTime.isValid()
-        ? static_cast<int>(m_lastRequestTime.msecsTo(QDateTime::currentDateTimeUtc()))
-        : kMinIntervalMs;
-    if (elapsed < kMinIntervalMs) {
-        QTimer throttleTimer;
-        throttleTimer.setSingleShot(true);
-        throttleTimer.start(kMinIntervalMs - elapsed);
-        co_await qCoro(&throttleTimer).waitForTimeout();
-    }
-    m_lastRequestTime = QDateTime::currentDateTimeUtc();
+        // Throttle: Amazon's catalog API allows ~2 req/s. Enforce at least 600 ms between
+        // consecutive requests so a family with many children never triggers a 429.
+        constexpr int kMinIntervalMs = 600;
+        const int elapsed = m_lastRequestTime.isValid()
+            ? static_cast<int>(m_lastRequestTime.msecsTo(QDateTime::currentDateTimeUtc()))
+            : kMinIntervalMs;
+        if (elapsed < kMinIntervalMs) {
+            QTimer throttleTimer;
+            throttleTimer.setSingleShot(true);
+            throttleTimer.start(kMinIntervalMs - elapsed);
+            co_await qCoro(&throttleTimer).waitForTimeout();
+        }
+        m_lastRequestTime = QDateTime::currentDateTimeUtc();
 
-    qDebug() << "AmazonCatalogApi: GET" << url.toString();
-    QNetworkReply* reply = _nam()->get(req);
-    co_await qCoro(reply).waitForFinished();
+        qDebug() << "AmazonCatalogApi: GET" << url.toString();
+        QNetworkReply* reply = _nam()->get(req);
+        co_await qCoro(reply).waitForFinished();
 
-    const QByteArray data = reply->readAll();
-    const int httpStatus  = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    const QString requestId = rawHeaderCI(reply, "x-amzn-RequestId");
-    if (reply->error() != QNetworkReply::NoError) {
+        const QByteArray data = reply->readAll();
+        const int httpStatus  = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QString requestId = rawHeaderCI(reply, "x-amzn-RequestId");
+
+        if (httpStatus == 200) {
+            qDebug() << "AmazonCatalogApi: GET" << path << "HTTP" << httpStatus
+                     << "RequestId:" << (requestId.isEmpty() ? QStringLiteral("(none)") : requestId)
+                     << "bytes:" << data.size();
+            *out = data;
+            reply->deleteLater();
+            co_return;
+        }
+
+        if (httpStatus == 429 && retry < 4) {
+            qDebug() << "AmazonCatalogApi: 429 Quota Exceeded for" << asin << "— retrying in 3s...";
+            reply->deleteLater();
+            QTimer t;
+            t.setSingleShot(true);
+            t.start(3000);
+            co_await qCoro(&t).waitForTimeout();
+            continue;
+        }
+
+        // Permanent error or final retry failed
         qWarning() << "AmazonCatalogApi: GET" << url.toString()
                    << "HTTP" << httpStatus
                    << "RequestId:" << (requestId.isEmpty() ? QStringLiteral("(none)") : requestId)
                    << "error:" << reply->errorString()
                    << "body:" << QString::fromUtf8(data.left(500));
         writeDiagnosticFile(req, reply, data, asin);
-    } else {
-        qDebug() << "AmazonCatalogApi: GET" << path << "HTTP" << httpStatus
-                 << "RequestId:" << (requestId.isEmpty() ? QStringLiteral("(none)") : requestId)
-                 << "bytes:" << data.size();
-    }
-    reply->deleteLater();
-    *out = data;
+        reply->deleteLater();
+        *out = data;
 
-    // On 403, automatically retry via the search endpoint (different code path on Amazon's side)
-    if (httpStatus == 403) {
-        qDebug() << "AmazonCatalogApi: 403 on item endpoint for" << asin
-                 << "- retrying via search endpoint";
-        co_await _doSearchFallback(marketplaceId, asin, includedData, out);
+        // On 403, automatically retry via the search endpoint (different code path on Amazon's side)
+        if (httpStatus == 403) {
+            qDebug() << "AmazonCatalogApi: 403 on item endpoint for" << asin
+                     << "- retrying via search endpoint";
+            co_await _doSearchFallback(marketplaceId, asin, includedData, out);
+        }
+        break;
     }
-    co_return;
 }
 
 // ---------------------------------------------------------------------------
@@ -549,6 +566,14 @@ static AmazonCatalogApi::AsinItem parseAsinItem(const QString& asin, const QByte
     const QJsonDocument doc = QJsonDocument::fromJson(data);
     const QJsonObject root = doc.object();
 
+    // Log the full attributes JSON for debugging SKU/parent resolution issues.
+    // We only log it for a few specific ASINs to avoid flooding the console.
+    static const QSet<QString> kDebugAsins = {QStringLiteral("B099H27PWY"), QStringLiteral("B09TXXSZ6V")};
+    if (kDebugAsins.contains(asin)) {
+        qDebug() << "AmazonCatalogApi: full JSON for" << asin << ":"
+                 << QJsonDocument(root).toJson(QJsonDocument::Indented);
+    }
+
     const QJsonArray summaries = root.value("summaries").toArray();
     if (!summaries.isEmpty()) {
         const QJsonObject sum = summaries.first().toObject();
@@ -595,8 +620,8 @@ static AmazonCatalogApi::AsinItem parseAsinItem(const QString& asin, const QByte
 
     // Collect one URL per image angle (MAIN, PT01, PT02…). Amazon returns the same
     // angle at several resolutions (75, 300, 500, 2000 px). We keep the resolution
-    // closest to 500 px from above (i.e. ≥500 preferred, smallest among those).
-    // If no entry is ≥500 px we fall back to the largest available.
+    // closest to 1500 px from above (i.e. ≥1500 preferred, smallest among those).
+    // If no entry is ≥1500 px we fall back to the largest available.
     //
     // bestByVariant: variant → {url, height}  (height = max(w,h) of chosen entry)
     struct BestImg { QString url; int size = 0; };
@@ -627,14 +652,14 @@ static AmazonCatalogApi::AsinItem parseAsinItem(const QString& asin, const QByte
             if (best.url.isEmpty()) {
                 best = {link, sz};
             } else {
-                // Prefer ≥500 px; among those, smaller is better (less bandwidth).
-                // Among sub-500 entries, larger is better.
-                const bool curGe500  = (best.size >= 500);
-                const bool newGe500  = (sz        >= 500);
+                // Prefer ≥1500 px; among those, smaller is better (less bandwidth).
+                // Among sub-1500 entries, larger is better.
+                const bool curGe1500  = (best.size >= 1500);
+                const bool newGe1500  = (sz        >= 1500);
                 const bool replace =
-                    (!curGe500 && newGe500)                        // upgrade to ≥500
-                    || (curGe500 && newGe500 && sz < best.size)    // both ≥500, pick smaller
-                    || (!curGe500 && !newGe500 && sz > best.size); // both <500, pick larger
+                    (!curGe1500 && newGe1500)                        // upgrade to ≥1500
+                    || (curGe1500 && newGe1500 && sz < best.size)    // both ≥1500, pick smaller
+                    || (!curGe1500 && !newGe1500 && sz > best.size); // both <1500, pick larger
                 if (replace)
                     best = {link, sz};
             }
@@ -913,7 +938,7 @@ AmazonCatalogApi::fetchItemImages(QString asin, QString marketplaceId,
     const QJsonObject root = QJsonDocument::fromJson(body).object();
 
     // Same heuristic as parseAsinItem: among images for the same variant, prefer
-    // ≥500 px (and smaller within that bucket); fall back to largest sub-500.
+    // ≥1500 px (and smaller within that bucket); fall back to largest sub-1500.
     struct BestImg { QString url; int size = 0; };
     QMap<QString, BestImg> bestByVariant;
     QStringList variantOrder; // preserves insertion order
@@ -942,12 +967,12 @@ AmazonCatalogApi::fetchItemImages(QString asin, QString marketplaceId,
             if (best.url.isEmpty()) {
                 best = {link, sz};
             } else {
-                const bool curGe500 = (best.size >= 500);
-                const bool newGe500 = (sz        >= 500);
+                const bool curGe1500 = (best.size >= 1500);
+                const bool newGe1500 = (sz        >= 1500);
                 const bool replace =
-                    (!curGe500 && newGe500)
-                    || (curGe500 && newGe500 && sz < best.size)
-                    || (!curGe500 && !newGe500 && sz > best.size);
+                    (!curGe1500 && newGe1500)
+                    || (curGe1500 && newGe1500 && sz < best.size)
+                    || (!curGe1500 && !newGe1500 && sz > best.size);
                 if (replace)
                     best = {link, sz};
             }
@@ -2664,6 +2689,8 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
         }
 
         const QStringList headers = lines.at(0).split(QLatin1Char('\t'));
+        qDebug() << "AmazonCatalogApi: TSV headers found:" << headers;
+
         const int skuCol  = headers.indexOf(QStringLiteral("seller-sku"));
         // Report format varies by region/type: some have "asin1", others "product-id"
         int asinCol = headers.indexOf(QStringLiteral("asin1"));
@@ -2678,22 +2705,48 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
             co_return;
         }
 
+        int skippedRows = 0;
+        int nonAsinRows = 0;
+        const QRegularExpression asinRegex("^[A-Z0-9]{10}$");
+
         for (int i = 1; i < lines.size(); ++i) {
             const QStringList cols = lines.at(i).split(QLatin1Char('\t'));
-            if (cols.size() <= qMax(skuCol, asinCol)) continue;
-            // Skip rows where product-id-type != 1 (ASIN) — e.g. UPC/EAN rows
-            if (typeCol >= 0 && typeCol < cols.size()
-                    && !cols.at(typeCol).trimmed().isEmpty()
-                    && cols.at(typeCol).trimmed() != QStringLiteral("1"))
+            if (cols.size() <= qMax(skuCol, asinCol)) {
+                skippedRows++;
                 continue;
+            }
+
+            const QString typeVal = (typeCol >= 0 && typeCol < cols.size())
+                ? cols.at(typeCol).trimmed() : QString{};
             const QString sku  = cols.at(skuCol).trimmed();
             const QString asin = cols.at(asinCol).trimmed();
-            if (!sku.isEmpty() && !asin.isEmpty() && !asinToSku->contains(asin))
-                asinToSku->insert(asin, sku);
+
+            // product-id-type: 1=ASIN. If empty, check if product-id looks like ASIN.
+            bool isAsin = (typeVal == QStringLiteral("1"));
+            if (!isAsin && typeVal.isEmpty() && asinRegex.match(asin).hasMatch())
+                isAsin = true;
+
+            if (isAsin) {
+                if (!sku.isEmpty() && !asin.isEmpty()) {
+                    if (!asinToSku->contains(asin))
+                        asinToSku->insert(asin, sku);
+                } else {
+                    skippedRows++;
+                }
+            } else {
+                nonAsinRows++;
+                if (asinRegex.match(asin).hasMatch()) {
+                    qDebug() << "AmazonCatalogApi: skipped row with ASIN-like product-id"
+                             << asin << "because type =" << (typeVal.isEmpty() ? "(empty)" : typeVal);
+                }
+            }
         }
 
-        qDebug() << "AmazonCatalogApi: fetchAllSkusViaReport complete, total ASINs ="
-                 << asinToSku->size();
+        qDebug() << "AmazonCatalogApi: fetchAllSkusViaReport complete."
+                 << "Total lines:" << lines.size()
+                 << "Extracted ASINs:" << asinToSku->size()
+                 << "Skipped rows:" << skippedRows
+                 << "Non-ASIN rows:" << nonAsinRows;
     }
     co_return;
 }

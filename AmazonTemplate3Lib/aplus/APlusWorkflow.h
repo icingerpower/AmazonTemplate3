@@ -10,6 +10,7 @@ struct ImageSlotSpec {
     QString displayName;
     QString desktopPrompt;
     QString mobilePrompt;
+    int     versionCount = 1;
 };
 
 class APlusWorkflow
@@ -20,6 +21,14 @@ public:
     virtual QString name() const = 0;
     virtual int     stepCount()        const = 0;
     virtual QString stepName(int step) const = 0;
+
+    virtual QString defaultDesktopPrompt(int step) const = 0;
+    virtual QString defaultMobilePrompt(int step)  const = 0;
+    virtual int     versionCount(int step)         const = 0;
+
+    virtual void setDefaultDesktopPrompt(int step, const QString &prompt) = 0;
+    virtual void setDefaultMobilePrompt(int step, const QString &prompt)  = 0;
+    virtual void setVersionCount(int step, int count)                     = 0;
 
     // Builds ordered image slot specs with full prompts ready for CLI dispatch.
     // content: existing APlusContent (for Generic workflow to read existing elements)

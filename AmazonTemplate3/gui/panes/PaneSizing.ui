@@ -654,6 +654,13 @@
                   </widget>
                  </item>
                  <item>
+                  <widget class="QPushButton" name="buttonEditPrompts">
+                   <property name="text">
+                    <string>Edit prompts</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
                   <spacer name="horizontalSpacer_5">
                    <property name="orientation">
                     <enum>Qt::Orientation::Horizontal</enum>

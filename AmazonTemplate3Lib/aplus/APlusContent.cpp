@@ -35,6 +35,13 @@ const APlusVersion *APlusElement::current() const
     return &versions.first();
 }
 
+APlusVersion *APlusElement::current()
+{
+    if (versions.isEmpty())
+        return nullptr;
+    return &versions.first();
+}
+
 APlusContent::APlusContent(QObject *parent)
     : QObject(parent)
 {

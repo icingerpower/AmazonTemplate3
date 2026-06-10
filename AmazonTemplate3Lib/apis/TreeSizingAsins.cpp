@@ -131,9 +131,9 @@ void TreeSizingAsins::_applyDatesToFamily(ParentItem& family)
 // xlsx helper
 // ---------------------------------------------------------------------------
 
-QStringList TreeSizingAsins::_readAsinsFromXlsx(const QString& xlsxPath) const
+QMap<QString, QString> TreeSizingAsins::_readAsinsFromXlsx(const QString& xlsxPath) const
 {
-    QStringList result;
+    QMap<QString, QString> result;
     QXlsx::Document doc(xlsxPath);
     if (!doc.load()) {
         qWarning() << "TreeSizingAsins: failed to load xlsx" << xlsxPath;
@@ -141,22 +141,24 @@ QStringList TreeSizingAsins::_readAsinsFromXlsx(const QString& xlsxPath) const
     }
 
     const QRegularExpression asinRegex("^[A-Z0-9]{10}$");
-    const QString dim = doc.dimension().toString(); // e.g. "A1:AZ200"
-    Q_UNUSED(dim);
 
-    // Find ASIN column: scan the first 5 rows for a header cell that
-    // contains "asin" (case-insensitive) or is named "external_product_id".
+    // Find ASIN and SKU columns: scan the first 10 rows for header cells.
     int asinCol = -1;
-    for (int row = 1; row <= 5 && asinCol == -1; ++row) {
-        for (int col = 1; col <= 200; ++col) {
+    int skuCol  = -1;
+    for (int row = 1; row <= 10 && (asinCol == -1 || skuCol == -1); ++row) {
+        for (int col = 1; col <= 500; ++col) {
             const QVariant v = doc.read(row, col);
             if (!v.isValid()) continue;
             const QString s = v.toString().trimmed();
             if (s.isEmpty()) continue;
-            if (s.compare("asin", Qt::CaseInsensitive) == 0
-                || s.compare("external_product_id", Qt::CaseInsensitive) == 0) {
+
+            if (asinCol == -1 && (s.compare("asin", Qt::CaseInsensitive) == 0
+                                  || s.compare("external_product_id", Qt::CaseInsensitive) == 0)) {
                 asinCol = col;
-                break;
+            } else if (skuCol == -1 && (s.compare("seller_sku", Qt::CaseInsensitive) == 0
+                                        || s.compare("item_sku", Qt::CaseInsensitive) == 0
+                                        || s.compare("sku", Qt::CaseInsensitive) == 0)) {
+                skuCol = col;
             }
         }
     }
@@ -169,20 +171,27 @@ QStringList TreeSizingAsins::_readAsinsFromXlsx(const QString& xlsxPath) const
                 if (!v.isValid()) continue;
                 const QString s = v.toString().trimmed();
                 if (asinRegex.match(s).hasMatch() && !result.contains(s))
-                    result.append(s);
+                    result.insert(s, QString{});
             }
         }
         return result;
     }
 
-    // Read the ASIN column, skipping header rows.
+    // Read the columns, skipping header rows.
     for (int row = 2; row <= 5000; ++row) {
-        const QVariant v = doc.read(row, asinCol);
-        if (!v.isValid()) continue;
-        const QString s = v.toString().trimmed();
-        if (s.isEmpty()) continue;
-        if (asinRegex.match(s).hasMatch() && !result.contains(s))
-            result.append(s);
+        const QVariant vAsin = doc.read(row, asinCol);
+        if (!vAsin.isValid()) continue;
+        const QString sAsin = vAsin.toString().trimmed();
+        if (sAsin.isEmpty()) continue;
+
+        if (asinRegex.match(sAsin).hasMatch() && !result.contains(sAsin)) {
+            QString sSku;
+            if (skuCol != -1) {
+                const QVariant vSku = doc.read(row, skuCol);
+                if (vSku.isValid()) sSku = vSku.toString().trimmed();
+            }
+            result.insert(sAsin, sSku);
+        }
     }
 
     return result;
@@ -200,11 +209,11 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
         co_return;
     }
 
-    QStringList asins;
+    QMap<QString, QString> asinsWithSkus;
     if (asinOrXlsxPath.endsWith(".xlsx", Qt::CaseInsensitive)) {
-        asins = _readAsinsFromXlsx(asinOrXlsxPath);
+        asinsWithSkus = _readAsinsFromXlsx(asinOrXlsxPath);
     } else {
-        asins << asinOrXlsxPath;
+        asinsWithSkus.insert(asinOrXlsxPath, QString{});
     }
 
     // Human-readable country code for each marketplace ID (for error messages).
@@ -232,7 +241,8 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
     bool attributesEmitted = false;
     int  succeededRegionIdx = -1;
     QString probeChildAsin;
-    for (const QString& asin : asins) {
+    for (auto it = asinsWithSkus.constBegin(); it != asinsWithSkus.constEnd(); ++it) {
+        const QString asin = it.key();
         if (asin.isEmpty()) continue;
         AmazonCatalogApi::VariationFamily family;
         QStringList attemptLog;
@@ -266,6 +276,8 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
         ParentItem p;
         p.asin = family.parentAsin;
         p.sku  = family.parentSku;
+        if (p.sku.isEmpty()) p.sku = asinsWithSkus.value(p.asin);
+
         // Regex shared across children: "XL=42", "M=10", etc.
         static const QRegularExpression kSizeRe(QStringLiteral(R"(([A-Z]{1,3})\s*=\s*\d+)"));
 
@@ -273,6 +285,7 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
             ChildItem ci;
             ci.asin         = c.asin;
             ci.sku          = c.sku;
+            if (ci.sku.isEmpty()) ci.sku = asinsWithSkus.value(ci.asin);
             ci.size         = c.size;
             ci.color        = c.color;
             ci.title        = c.title;

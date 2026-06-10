@@ -13,6 +13,7 @@
 #include "aplus/APlusUploadDialog.h"
 #include "sizecategories/AbstractSizeCategory.h"
 #include "sizecategories/SizingTableTemplateModel.h"
+#include "gui/DialogEditPrompts.h"
 #include "BrokenChildTable.h"
 #include "AmazonMarketplace.h"
 #include <QTableView>
@@ -175,6 +176,8 @@ PaneSizing::PaneSizing(QWidget *parent)
                           : ui->textEditFaqPrompt;
         QGuiApplication::clipboard()->setText(editor->toPlainText());
     });
+    connect(ui->buttonEditPrompts, &QPushButton::clicked,
+            this, &PaneSizing::onEditPromptsClicked);
 
     m_imageNam = new QNetworkAccessManager(this);
     _initWorkflowCombo();
@@ -485,6 +488,22 @@ void PaneSizing::_saveProductSettings()
         s.setValue(base + QStringLiteral("/step"),  w.stepSpinBox->value());
         s.setValue(base + QStringLiteral("/range"), w.rangeSpinBox->value());
     }
+
+    // Save SKUs from the tree model
+    if (m_treeModel) {
+        for (int fi = 0; fi < m_treeModel->rowCount(); ++fi) {
+            const QModelIndex pi = m_treeModel->index(fi, 0);
+            const QString pAsin  = m_treeModel->data(m_treeModel->index(fi, TreeSizingAsins::ASIN), Qt::DisplayRole).toString();
+            const QString pSku   = m_treeModel->data(m_treeModel->index(fi, TreeSizingAsins::SKU), Qt::DisplayRole).toString().trimmed();
+            if (!pSku.isEmpty()) s.setValue(QStringLiteral("sizing/skus/") + pAsin, pSku);
+
+            for (int ci = 0; ci < m_treeModel->rowCount(pi); ++ci) {
+                const QString cAsin = m_treeModel->data(m_treeModel->index(ci, TreeSizingAsins::ASIN, pi), Qt::DisplayRole).toString();
+                const QString cSku  = m_treeModel->data(m_treeModel->index(ci, TreeSizingAsins::SKU, pi), Qt::DisplayRole).toString().trimmed();
+                if (!cSku.isEmpty()) s.setValue(QStringLiteral("sizing/skus/") + cAsin, cSku);
+            }
+        }
+    }
 }
 
 void PaneSizing::_loadProductSettings()
@@ -539,6 +558,22 @@ void PaneSizing::_loadProductSettings()
     if (_currentCategory() && ui->sizeRangeMain->isRangeSelected()) {
         _rebuildSizeTable();
         updateButtonStates();
+    }
+
+    // Restore SKUs from settings.ini
+    if (m_treeModel) {
+        for (int fi = 0; fi < m_treeModel->rowCount(); ++fi) {
+            const QModelIndex pi = m_treeModel->index(fi, 0);
+            const QString pAsin  = m_treeModel->data(m_treeModel->index(fi, TreeSizingAsins::ASIN), Qt::DisplayRole).toString();
+            const QString pSku   = s.value(QStringLiteral("sizing/skus/") + pAsin).toString();
+            if (!pSku.isEmpty()) m_treeModel->setSku(pAsin, pSku);
+
+            for (int ci = 0; ci < m_treeModel->rowCount(pi); ++ci) {
+                const QString cAsin = m_treeModel->data(m_treeModel->index(ci, TreeSizingAsins::ASIN, pi), Qt::DisplayRole).toString();
+                const QString cSku  = s.value(QStringLiteral("sizing/skus/") + cAsin).toString();
+                if (!cSku.isEmpty()) m_treeModel->setSku(cAsin, cSku);
+            }
+        }
     }
 }
 
@@ -598,6 +633,10 @@ void PaneSizing::_ensureModel(const QDir &dir)
                             m_brokenChildTable->setMarketplaceActive(mpId, !missing);
                     }
                 }
+
+                // Kick off per-child, per-marketplace health checks + SKU resolution
+                // now that we know which marketplaces are available.
+                _loadBrokenChildData();
             });
 
     connect(m_treeModel.get(), &QAbstractItemModel::modelReset,
@@ -660,9 +699,6 @@ void PaneSizing::_ensureModel(const QDir &dir)
                 // the tree model is fully populated and all child titles are scannable.
                 if (!ui->sizeRangeBrand->isRangeSelected())
                     _tryGuessBrandRangeFromTitle();
-
-                // Kick off per-child, per-marketplace health checks for the broken-child tab.
-                _loadBrokenChildData();
             });
 
     connect(m_treeModel.get(), &TreeSizingAsins::variantImagesFetched,
@@ -1422,6 +1458,51 @@ void PaneSizing::onVariantImageSelected(int row)
     const int maxH = vp.height() - 4;
     ui->labelVariantImage->setPixmap(
         pm.scaled(maxW, maxH, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+}
+
+QCoro::Task<void> PaneSizing::_fetchAllSkusCached(const QString &marketplaceId,
+                                                  QHash<QString, QString> *asinToSku,
+                                                  bool forceRefresh)
+{
+    asinToSku->clear();
+
+    if (!m_workingDir.exists()) {
+        co_await m_api->fetchAllSkusViaReport(marketplaceId, asinToSku);
+        co_return;
+    }
+
+    const QString cachePath = m_workingDir.filePath(
+        QStringLiteral("sizing/sku_cache_%1.json").arg(marketplaceId));
+    QFile cacheFile(cachePath);
+
+    // 1. Try to load from cache
+    if (!forceRefresh && cacheFile.open(QIODevice::ReadOnly)) {
+        const QJsonObject root = QJsonDocument::fromJson(cacheFile.readAll()).object();
+        for (auto it = root.begin(); it != root.end(); ++it)
+            asinToSku->insert(it.key(), it.value().toString());
+
+        if (!asinToSku->isEmpty()) {
+            qDebug() << "PaneSizing: loaded" << asinToSku->size()
+                     << "SKUs from global cache for" << marketplaceId;
+            co_return;
+        }
+    }
+
+    // 2. Not in cache (or cache empty or forced) -> fetch from Amazon
+    co_await m_api->fetchAllSkusViaReport(marketplaceId, asinToSku);
+
+    // 3. Save to cache if successful
+    if (!asinToSku->isEmpty()) {
+        m_workingDir.mkpath(QStringLiteral("sizing"));
+        if (cacheFile.open(QIODevice::WriteOnly)) {
+            QJsonObject root;
+            for (auto it = asinToSku->constBegin(); it != asinToSku->constEnd(); ++it)
+                root.insert(it.key(), it.value());
+            cacheFile.write(QJsonDocument(root).toJson());
+            qDebug() << "PaneSizing: saved" << asinToSku->size()
+                     << "SKUs to global cache for" << marketplaceId;
+        }
+    }
 }
 
 void PaneSizing::_downloadMainImage(const QString &url, const QString &asin)
@@ -2814,134 +2895,127 @@ void PaneSizing::onAplusGenerateAll()
     // If the current version has exactly one side (the other was explicitly deleted),
     // only regenerate the missing side and inherit the surviving file into the new version.
     for (const ImageSlotSpec &spec : slotSpecs) {
-        const QString elemId = spec.elementId;
-        const QString displayName = spec.displayName;
-        const QDir elemDir(m_aplusContent->dir().filePath(elemId));
-        elemDir.mkpath(QStringLiteral("."));
-        const QString elemWorkDir = elemDir.absolutePath();
+        const int vCount = spec.versionCount;
+        for (int v = 0; v < vCount; ++v) {
+            const QString elemId = spec.elementId;
+            const QString displayName = spec.displayName;
+            const QDir elemDir(m_aplusContent->dir().filePath(elemId));
+            elemDir.mkpath(QStringLiteral("."));
+            const QString elemWorkDir = elemDir.absolutePath();
 
-        const APlusElement *elemPtr    = m_aplusContent->findElement(elemId);
-        const APlusVersion *curVer     = elemPtr ? elemPtr->current() : nullptr;
-        const bool curHasDesktop = curVer && !curVer->desktopFile.isEmpty();
-        const bool curHasMobile  = curVer && !curVer->mobileFile.isEmpty();
-        // Only skip one side when the current version has that side but lacks the other.
-        const bool doDesktop = !curHasDesktop || curHasMobile;
-        const bool doMobile  = !curHasMobile  || curHasDesktop;
-        // Relative paths to carry over from the surviving side (when regenerating only one).
-        const QString inheritedDesktopRel = !doDesktop ? curVer->desktopFile : QString{};
-        const QString inheritedMobileRel  = !doMobile  ? curVer->mobileFile  : QString{};
+            const APlusElement *elemPtr    = m_aplusContent->findElement(elemId);
+            const APlusVersion *curVer     = elemPtr ? elemPtr->current() : nullptr;
+            const bool curHasDesktop = curVer && !curVer->desktopFile.isEmpty();
+            const bool curHasMobile  = curVer && !curVer->mobileFile.isEmpty();
+            // Only skip one side when the current version has that side but lacks the other.
+            const bool doDesktop = !curHasDesktop || curHasMobile;
+            const bool doMobile  = !curHasMobile  || curHasDesktop;
+            // Relative paths to carry over from the surviving side (when regenerating only one).
+            const QString inheritedDesktopRel = !doDesktop ? curVer->desktopFile : QString{};
+            const QString inheritedMobileRel  = !doMobile  ? curVer->mobileFile  : QString{};
 
-        auto filePair   = QSharedPointer<QPair<QString,QString>>::create();
-        auto beforeSnap = QSharedPointer<QStringList>::create();
+            auto filePair   = QSharedPointer<QPair<QString,QString>>::create();
+            auto beforeSnap = QSharedPointer<QStringList>::create();
 
-        if (doDesktop) {
-            CliTask desktopTask;
-            desktopTask.label   = tr("Desktop image — %1").arg(displayName);
-            desktopTask.prompt  = spec.desktopPrompt;
-            desktopTask.workDir = elemWorkDir;
-            desktopTask.onBefore = [beforeSnap, elemDir]() {
-                *beforeSnap = elemDir.entryList({QStringLiteral("*.png"),
-                    QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files);
-            };
-            desktopTask.onDone = [this, elemDir, beforeSnap, filePair, elemId, displayName,
-                                   generatedImages, doMobile, inheritedMobileRel](CliRunResult r) {
-                const QString preferred = elemDir.filePath(QStringLiteral("desktop.png"));
-                if (QFileInfo::exists(preferred)) {
-                    filePair->first = preferred;
-                } else {
-                    for (const QString &f : elemDir.entryList(
-                             {QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")},
-                             QDir::Files)) {
-                        if (!beforeSnap->contains(f)) { filePair->first = elemDir.filePath(f); break; }
-                    }
-                }
-                if (filePair->first.isEmpty() && !r.output.trimmed().isEmpty()) {
-                    const QString p = elemDir.filePath(QStringLiteral("v_") + _aplusTimestamp()
-                                                       + QStringLiteral("_desktop.txt"));
-                    QFile f(p); if (f.open(QIODevice::WriteOnly)) f.write(r.output.toUtf8());
-                    filePair->first = p;
-                }
-                if (!doMobile) {
-                    // Desktop-only regeneration: create the version record now.
-                    if (!m_aplusContent) return;
-                    const QString ts = _aplusTimestamp();
-                    const QFileInfo fi(filePair->first);
-                    if (!fi.suffix().isEmpty() && fi.suffix() != QLatin1String("txt")
-                            && !fi.fileName().startsWith(QStringLiteral("v_"))) {
-                        const QString vp = elemDir.filePath(QStringLiteral("v_") + ts
-                            + QStringLiteral("_desktop.") + fi.suffix());
-                        if (QFile::rename(filePair->first, vp)) filePair->first = vp;
-                    }
-                    if (!filePair->first.isEmpty()) generatedImages->append(filePair->first);
-                    const QDir aplusDir = m_aplusContent->dir();
-                    APlusVersion ver;
-                    ver.generated   = QDateTime::currentDateTime();
-                    ver.desktopFile = aplusDir.relativeFilePath(filePair->first);
-                    ver.mobileFile  = inheritedMobileRel;
-                    m_aplusContent->pushVersion(elemId, APlusElementType::Image, displayName, ver);
-                    if (m_aplusModel) _rebuildAplusModel();
-                }
-            };
-            tasks.append(desktopTask);
-        }
-
-        if (doMobile) {
-            CliTask mobileTask;
-            mobileTask.label   = tr("Mobile image — %1").arg(displayName);
-            mobileTask.prompt  = spec.mobilePrompt;
-            mobileTask.workDir = elemWorkDir;
-            mobileTask.onBefore = [beforeSnap, elemDir]() {
-                *beforeSnap = elemDir.entryList({QStringLiteral("*.png"),
-                    QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files);
-            };
-            mobileTask.onDone = [this, elemDir, beforeSnap, filePair, elemId, displayName,
-                                  generatedImages, doDesktop, inheritedDesktopRel](CliRunResult r) {
-                const QString preferred = elemDir.filePath(QStringLiteral("mobile.png"));
-                if (QFileInfo::exists(preferred)) {
-                    filePair->second = preferred;
-                } else {
-                    for (const QString &f : elemDir.entryList(
-                             {QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")},
-                             QDir::Files)) {
-                        if (!beforeSnap->contains(f)) { filePair->second = elemDir.filePath(f); break; }
-                    }
-                }
-                if (filePair->second.isEmpty() && !r.output.trimmed().isEmpty()) {
-                    const QString p = elemDir.filePath(QStringLiteral("v_") + _aplusTimestamp()
-                                                       + QStringLiteral("_mobile.txt"));
-                    QFile f(p); if (f.open(QIODevice::WriteOnly)) f.write(r.output.toUtf8());
-                    filePair->second = p;
-                }
-
-                if (!m_aplusContent) return;
-                // Rename CLI's fixed-name outputs to versioned files so each version record
-                // points to its own unique file instead of all sharing desktop.png/mobile.png.
-                const QString ts = _aplusTimestamp();
-                auto versionFile = [&ts, &elemDir](QString &path, const QString &suffix) {
-                    if (path.isEmpty()) return;
-                    const QFileInfo fi(path);
-                    if (fi.suffix() == QLatin1String("txt")
-                            || fi.fileName().startsWith(QStringLiteral("v_")))
-                        return;
-                    const QString vp = elemDir.filePath(QStringLiteral("v_") + ts
-                        + QStringLiteral("_") + suffix + QStringLiteral(".") + fi.suffix());
-                    if (QFile::rename(path, vp)) path = vp;
+            if (doDesktop) {
+                CliTask desktopTask;
+                desktopTask.label   = (vCount > 1)
+                    ? tr("Desktop image — %1 (v%2)").arg(displayName).arg(v + 1)
+                    : tr("Desktop image — %1").arg(displayName);
+                desktopTask.prompt  = spec.desktopPrompt;
+                desktopTask.workDir = elemWorkDir;
+                desktopTask.onBefore = [beforeSnap, elemDir]() {
+                    *beforeSnap = elemDir.entryList({QStringLiteral("*.png"),
+                        QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files);
                 };
-                if (doDesktop) versionFile(filePair->first,  QStringLiteral("desktop"));
-                versionFile(filePair->second, QStringLiteral("mobile"));
-                if (doDesktop && !filePair->first.isEmpty())  generatedImages->append(filePair->first);
-                if (!filePair->second.isEmpty()) generatedImages->append(filePair->second);
+                desktopTask.onDone = [this, elemDir, beforeSnap, filePair, elemId, displayName,
+                                       generatedImages, doMobile, inheritedMobileRel](CliRunResult r) {
+                    const QString preferred = elemDir.filePath(QStringLiteral("desktop.png"));
+                    if (QFileInfo::exists(preferred)) {
+                        filePair->first = preferred;
+                    } else {
+                        const QStringList after = elemDir.entryList({QStringLiteral("*.png"),
+                            QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files);
+                        for (const QString &f : after) {
+                            if (!beforeSnap->contains(f)) {
+                                filePair->first = elemDir.filePath(f);
+                                break;
+                            }
+                        }
+                    }
+                    if (!filePair->first.isEmpty())
+                        generatedImages->append(filePair->first);
 
-                const QDir aplusDir = m_aplusContent->dir();
-                APlusVersion ver;
-                ver.generated   = QDateTime::currentDateTime();
-                ver.desktopFile = doDesktop ? aplusDir.relativeFilePath(filePair->first)
-                                            : inheritedDesktopRel;
-                ver.mobileFile  = aplusDir.relativeFilePath(filePair->second);
-                m_aplusContent->pushVersion(elemId, APlusElementType::Image, displayName, ver);
-                if (m_aplusModel) _rebuildAplusModel();
-            };
-            tasks.append(mobileTask);
+                    // If we're not doing a mobile task, push the result immediately using the inherited side.
+                    if (!doMobile) {
+                        const QImage img(filePair->first);
+                        if (!img.isNull()) {
+                            _aplusPushImage(img, elemId, displayName, APlusElementType::Image);
+                            // Patch the new version to include the inherited mobile file.
+                            if (APlusElement *e = m_aplusContent->findElement(elemId)) {
+                                if (APlusVersion *v = e->current())
+                                    v->mobileFile = inheritedMobileRel;
+                            }
+                        }
+                    }
+                };
+                tasks.append(desktopTask);
+            }
+
+            if (doMobile) {
+                CliTask mobileTask;
+                mobileTask.label   = (vCount > 1)
+                    ? tr("Mobile image — %1 (v%2)").arg(displayName).arg(v + 1)
+                    : tr("Mobile image — %1").arg(displayName);
+                mobileTask.prompt  = spec.mobilePrompt;
+                mobileTask.workDir = elemWorkDir;
+                mobileTask.onBefore = [beforeSnap, elemDir]() {
+                    *beforeSnap = elemDir.entryList({QStringLiteral("*.png"),
+                        QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files);
+                };
+                mobileTask.onDone = [this, elemDir, beforeSnap, filePair, elemId, displayName,
+                                      generatedImages, doDesktop, inheritedDesktopRel](CliRunResult r) {
+                    const QString preferred = elemDir.filePath(QStringLiteral("mobile.png"));
+                    if (QFileInfo::exists(preferred)) {
+                        filePair->second = preferred;
+                    } else {
+                        const QStringList after = elemDir.entryList({QStringLiteral("*.png"),
+                            QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files);
+                        for (const QString &f : after) {
+                            if (!beforeSnap->contains(f) && elemDir.filePath(f) != filePair->first) {
+                                filePair->second = elemDir.filePath(f);
+                                break;
+                            }
+                        }
+                    }
+                    if (!filePair->second.isEmpty())
+                        generatedImages->append(filePair->second);
+
+                    // Push the combined result.
+                    const QImage dImg(filePair->first.isEmpty() ? elemDir.filePath(inheritedDesktopRel) : filePair->first);
+                    const QImage mImg(filePair->second);
+                    if (!dImg.isNull() || !mImg.isNull()) {
+                        // _aplusPushImage expects a single image and scales it for both.
+                        // Here we have potentially two different images.
+                        // We'll use the desktop one as primary if available.
+                        _aplusPushImage(dImg.isNull() ? mImg : dImg, elemId, displayName, APlusElementType::Image);
+                        if (APlusElement *e = m_aplusContent->findElement(elemId)) {
+                            if (APlusVersion *v = e->current()) {
+                                // Re-save mobile if it was generated separately.
+                                if (!mImg.isNull()) {
+                                    const QString ts = _aplusTimestamp();
+                                    const QString relMobile = elemId + QStringLiteral("/v_") + ts + QStringLiteral("_mobile.png");
+                                    mImg.scaledToWidth(600, Qt::SmoothTransformation).save(m_aplusContent->dir().filePath(relMobile), "PNG");
+                                    v->mobileFile = relMobile;
+                                }
+                                if (!inheritedDesktopRel.isEmpty() && dImg.isNull())
+                                    v->desktopFile = inheritedDesktopRel;
+                            }
+                        }
+                    }
+                };
+                tasks.append(mobileTask);
+            }
         }
     }
 
@@ -3794,43 +3868,81 @@ void PaneSizing::onAplusGenerateImage(const QString &elementId)
     }
 
     const QString description = ui->textEditAttributes->toPlainText().trimmed();
-    const QTextEdit *promptEditor = (ui->tabWidgetPrompt_01->currentIndex() == 0)
-                                  ? ui->textEditPrompt_01
-                                  : ui->textEditPrompt_02;
-    const QString userPrompt = promptEditor->toPlainText().trimmed();
+    const QString mainImageHint = m_mainImageLocalPath.isEmpty() ? QString{}
+        : tr("A product photo is available in the working directory as \"%1\". "
+             "You may use it as reference.")
+          .arg(QFileInfo(m_mainImageLocalPath).fileName());
 
-    QString prompt;
-    if (!description.isEmpty())
-        prompt += QStringLiteral("Product description:\n") + description + QStringLiteral("\n\n");
-    if (!userPrompt.isEmpty())
-        prompt += QStringLiteral("Instructions:\n") + userPrompt + QStringLiteral("\n\n");
-    prompt += QStringLiteral(
-        "Generate a professional Amazon A+ content marketing image for this product. "
-        "Output as desktop.png (970x600 landscape, white background) and "
-        "mobile.png (600x600 square) in the working directory.");
+    APlusWorkflow *workflow = _currentWorkflow();
+    const QStringList stepInstrs = _stepInstructions();
+
+    QString desktopPrompt, mobilePrompt, displayName;
+    if (workflow) {
+        // Collect colors from m_colorVariants (focus = first entry)
+        QStringList colors;
+        for (const auto &[color, urls] : std::as_const(m_colorVariants))
+            if (!color.isEmpty())
+                colors << color;
+        const QString focusColor = colors.isEmpty() ? QString{} : colors.first();
+
+        const QList<ImageSlotSpec> slotSpecs = workflow->buildSlots(
+            m_aplusContent.get(), colors, focusColor,
+            description, mainImageHint, stepInstrs);
+
+        for (const auto &spec : slotSpecs) {
+            if (spec.elementId == elementId) {
+                desktopPrompt = spec.desktopPrompt;
+                mobilePrompt  = spec.mobilePrompt;
+                displayName   = spec.displayName;
+                break;
+            }
+        }
+    }
+
+    if (desktopPrompt.isEmpty()) {
+        const QTextEdit *promptEditor = (ui->tabWidgetPrompt_01->currentIndex() == 0)
+                                      ? ui->textEditPrompt_01
+                                      : ui->textEditPrompt_02;
+        const QString userPrompt = promptEditor->toPlainText().trimmed();
+
+        if (!description.isEmpty())
+            desktopPrompt += QStringLiteral("Product description:\n") + description + QStringLiteral("\n\n");
+        if (!userPrompt.isEmpty())
+            desktopPrompt += QStringLiteral("Instructions:\n") + userPrompt + QStringLiteral("\n\n");
+        desktopPrompt += QStringLiteral(
+            "Generate a professional Amazon A+ content marketing image for this product. "
+            "Output as desktop.png (970x600 landscape, white background) and "
+            "mobile.png (600x600 square) in the working directory.");
+        mobilePrompt = desktopPrompt;
+    }
+
+    if (displayName.isEmpty()) {
+        if (const APlusElement *e = m_aplusContent->findElement(elementId))
+            displayName = e->displayName;
+        else
+            displayName = elementId;
+    }
 
     // Snapshot existing image files so we can detect new ones after CLI runs.
     QDir aplusDir = m_aplusContent->dir();
     aplusDir.mkpath(elementId);
     const QDir elementDir(aplusDir.filePath(elementId));
-    const QStringList nameFilters = {
-        QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")
-    };
-    QSet<QString> existingBefore;
-    for (const QString &f : elementDir.entryList(nameFilters, QDir::Files))
-        existingBefore.insert(f);
+    const QString workDir = elementDir.absolutePath();
 
     // --- Prompt review dialog ---
     QDialog reviewDlg(this);
     reviewDlg.setWindowTitle(tr("Review prompt — %1").arg(cli->getName()));
     reviewDlg.resize(700, 450);
     auto *reviewLayout = new QVBoxLayout(&reviewDlg);
-    auto *promptEdit = new QTextEdit(&reviewDlg);
-    promptEdit->setPlainText(prompt);
-    reviewLayout->addWidget(promptEdit);
+    auto *tabs = new QTabWidget(&reviewDlg);
+    auto *desktopEdit = new QTextEdit(&reviewDlg); desktopEdit->setPlainText(desktopPrompt);
+    auto *mobileEdit = new QTextEdit(&reviewDlg); mobileEdit->setPlainText(mobilePrompt);
+    tabs->addTab(desktopEdit, tr("Desktop"));
+    tabs->addTab(mobileEdit, tr("Mobile"));
+    reviewLayout->addWidget(tabs);
+
     auto *reviewBtns = new QDialogButtonBox(&reviewDlg);
-    auto *generateBtn = reviewBtns->addButton(tr("Generate"), QDialogButtonBox::AcceptRole);
-    Q_UNUSED(generateBtn)
+    reviewBtns->addButton(tr("Generate"), QDialogButtonBox::AcceptRole);
     reviewBtns->addButton(QDialogButtonBox::Cancel);
     connect(reviewBtns, &QDialogButtonBox::accepted, &reviewDlg, &QDialog::accept);
     connect(reviewBtns, &QDialogButtonBox::rejected, &reviewDlg, &QDialog::reject);
@@ -3839,85 +3951,89 @@ void PaneSizing::onAplusGenerateImage(const QString &elementId)
     if (reviewDlg.exec() != QDialog::Accepted)
         return;
 
-    const QString finalPrompt = promptEdit->toPlainText();
-    const QString workDir = elementDir.absolutePath();
+    const QString finalDesktop = desktopEdit->toPlainText();
+    const QString finalMobile = mobileEdit->toPlainText();
 
-    // --- Result dialog ---
-    auto *resultDlg = new QDialog(this);
-    resultDlg->setAttribute(Qt::WA_DeleteOnClose);
-    resultDlg->setWindowTitle(tr("Image — %1").arg(cli->getName()));
-    resultDlg->resize(700, 500);
-    auto *resultLayout = new QVBoxLayout(resultDlg);
-    auto *output = new QTextEdit(resultDlg);
-    output->setReadOnly(true);
-    output->setPlainText(tr("Generating image with %1…").arg(cli->getName()));
-    resultLayout->addWidget(output);
-    auto *closeBtns = new QDialogButtonBox(QDialogButtonBox::Close, resultDlg);
-    connect(closeBtns, &QDialogButtonBox::rejected, resultDlg, &QDialog::reject);
-    resultLayout->addWidget(closeBtns);
-    resultDlg->show();
+    int vCount = 1;
+    if (workflow) {
+        // Collect colors from m_colorVariants (focus = first entry)
+        QStringList colors;
+        for (const auto &[color, urls] : std::as_const(m_colorVariants))
+            if (!color.isEmpty())
+                colors << color;
+        const QString focusColor = colors.isEmpty() ? QString{} : colors.first();
 
-    QPointer<PaneSizing> guard = this;
-    const QString capturedId = elementId;
-    const QString capturedDisplayName =
-        m_aplusContent->findElement(elementId)
-            ? m_aplusContent->findElement(elementId)->displayName
-            : elementId;
+        const QList<ImageSlotSpec> slotSpecsLocal = workflow->buildSlots(
+            m_aplusContent.get(), colors, focusColor,
+            description, mainImageHint, stepInstrs);
 
-    cli->runPromptAsync(finalPrompt, workDir, resultDlg,
-                        [guard, output, capturedId, capturedDisplayName, elementDir, existingBefore]
-                        (CliRunResult result) {
-        if (!guard) return;
-
-        if (!result.processStarted) {
-            output->setPlainText(QObject::tr("Failed to start CLI process."));
-            return;
+        for (const auto &spec : slotSpecsLocal) {
+            if (spec.elementId == elementId) {
+                vCount = spec.versionCount;
+                break;
+            }
         }
-        const QString text = result.output.trimmed();
-        output->setPlainText(text.isEmpty() ? result.errorOutput.trimmed() : text);
+    }
 
-        if (!guard->m_aplusContent) return;
+    QList<CliTask> tasks;
+    for (int v = 0; v < vCount; ++v) {
+        auto filePair = QSharedPointer<QPair<QString,QString>>::create();
+        auto beforeSnap = QSharedPointer<QStringList>::create();
 
-        // Look for new image files created by the CLI.
-        const QStringList nameFilters = {
-            QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")
+        CliTask desktopTask;
+        desktopTask.label = (vCount > 1) ? tr("Desktop %1 (v%2)").arg(displayName).arg(v+1) : tr("Desktop %1").arg(displayName);
+        desktopTask.prompt = finalDesktop;
+        desktopTask.workDir = workDir;
+        desktopTask.onBefore = [beforeSnap, elementDir]() {
+            *beforeSnap = elementDir.entryList({QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files);
         };
-        QStringList newFiles;
-        for (const QString &f : elementDir.entryList(nameFilters, QDir::Files)) {
-            if (!existingBefore.contains(f))
-                newFiles << f;
-        }
-
-        if (!newFiles.isEmpty()) {
-            const QImage img(elementDir.absoluteFilePath(newFiles.first()));
-            if (!img.isNull()) {
-                guard->_aplusPushImage(img, capturedId, capturedDisplayName,
-                                       APlusElementType::Image);
-                return;
+        desktopTask.onDone = [this, elementDir, beforeSnap, filePair, elementId, displayName](CliRunResult r) {
+            const QString preferred = elementDir.filePath(QStringLiteral("desktop.png"));
+            if (QFileInfo::exists(preferred)) filePair->first = preferred;
+            else {
+                for (const QString &f : elementDir.entryList({QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files))
+                    if (!beforeSnap->contains(f)) { filePair->first = elementDir.filePath(f); break; }
             }
-        }
+        };
+        tasks.append(desktopTask);
 
-        // No new image — save text output as a fallback version.
-        if (!text.isEmpty()) {
-            QDir aplusDir = guard->m_aplusContent->dir();
-            aplusDir.mkpath(capturedId);
-            const QString ts = guard->_aplusTimestamp();
-            const QString relPath = capturedId + QStringLiteral("/v_") + ts + QStringLiteral(".txt");
-            QFile f(aplusDir.filePath(relPath));
-            if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
-                f.write(text.toUtf8());
-                f.close();
-                APlusVersion ver;
-                ver.generated   = QDateTime::currentDateTime();
-                ver.desktopFile = relPath;
-                ver.mobileFile  = relPath;
-                guard->m_aplusContent->pushVersion(capturedId,
-                                                   APlusElementType::Image,
-                                                   capturedDisplayName, ver);
-                guard->_rebuildAplusModel();
+        CliTask mobileTask;
+        mobileTask.label = (vCount > 1) ? tr("Mobile %1 (v%2)").arg(displayName).arg(v+1) : tr("Mobile %1").arg(displayName);
+        mobileTask.prompt = finalMobile;
+        mobileTask.workDir = workDir;
+        mobileTask.onBefore = [beforeSnap, elementDir]() {
+            *beforeSnap = elementDir.entryList({QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files);
+        };
+        mobileTask.onDone = [this, elementDir, beforeSnap, filePair, elementId, displayName](CliRunResult r) {
+            const QString preferred = elementDir.filePath(QStringLiteral("mobile.png"));
+            if (QFileInfo::exists(preferred)) filePair->second = preferred;
+            else {
+                for (const QString &f : elementDir.entryList({QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files))
+                    if (!beforeSnap->contains(f) && elementDir.filePath(f) != filePair->first) { filePair->second = elementDir.filePath(f); break; }
             }
-        }
-    });
+
+            const QImage dImg(filePair->first);
+            const QImage mImg(filePair->second);
+            if (!dImg.isNull() || !mImg.isNull()) {
+                _aplusPushImage(dImg.isNull() ? mImg : dImg, elementId, displayName, APlusElementType::Image);
+                if (APlusElement *e = m_aplusContent->findElement(elementId)) {
+                    if (APlusVersion *vRec = e->current()) {
+                        if (!mImg.isNull()) {
+                            const QString ts = _aplusTimestamp();
+                            const QString relMobile = elementId + QStringLiteral("/v_") + ts + QStringLiteral("_mobile.png");
+                            mImg.scaledToWidth(600, Qt::SmoothTransformation).save(m_aplusContent->dir().filePath(relMobile), "PNG");
+                            vRec->mobileFile = relMobile;
+                        }
+                    }
+                }
+            }
+        };
+        tasks.append(mobileTask);
+    }
+
+    // Reuse the progress UI logic from _runSequentially if possible, 
+    // but onAplusGenerateImage usually just runs the tasks.
+    _runSequentially(std::move(tasks));
 }
 
 void PaneSizing::onAplusGenerateSelected()
@@ -4661,7 +4777,7 @@ QCoro::Task<void> PaneSizing::_saveToSizeTableFolder()
                 QCoreApplication::processEvents();
 
                 QHash<QString, QString> reportMap;
-                co_await m_api->fetchAllSkusViaReport(mpId, &reportMap);
+                co_await _fetchAllSkusCached(mpId, &reportMap);
                 infoBox.hide();
 
                 for (const QString &asin : childAsins) {
@@ -5047,6 +5163,17 @@ QCoro::Task<void> PaneSizing::_addSkusFromTemplate()
             logEdit->appendPlainText(QStringLiteral("  %1 → %2").arg(sku, asin));
             if (!foundAsins.contains(asin))
                 foundAsins << asin;
+
+            // Update the tree model with the resolved SKU
+            if (m_treeModel)
+                m_treeModel->setSku(asin, sku);
+
+            // Cache resolved SKU in settings.ini
+            if (m_productWorkingDir.exists()) {
+                QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                            QSettings::IniFormat);
+                s.setValue(QStringLiteral("sizing/skus/") + asin, sku);
+            }
         } else {
             logEdit->appendPlainText(QStringLiteral("  %1 → not found").arg(sku));
         }
@@ -5094,14 +5221,19 @@ QCoro::Task<void> PaneSizing::_resolveSkus(QList<AsinSku> &items,
                                             bool *cancelled)
 {
     *cancelled = false;
+    qDebug() << "PaneSizing: resolving SKUs for" << items.size() << "items in" << marketplaceId;
 
     // Step 1: load SKUs saved from a previous upload (settings.ini)
     if (m_productWorkingDir.exists()) {
         QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
                     QSettings::IniFormat);
-        for (auto &item : items)
-            if (item.sku.isEmpty())
+        for (auto &item : items) {
+            if (item.sku.isEmpty()) {
                 item.sku = s.value(QStringLiteral("sizing/skus/") + item.asin).toString();
+                if (!item.sku.isEmpty())
+                    qDebug() << "PaneSizing: ASIN" << item.asin << "resolved from local settings.ini:" << item.sku;
+            }
+        }
     }
 
     // Step 2: fetch ALL listings (FBA + MFN) via Reports API for any still-missing
@@ -5120,7 +5252,7 @@ QCoro::Task<void> PaneSizing::_resolveSkus(QList<AsinSku> &items,
             QCoreApplication::processEvents();
 
             QHash<QString, QString> reportMap;
-            co_await m_api->fetchAllSkusViaReport(marketplaceId, &reportMap);
+            co_await _fetchAllSkusCached(marketplaceId, &reportMap);
             infoBox.hide();
 
             if (reportMap.isEmpty() && !m_api->lastError().isEmpty()) {
@@ -5129,9 +5261,43 @@ QCoro::Task<void> PaneSizing::_resolveSkus(QList<AsinSku> &items,
                                         "Falling back to manual SKU entry.")
                                      .arg(m_api->lastError()));
             }
-            for (auto &item : items)
-                if (item.sku.isEmpty())
+
+            for (auto &item : items) {
+                if (item.sku.isEmpty()) {
                     item.sku = reportMap.value(item.asin);
+                    if (!item.sku.isEmpty())
+                        qDebug() << "PaneSizing: ASIN" << item.asin << "resolved from global report cache:" << item.sku;
+                }
+            }
+
+            if (m_productWorkingDir.exists()) {
+                QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                            QSettings::IniFormat);
+                for (const auto &item : items)
+                    if (!item.sku.isEmpty())
+                        s.setValue(QStringLiteral("sizing/skus/") + item.asin, item.sku);
+            }
+        }
+    }
+
+    // Step 2b: Fallback to FBA Inventory API if still missing
+    {
+        bool anyMissing = false;
+        for (const auto &item : items)
+            if (item.sku.isEmpty()) { anyMissing = true; break; }
+
+        if (anyMissing) {
+            qDebug() << "PaneSizing: some SKUs still missing, trying FBA Inventory API fallback...";
+            QHash<QString, QString> fbaMap;
+            co_await m_api->fetchAllFbaSkus(marketplaceId, &fbaMap);
+
+            for (auto &item : items) {
+                if (item.sku.isEmpty()) {
+                    item.sku = fbaMap.value(item.asin);
+                    if (!item.sku.isEmpty())
+                        qDebug() << "PaneSizing: ASIN" << item.asin << "resolved from FBA Inventory API:" << item.sku;
+                }
+            }
 
             if (m_productWorkingDir.exists()) {
                 QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
@@ -5150,6 +5316,11 @@ QCoro::Task<void> PaneSizing::_resolveSkus(QList<AsinSku> &items,
             if (item.sku.isEmpty()) { anyMissing = true; break; }
 
         if (anyMissing) {
+            qDebug() << "PaneSizing: some SKUs still missing after report. ASINs:" << [&]() {
+                QStringList missing;
+                for (const auto &it : items) if (it.sku.isEmpty()) missing << it.asin;
+                return missing;
+            }();
             QDialog skuDlg(this);
             skuDlg.setWindowTitle(tr("Enter SKUs"));
             auto *skuLayout = new QVBoxLayout(&skuDlg);
@@ -5656,30 +5827,61 @@ QCoro::Task<void> PaneSizing::_loadBrokenChildData(bool forceRefresh)
         for (const auto &row : m_brokenChildTable->rows()) {
             if (asinToSku.value(row.asin).isEmpty()) {
                 const QString s = ps.value(QStringLiteral("sizing/skus/") + row.asin).toString();
-                if (!s.isEmpty()) asinToSku.insert(row.asin, s);
+                if (!s.isEmpty()) {
+                    asinToSku.insert(row.asin, s);
+                    qDebug() << "PaneSizing: ASIN" << row.asin << "resolved from settings.ini:" << s;
+                }
             }
             if (!row.parentAsin.isEmpty() && asinToSku.value(row.parentAsin).isEmpty()) {
                 const QString s = ps.value(QStringLiteral("sizing/skus/") + row.parentAsin).toString();
-                if (!s.isEmpty()) asinToSku.insert(row.parentAsin, s);
+                if (!s.isEmpty()) {
+                    asinToSku.insert(row.parentAsin, s);
+                    qDebug() << "PaneSizing: parent ASIN" << row.parentAsin << "resolved from settings.ini:" << s;
+                }
             }
         }
     }
 
-    // 2. If any child SKU is still missing, run the listing report to fill the gaps.
-    bool anyChildSkuMissing = false;
-    for (const auto &row : m_brokenChildTable->rows())
-        if (asinToSku.value(row.asin).isEmpty()) { anyChildSkuMissing = true; break; }
+    // 2. If any child SKU is still missing, run the listing reports to fill the gaps.
+    // We check ALL marketplaces currently in the country list.
+    {
+        QStringList missingAsins;
+        for (const auto &row : m_brokenChildTable->rows())
+            if (asinToSku.value(row.asin).isEmpty()) missingAsins << row.asin;
 
-    if (anyChildSkuMissing && m_api) {
-        const QString reportMpId = firstMarketplaceIdFromCountryList(ui->listWidgetCountries);
-        if (!reportMpId.isEmpty()) {
-            QHash<QString, QString> reportMap;
-            co_await m_api->fetchAllSkusViaReport(reportMpId, &reportMap);
+        if (!missingAsins.isEmpty() && m_api) {
+            // Collect all available marketplace IDs
+            QStringList mpIds;
+            for (int i = 0; i < ui->listWidgetCountries->count(); ++i) {
+                const QString text = ui->listWidgetCountries->item(i)->text().toLower();
+                if (text.contains(QStringLiteral("(missing)"))) continue;
+                const QString code = text.split(QLatin1Char(' ')).first().trimmed();
+                const auto *m = AmazonMarketplace::forCountryCode(code);
+                if (m) mpIds << m->marketplaceId();
+            }
 
-            for (const auto &row : m_brokenChildTable->rows()) {
-                if (asinToSku.value(row.asin).isEmpty()) {
-                    const QString s = reportMap.value(row.asin);
-                    if (!s.isEmpty()) asinToSku.insert(row.asin, s);
+            for (const QString &mpId : mpIds) {
+                QHash<QString, QString> reportMap;
+                co_await _fetchAllSkusCached(mpId, &reportMap, forceRefresh);
+
+                bool foundSomething = false;
+                for (const QString &asin : std::as_const(missingAsins)) {
+                    if (asinToSku.value(asin).isEmpty()) {
+                        const QString s = reportMap.value(asin);
+                        if (!s.isEmpty()) {
+                            asinToSku.insert(asin, s);
+                            qDebug() << "PaneSizing: ASIN" << asin << "resolved from global report cache (" << mpId << "):" << s;
+                            foundSomething = true;
+                        }
+                    }
+                }
+
+                // Update missingAsins for next marketplace loop
+                if (foundSomething) {
+                    missingAsins.clear();
+                    for (const auto &row : m_brokenChildTable->rows())
+                        if (asinToSku.value(row.asin).isEmpty()) missingAsins << row.asin;
+                    if (missingAsins.isEmpty()) break;
                 }
             }
         }
@@ -5964,7 +6166,7 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
         const QString reportMpId = firstMarketplaceIdFromCountryList(ui->listWidgetCountries);
 
         QHash<QString, QString> reportMap;
-        co_await m_api->fetchAllSkusViaReport(reportMpId, &reportMap);
+        co_await _fetchAllSkusCached(reportMpId, &reportMap);
 
         if (reportMap.isEmpty() && !m_api->lastError().isEmpty()) {
             appendLog(tr("Reports API error: %1").arg(m_api->lastError()));
@@ -6363,4 +6565,13 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
     if (statusLabelPtr) statusLabelPtr->setText(tr("Done."));
     if (closeBtnPtr)    closeBtnPtr->setEnabled(true);
     co_return;
+}
+
+void PaneSizing::onEditPromptsClicked()
+{
+    APlusWorkflow *wf = _currentWorkflow();
+    if (!wf) return;
+
+    DialogEditPrompts dlg(wf, this);
+    dlg.exec();
 }

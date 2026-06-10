@@ -3,6 +3,7 @@
 
 #include <QCoreApplication>
 #include <QFileInfo>
+#include <QSettings>
 
 namespace {
 
@@ -54,6 +55,11 @@ QStringList orderColors(const QStringList &colors, const QString &focusColor)
     return ordered;
 }
 
+QString workflowSettingKey(const QString &workflowId, const QString &key)
+{
+    return QStringLiteral("aplus/workflows/%1/%2").arg(workflowId, key);
+}
+
 } // namespace
 
 // ============================================================================
@@ -74,6 +80,54 @@ public:
         case 1: return QCoreApplication::translate("APlusWorkflow", "Mobile image");
         default: return {};
         }
+    }
+
+    QString defaultDesktopPrompt(int step) const override
+    {
+        QSettings s;
+        QString val = s.value(workflowSettingKey(id(), QStringLiteral("step%1_desktop").arg(step))).toString();
+        if (val.isEmpty()) {
+            if (step == 0) return QCoreApplication::translate("APlusWorkflow",
+                "Generate a professional Amazon A+ desktop marketing image "
+                "(970x600 px, landscape). Save as desktop.png in the current directory.");
+        }
+        return val;
+    }
+
+    QString defaultMobilePrompt(int step) const override
+    {
+        QSettings s;
+        QString val = s.value(workflowSettingKey(id(), QStringLiteral("step%1_mobile").arg(step))).toString();
+        if (val.isEmpty()) {
+            if (step == 1) return QCoreApplication::translate("APlusWorkflow",
+                "Generate a professional Amazon A+ mobile marketing image "
+                "(600x600 px, square). Save as mobile.png in the current directory.");
+        }
+        return val;
+    }
+
+    int versionCount(int step) const override
+    {
+        QSettings s;
+        return s.value(workflowSettingKey(id(), QStringLiteral("step%1_versionCount").arg(step)), 1).toInt();
+    }
+
+    void setDefaultDesktopPrompt(int step, const QString &prompt) override
+    {
+        QSettings s;
+        s.setValue(workflowSettingKey(id(), QStringLiteral("step%1_desktop").arg(step)), prompt);
+    }
+
+    void setDefaultMobilePrompt(int step, const QString &prompt) override
+    {
+        QSettings s;
+        s.setValue(workflowSettingKey(id(), QStringLiteral("step%1_mobile").arg(step)), prompt);
+    }
+
+    void setVersionCount(int step, int count) override
+    {
+        QSettings s;
+        s.setValue(workflowSettingKey(id(), QStringLiteral("step%1_versionCount").arg(step)), count);
     }
 
     QList<ImageSlotSpec> buildSlots(
@@ -102,24 +156,23 @@ public:
                 QCoreApplication::translate("APlusWorkflow", "Image 2")});
         }
 
-        const QString desktopSpec = QCoreApplication::translate("APlusWorkflow",
-            "Generate a professional Amazon A+ desktop marketing image "
-            "(970x600 px, landscape). Save as desktop.png in the current directory.");
-        const QString mobileSpec  = QCoreApplication::translate("APlusWorkflow",
-            "Generate a professional Amazon A+ mobile marketing image "
-            "(600x600 px, square). Save as mobile.png in the current directory.");
+        const QString desktopSpec = defaultDesktopPrompt(0);
+        const QString mobileSpec  = defaultMobilePrompt(1);
 
         const QString desktopPreamble = buildPreamble(productDesc, mainImageHint, desktopInstr);
         const QString mobilePreamble  = buildPreamble(productDesc, mainImageHint, mobileInstr);
 
         QList<ImageSlotSpec> result;
+        int i = 0;
         for (const auto &[eid, dn] : std::as_const(elementIds)) {
             ImageSlotSpec spec;
             spec.elementId     = eid;
             spec.displayName   = dn;
             spec.desktopPrompt = desktopPreamble + desktopSpec;
             spec.mobilePrompt  = mobilePreamble  + mobileSpec;
+            spec.versionCount  = versionCount(i % stepCount());
             result << spec;
+            i++;
         }
         return result;
     }
@@ -144,6 +197,95 @@ public:
         case 2: return QCoreApplication::translate("APlusWorkflow", "Detail / Fabric");
         default: return {};
         }
+    }
+
+    QString defaultDesktopPrompt(int step) const override
+    {
+        QSettings s;
+        QString val = s.value(workflowSettingKey(id(), QStringLiteral("step%1_desktop").arg(step))).toString();
+        if (val.isEmpty()) {
+            switch (step) {
+            case 0: return QCoreApplication::translate("APlusWorkflow",
+                "Generate a professional Amazon A+ desktop lifestyle marketing image "
+                "(970x600 px, landscape). Show %1 models in the same scene, each "
+                "wearing the product in a different color: %2. "
+                "Choose a background that matches the product's typical occasion of use and "
+                "raises perceived value, status and desire to buy. "
+                "Aspirational, premium quality, no text overlays, no watermarks. "
+                "Save as desktop.png in the current directory.");
+            case 1: return QCoreApplication::translate("APlusWorkflow",
+                "Generate a professional Amazon A+ desktop marketing image (970x600 px, landscape) "
+                "showing 3 models all wearing the product in %1. "
+                "Use 3 different angles or poses to highlight the cut and fit. "
+                "Aspirational lifestyle scene, premium quality, raises perceived value and "
+                "desire to buy. No text overlays, no watermarks. "
+                "Save as desktop.png in the current directory.");
+            case 2: return QCoreApplication::translate("APlusWorkflow",
+                "Generate a professional Amazon A+ desktop image (970x600 px, landscape) "
+                "showing one model wearing the product%1, paired with a prominent close-up "
+                "of the fabric texture or a key design feature (stitching, weave, hardware, "
+                "trim — whichever best highlights craftsmanship). "
+                "%2 "
+                "Goal: convey quality, craftsmanship and premium feel. "
+                "No text overlays, no watermarks. "
+                "Save as desktop.png in the current directory.");
+            }
+        }
+        return val;
+    }
+
+    QString defaultMobilePrompt(int step) const override
+    {
+        QSettings s;
+        QString val = s.value(workflowSettingKey(id(), QStringLiteral("step%1_mobile").arg(step))).toString();
+        if (val.isEmpty()) {
+            switch (step) {
+            case 0: return QCoreApplication::translate("APlusWorkflow",
+                "Generate a professional Amazon A+ mobile lifestyle marketing image "
+                "(600x600 px, square). Show %1 models in the same scene, each wearing the "
+                "product in a different color: %2. "
+                "Background matches the product's typical occasion of use, aspirational, "
+                "premium quality, no text overlays. "
+                "Save as mobile.png in the current directory.");
+            case 1: return QCoreApplication::translate("APlusWorkflow",
+                "Generate a professional Amazon A+ mobile marketing image (600x600 px, square) "
+                "showing 2 models wearing the product in %1. "
+                "Aspirational lifestyle scene, premium quality, no text overlays. "
+                "Save as mobile.png in the current directory.");
+            case 2: return QCoreApplication::translate("APlusWorkflow",
+                "Generate a professional Amazon A+ mobile image (600x600 px, square) "
+                "showing one model wearing the product%1 with a prominent close-up of "
+                "the fabric texture or key design feature. "
+                "%2 "
+                "Convey quality and craftsmanship, no text overlays. "
+                "Save as mobile.png in the current directory.");
+            }
+        }
+        return val;
+    }
+
+    int versionCount(int step) const override
+    {
+        QSettings s;
+        return s.value(workflowSettingKey(id(), QStringLiteral("step%1_versionCount").arg(step)), 1).toInt();
+    }
+
+    void setDefaultDesktopPrompt(int step, const QString &prompt) override
+    {
+        QSettings s;
+        s.setValue(workflowSettingKey(id(), QStringLiteral("step%1_desktop").arg(step)), prompt);
+    }
+
+    void setDefaultMobilePrompt(int step, const QString &prompt) override
+    {
+        QSettings s;
+        s.setValue(workflowSettingKey(id(), QStringLiteral("step%1_mobile").arg(step)), prompt);
+    }
+
+    void setVersionCount(int step, int count) override
+    {
+        QSettings s;
+        s.setValue(workflowSettingKey(id(), QStringLiteral("step%1_versionCount").arg(step)), count);
     }
 
     QList<ImageSlotSpec> buildSlots(
@@ -173,29 +315,17 @@ public:
             spec.elementId   = QStringLiteral("image_group");
             spec.displayName = QCoreApplication::translate("APlusWorkflow", "Group Shot");
 
-            const QString desktopSpec = QCoreApplication::translate("APlusWorkflow",
-                "Generate a professional Amazon A+ desktop lifestyle marketing image "
-                "(970x600 px, landscape). Show %1 models in the same scene, each "
-                "wearing the product in a different color: %2. "
-                "Choose a background that matches the product's typical occasion of use and "
-                "raises perceived value, status and desire to buy. "
-                "Aspirational, premium quality, no text overlays, no watermarks. "
-                "Save as desktop.png in the current directory.")
+            const QString desktopSpec = defaultDesktopPrompt(0)
                 .arg(desktopModels)
                 .arg(desktopColors.join(QStringLiteral(", ")));
 
-            const QString mobileSpec = QCoreApplication::translate("APlusWorkflow",
-                "Generate a professional Amazon A+ mobile lifestyle marketing image "
-                "(600x600 px, square). Show %1 models in the same scene, each wearing the "
-                "product in a different color: %2. "
-                "Background matches the product's typical occasion of use, aspirational, "
-                "premium quality, no text overlays. "
-                "Save as mobile.png in the current directory.")
+            const QString mobileSpec = defaultMobilePrompt(0)
                 .arg(mobileModels)
                 .arg(mobileColors.join(QStringLiteral(", ")));
 
             spec.desktopPrompt = buildPreamble(productDesc, mainImageHint, groupInstr) + desktopSpec;
             spec.mobilePrompt  = buildPreamble(productDesc, mainImageHint, groupInstr) + mobileSpec;
+            spec.versionCount  = versionCount(0);
             result << spec;
         }
 
@@ -205,24 +335,12 @@ public:
             spec.elementId   = QStringLiteral("image_color_") + colorSafeId(color);
             spec.displayName = QCoreApplication::translate("APlusWorkflow", "Color — %1").arg(color);
 
-            const QString desktopSpec = QCoreApplication::translate("APlusWorkflow",
-                "Generate a professional Amazon A+ desktop marketing image (970x600 px, landscape) "
-                "showing 3 models all wearing the product in %1. "
-                "Use 3 different angles or poses to highlight the cut and fit. "
-                "Aspirational lifestyle scene, premium quality, raises perceived value and "
-                "desire to buy. No text overlays, no watermarks. "
-                "Save as desktop.png in the current directory.")
-                .arg(color);
-
-            const QString mobileSpec = QCoreApplication::translate("APlusWorkflow",
-                "Generate a professional Amazon A+ mobile marketing image (600x600 px, square) "
-                "showing 2 models wearing the product in %1. "
-                "Aspirational lifestyle scene, premium quality, no text overlays. "
-                "Save as mobile.png in the current directory.")
-                .arg(color);
+            const QString desktopSpec = defaultDesktopPrompt(1).arg(color);
+            const QString mobileSpec = defaultMobilePrompt(1).arg(color);
 
             spec.desktopPrompt = buildPreamble(productDesc, mainImageHint, colorInstr) + desktopSpec;
             spec.mobilePrompt  = buildPreamble(productDesc, mainImageHint, colorInstr) + mobileSpec;
+            spec.versionCount  = versionCount(1);
             result << spec;
         }
 
@@ -248,28 +366,12 @@ public:
                     "design details visible in the reference image — do not invent, add or "
                     "alter the fabric pattern, weave or stitching.");
 
-            const QString desktopSpec = QCoreApplication::translate("APlusWorkflow",
-                "Generate a professional Amazon A+ desktop image (970x600 px, landscape) "
-                "showing one model wearing the product%1, paired with a prominent close-up "
-                "of the fabric texture or a key design feature (stitching, weave, hardware, "
-                "trim — whichever best highlights craftsmanship). "
-                "%2 "
-                "Goal: convey quality, craftsmanship and premium feel. "
-                "No text overlays, no watermarks. "
-                "Save as desktop.png in the current directory.")
-                .arg(colorMention, fabricAccuracy);
-
-            const QString mobileSpec = QCoreApplication::translate("APlusWorkflow",
-                "Generate a professional Amazon A+ mobile image (600x600 px, square) "
-                "showing one model wearing the product%1 with a prominent close-up of "
-                "the fabric texture or key design feature. "
-                "%2 "
-                "Convey quality and craftsmanship, no text overlays. "
-                "Save as mobile.png in the current directory.")
-                .arg(colorMention, fabricAccuracy);
+            const QString desktopSpec = defaultDesktopPrompt(2).arg(colorMention, fabricAccuracy);
+            const QString mobileSpec = defaultMobilePrompt(2).arg(colorMention, fabricAccuracy);
 
             spec.desktopPrompt = buildPreamble(productDesc, mainImageHint, detailInstr) + desktopSpec;
             spec.mobilePrompt  = buildPreamble(productDesc, mainImageHint, detailInstr) + mobileSpec;
+            spec.versionCount  = versionCount(2);
             result << spec;
         }
 

@@ -83,6 +83,7 @@ private slots:
     void onAplusTreeClicked(const QModelIndex &idx);
     void onAplusSelectionChanged(const QModelIndex &current, const QModelIndex &previous);
     void onAplusUploadClicked();
+    void onEditPromptsClicked();
 
     void onPickSizeTableTemplateClicked();
     void onGenerateSizeTableXlsxClicked();
@@ -167,6 +168,9 @@ private:
     QCoro::Task<void> _resolveSkus(QList<AsinSku> &items,
                                    const QString &marketplaceId,
                                    bool *cancelled);
+    QCoro::Task<void> _fetchAllSkusCached(const QString &marketplaceId,
+                                          QHash<QString, QString> *asinToSku,
+                                          bool forceRefresh = false);
     void _downloadMainImage(const QString &url, const QString &asin);
     void _downloadVariantImages(const QList<QPair<QString, QStringList>> &colorImages);
     void _runCliPrompt(const QString &executable, const QStringList &args,

@@ -104,7 +104,7 @@ private:
     QModelIndex _makeTopIndex(int familyRow, int col) const;
     QModelIndex _makeChildIndex(int familyRow, int childRow, int col) const;
 
-    QStringList _readAsinsFromXlsx(const QString& xlsxPath) const;
+    QMap<QString, QString> _readAsinsFromXlsx(const QString& xlsxPath) const;
 
     void _loadJson();
     void _saveJson();

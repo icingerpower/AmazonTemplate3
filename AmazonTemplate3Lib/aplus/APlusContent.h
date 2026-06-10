@@ -22,6 +22,7 @@ struct APlusElement {
     QList<APlusVersion> versions;
 
     const APlusVersion *current() const;
+    APlusVersion       *current();
 };
 
 class APlusContent : public QObject
