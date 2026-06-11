@@ -412,6 +412,37 @@ static QStringList readSkusFromXlsx(const QString &path)
     return result;
 }
 
+// For per-color A+ slots (elementId starts with "image_color_"), scan the product
+// directory for matching reference photos and inject their absolute paths into the
+// prompt.  This prevents the AI from defaulting to the wrong-color main image.
+static void injectColorImageHints(QList<ImageSlotSpec> &imageSpecs, const QDir &productDir)
+{
+    static const QString kPrefix = QStringLiteral("image_color_");
+    for (ImageSlotSpec &spec : imageSpecs) {
+        if (!spec.elementId.startsWith(kPrefix)) continue;
+        const QString colorId = spec.elementId.mid(kPrefix.size()); // e.g. "blue-floral"
+
+        QStringList refPaths;
+        for (const QString &f : productDir.entryList(QDir::Files)) {
+            if (f.startsWith(colorId + QLatin1Char('-'))
+                || f.startsWith(colorId + QLatin1Char('_')))
+                refPaths.append(productDir.absoluteFilePath(f));
+        }
+        refPaths.sort();
+        if (refPaths.isEmpty()) continue;
+
+        const QString hint =
+            QCoreApplication::translate("PaneSizing",
+                "Reference photos for this exact color variant (%1) — use ONLY these:\n%2\n"
+                "Reproduce the exact color, pattern and design faithfully. "
+                "Do NOT substitute another color variant.")
+            .arg(colorId, refPaths.join(QStringLiteral("\n")));
+
+        spec.desktopPrompt += QStringLiteral("\n\n") + hint;
+        spec.mobilePrompt  += QStringLiteral("\n\n") + hint;
+    }
+}
+
 // Resolve the first marketplace ID matching a country code from the
 // listWidgetCountries widget. Falls back to UK (A1F83G8C2ARO7P) if no entry
 // matches a known country code.
@@ -2253,6 +2284,21 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
 
     setAplusStatus(progressUi, tr("Done!"), totalSteps);
     appendAplusLog(progressUi.logPtr, tr("✓ All uploads complete."));
+
+    // Warn if size images exist for this product but have never been uploaded.
+    if (!m_groupImages.isEmpty()) {
+        bool uploaded = false;
+        if (m_productWorkingDir.exists()) {
+            QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                        QSettings::IniFormat);
+            uploaded = s.contains(QStringLiteral("sizing/sizeImageUploaded"));
+        }
+        if (!uploaded)
+            QMessageBox::warning(this, tr("A+ Content Uploaded"),
+                tr("A+ content was uploaded successfully.\n\n"
+                   "Don't forget to also upload the size images using the "
+                   "\"Upload\" button on the Size Image tab."));
+    }
 }
 
 void PaneSizing::_rebuildAplusMenu()
@@ -2779,18 +2825,20 @@ void PaneSizing::onAplusGenerateAll()
             colors << color;
     const QString focusColor = colors.isEmpty() ? QString{} : colors.first();
 
-    // Build main image hint (used by the workflow's preamble + by FAQ prompt below)
+    // Build main image hint (used by the workflow's preamble + by FAQ prompt below).
+    // Use the absolute path so the AI can find the file regardless of its workDir.
     const QString mainImageHint = m_mainImageLocalPath.isEmpty() ? QString{}
-        : tr("A product photo is available in the working directory as \"%1\". "
+        : tr("A product photo is available at \"%1\". "
              "You may use it as reference.")
-          .arg(QFileInfo(m_mainImageLocalPath).fileName());
+          .arg(m_mainImageLocalPath);
 
     const QStringList stepInstrs = _stepInstructions();
 
-    // Build all image slot specs from the workflow.
-    const QList<ImageSlotSpec> slotSpecs = workflow->buildSlots(
+    // Build all image slot specs from the workflow, then inject per-color references.
+    QList<ImageSlotSpec> slotSpecs = workflow->buildSlots(
         m_aplusContent.get(), colors, focusColor,
         description, mainImageHint, stepInstrs);
+    injectColorImageHints(slotSpecs, m_productWorkingDir);
 
     // Ensure all destination element directories exist for the planned slots.
     for (const ImageSlotSpec &spec : slotSpecs)
@@ -3869,9 +3917,9 @@ void PaneSizing::onAplusGenerateImage(const QString &elementId)
 
     const QString description = ui->textEditAttributes->toPlainText().trimmed();
     const QString mainImageHint = m_mainImageLocalPath.isEmpty() ? QString{}
-        : tr("A product photo is available in the working directory as \"%1\". "
+        : tr("A product photo is available at \"%1\". "
              "You may use it as reference.")
-          .arg(QFileInfo(m_mainImageLocalPath).fileName());
+          .arg(m_mainImageLocalPath);
 
     APlusWorkflow *workflow = _currentWorkflow();
     const QStringList stepInstrs = _stepInstructions();
@@ -3885,9 +3933,10 @@ void PaneSizing::onAplusGenerateImage(const QString &elementId)
                 colors << color;
         const QString focusColor = colors.isEmpty() ? QString{} : colors.first();
 
-        const QList<ImageSlotSpec> slotSpecs = workflow->buildSlots(
+        QList<ImageSlotSpec> slotSpecs = workflow->buildSlots(
             m_aplusContent.get(), colors, focusColor,
             description, mainImageHint, stepInstrs);
+        injectColorImageHints(slotSpecs, m_productWorkingDir);
 
         for (const auto &spec : slotSpecs) {
             if (spec.elementId == elementId) {
@@ -4213,15 +4262,19 @@ void PaneSizing::onAplusGenerateSelected()
         if (!color.isEmpty()) colors << color;
     const QString focusColor = colors.isEmpty() ? QString{} : colors.first();
     const QString mainImageHint = m_mainImageLocalPath.isEmpty() ? QString{}
-        : tr("A product photo is available in the working directory as \"%1\". "
+        : tr("A product photo is available at \"%1\". "
              "You may use it as reference.")
-          .arg(QFileInfo(m_mainImageLocalPath).fileName());
+          .arg(m_mainImageLocalPath);
 
     QMap<QString, ImageSlotSpec> slotByElemId;
-    for (const ImageSlotSpec &spec : workflow->buildSlots(
-             m_aplusContent.get(), colors, focusColor,
-             description, mainImageHint, _stepInstructions()))
-        slotByElemId.insert(spec.elementId, spec);
+    {
+        QList<ImageSlotSpec> slotList = workflow->buildSlots(
+            m_aplusContent.get(), colors, focusColor,
+            description, mainImageHint, _stepInstructions());
+        injectColorImageHints(slotList, m_productWorkingDir);
+        for (const ImageSlotSpec &spec : slotList)
+            slotByElemId.insert(spec.elementId, spec);
+    }
 
     QList<SlotSel> finalSels;
     for (const SlotSel &sel : std::as_const(selections))
@@ -5508,6 +5561,12 @@ QCoro::Task<void> PaneSizing::_uploadSizeImage(int imageIndex)
     if (progPtr) progPtr->close();
 
     if (errors.isEmpty()) {
+        if (m_productWorkingDir.exists()) {
+            QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                        QSettings::IniFormat);
+            s.setValue(QStringLiteral("sizing/sizeImageUploaded"),
+                       QDateTime::currentDateTime().toString(Qt::ISODate));
+        }
         QMessageBox::information(this, tr("Upload"),
             tr("Image uploaded to %1 listing(s).").arg(successCount));
     } else {
