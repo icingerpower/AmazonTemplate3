@@ -37,6 +37,10 @@ public:
     virtual ~AbstractSizeCategory() = default;
     virtual QString                      displayName()       const = 0;
     virtual bool                         isApparel()         const { return true; }
+    // Returns true when all country-group rows must always be visible together
+    // (e.g. shoes, where EU/US/UK/JP all appear on the same chart).
+    // When true, _renderAndSaveChart skips group-row filtering for translated charts.
+    virtual bool                         allGroupsAlwaysVisible() const { return false; }
     virtual QList<MeasurementField>      measurementFields() const = 0;
     virtual QList<CountryGroup>          countryGroups()     const = 0;
     virtual QString                      referenceKey()      const { return QStringLiteral("FR"); }

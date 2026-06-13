@@ -46,6 +46,15 @@ public:
         const QStringList  &stepInstructions
     ) const = 0;
 
+    // Category key scopes stored prompts so each size category keeps its own set.
+    // Call setCategoryKey() before any prompt read/write (PaneSizing does this in
+    // _currentWorkflow() automatically).
+    void    setCategoryKey(const QString &key) { m_categoryKey = key; }
+    QString categoryKey()                const { return m_categoryKey; }
+
     static const QList<APlusWorkflow *> &all();
     static APlusWorkflow *findById(const QString &id);
+
+protected:
+    QString m_categoryKey;
 };

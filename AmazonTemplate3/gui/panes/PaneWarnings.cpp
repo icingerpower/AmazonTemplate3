@@ -59,6 +59,7 @@
 #include <QVBoxLayout>
 
 #include <QCoro/QCoroNetworkReply>
+#include <QCoro/QCoroSignal>
 
 #include <xlsxdocument.h>
 
@@ -78,6 +79,78 @@ static bool isBlacklisted(const QString &attributeId)
     // image-moderation, etc.) — these cannot be fixed by AI, so blacklist them.
     static const QRegularExpression kNumericRe(QStringLiteral("^\\d+$"));
     return kNumericRe.match(attributeId).hasMatch();
+}
+
+// Parse warnings pasted from Amazon Seller Central's Account Health page.
+// Anchors on "ASIN: <10-char>" lines; maps the violation type to an attributeId.
+static QList<WarningRow> parsePastedWarnings(const QString &text)
+{
+    static const QHash<QString, QString> kViolationAttr = {
+        {QStringLiteral("Bullet Point Removed"),        QStringLiteral("bullet_point")},
+        {QStringLiteral("Product Description Removed"), QStringLiteral("product_description")},
+    };
+    static const QRegularExpression kAsinRe(QStringLiteral("^ASIN:\\s*([A-Z0-9]{10})$"));
+    static const QRegularExpression kDateRe(
+        QStringLiteral("^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{1,2},\\s+\\d{4}$"));
+
+    QStringList lines;
+    for (const QString &l : text.split(QLatin1Char('\n'))) {
+        const QString t = l.trimmed();
+        if (!t.isEmpty()) lines.append(t);
+    }
+
+    // Skip optional header block (up to and including "Next steps")
+    int start = 0;
+    for (int i = 0; i < lines.size(); ++i) {
+        if (lines.at(i) == QStringLiteral("Next steps")) {
+            start = i + 1;
+            break;
+        }
+    }
+
+    QList<WarningRow> result;
+
+    for (int i = start; i < lines.size(); ++i) {
+        const auto m = kAsinRe.match(lines.at(i));
+        if (!m.hasMatch()) continue;
+
+        const QString asin = m.captured(1);
+
+        // Title: line immediately before ASIN, skip if it looks like a date/header
+        QString title;
+        if (i >= 1) {
+            const QString candidate = lines.at(i - 1);
+            if (!kDateRe.match(candidate).hasMatch()
+                && candidate != QStringLiteral("What was affected?")
+                && !candidate.startsWith(QStringLiteral("Product Attribute")))
+                title = candidate;
+        }
+
+        // Violation: i+2 (skip at-risk sales at i+1); fallback to i+1
+        QString attributeId;
+        QString issueMessage;
+        for (int offset : {2, 1}) {
+            const int idx = i + offset;
+            if (idx >= lines.size()) continue;
+            const QString candidate = lines.at(idx);
+            if (kViolationAttr.contains(candidate)) {
+                attributeId  = kViolationAttr.value(candidate);
+                issueMessage = candidate;
+                break;
+            }
+        }
+
+        if (attributeId.isEmpty()) continue; // unknown violation, skip
+
+        WarningRow row;
+        row.asin         = asin;
+        row.title        = title;
+        row.attributeId  = attributeId;
+        row.issueMessage = issueMessage;
+        result.append(row);
+    }
+
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -371,7 +444,7 @@ QCoro::Task<void> PaneWarnings::_onLoadWarnings()
     auto *progressDlg = new QDialog(parentWidget());
     progressDlg->setAttribute(Qt::WA_DeleteOnClose);
     // Non-modal: PaneWarnings is disabled via setEnabled(false); other panes stay active.
-    progressDlg->setWindowTitle(tr("Loading warnings…"));
+    progressDlg->setWindowTitle(tr("Loading warnings… [%1]").arg(countryCodeUpper));
     progressDlg->resize(560, 400);
     auto *pLayout = new QVBoxLayout(progressDlg);
 
@@ -611,6 +684,173 @@ QCoro::Task<void> PaneWarnings::_onLoadWarnings()
 }
 
 // ---------------------------------------------------------------------------
+// _onPasteWarnings — user pastes warnings, parse them, enrich via API.
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> PaneWarnings::_onPasteWarnings()
+{
+    // 1. Input dialog: user pastes the warnings text
+    QDialog inputDlg(this);
+    inputDlg.setWindowTitle(tr("Paste warnings from Amazon Seller Central"));
+    inputDlg.resize(720, 500);
+    auto *dlgLayout = new QVBoxLayout(&inputDlg);
+    auto *label = new QLabel(
+        tr("Paste warnings copied from Account Health → Product Compliance:"), &inputDlg);
+    dlgLayout->addWidget(label);
+    auto *textEdit = new QTextEdit(&inputDlg);
+    textEdit->setPlaceholderText(tr("Paste here…"));
+    dlgLayout->addWidget(textEdit);
+    auto *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &inputDlg);
+    dlgLayout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &inputDlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &inputDlg, &QDialog::reject);
+
+    if (inputDlg.exec() != QDialog::Accepted) co_return;
+
+    const QString pasteText = textEdit->toPlainText();
+    if (pasteText.trimmed().isEmpty()) co_return;
+
+    // 2. Parse
+    QList<WarningRow> rows = parsePastedWarnings(pasteText);
+    if (rows.isEmpty()) {
+        QMessageBox::information(this, tr("No warnings found"),
+            tr("Could not recognize any warnings in the pasted text.\n\n"
+               "Expected format: paste from Amazon Account Health → Product Compliance."));
+        co_return;
+    }
+
+    // 3. Validate marketplace selection
+    QListWidgetItem *selItem = ui->listWidgetAmazon->currentItem();
+    if (!selItem || !(selItem->flags() & Qt::ItemIsSelectable)) {
+        QMessageBox::warning(this, tr("No marketplace"),
+            tr("Please select a marketplace first."));
+        co_return;
+    }
+    const QString countryCode = selItem->data(Qt::UserRole).toString();
+    const AmazonMarketplace *mp = AmazonMarketplace::forCountryCode(countryCode);
+    if (!mp) co_return;
+    const QString marketplaceId = mp->marketplaceId();
+    const QString mktSubdir     = QStringLiteral("warnings/%1").arg(countryCode.toLower());
+
+    // 4. Progress dialog (same pattern as _onLoadWarnings)
+    auto *progressDlg = new QDialog(parentWidget());
+    progressDlg->setAttribute(Qt::WA_DeleteOnClose);
+    progressDlg->setWindowTitle(tr("Fetching listing data… [%1]").arg(countryCode));
+    progressDlg->resize(560, 400);
+    auto *pLayout = new QVBoxLayout(progressDlg);
+
+    auto *statusLabel = new QLabel(tr("Starting…"), progressDlg);
+    QFont boldFont = statusLabel->font();
+    boldFont.setBold(true);
+    statusLabel->setFont(boldFont);
+    pLayout->addWidget(statusLabel);
+
+    auto *progressBar = new QProgressBar(progressDlg);
+    progressBar->setRange(0, 0);
+    pLayout->addWidget(progressBar);
+
+    auto *logEdit = new QTextEdit(progressDlg);
+    logEdit->setReadOnly(true);
+    logEdit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    pLayout->addWidget(logEdit);
+
+    auto *btnLayout2 = new QHBoxLayout();
+    auto *copyBtn = new QPushButton(tr("Copy log"), progressDlg);
+    btnLayout2->addWidget(copyBtn);
+    btnLayout2->addStretch();
+    auto *closeBtns = new QDialogButtonBox(QDialogButtonBox::Close, progressDlg);
+    QPushButton *closeBtn = closeBtns->button(QDialogButtonBox::Close);
+    if (closeBtn) closeBtn->setEnabled(false);
+    btnLayout2->addWidget(closeBtns);
+    pLayout->addLayout(btnLayout2);
+
+    QPointer<QLabel>       statusLabelPtr(statusLabel);
+    QPointer<QProgressBar> progressBarPtr(progressBar);
+    QPointer<QTextEdit>    logEditPtr(logEdit);
+    QPointer<QPushButton>  closeBtnPtr(closeBtn);
+
+    auto appendLog = [logEditPtr](const QString &line) {
+        if (!logEditPtr) return;
+        const QString ts = QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss"));
+        logEditPtr->append(QStringLiteral("[%1] %2").arg(ts, line));
+    };
+
+    connect(copyBtn, &QPushButton::clicked, progressDlg, [logEditPtr]() {
+        if (logEditPtr) QGuiApplication::clipboard()->setText(logEditPtr->toPlainText());
+    });
+    connect(closeBtns, &QDialogButtonBox::rejected, progressDlg, &QDialog::close);
+
+    AmazonWarningsApi *api = _api();
+
+    connect(api, &AmazonWarningsApi::logMessage, progressDlg,
+            [statusLabelPtr, appendLog](const QString &msg) {
+        if (statusLabelPtr) statusLabelPtr->setText(msg);
+        appendLog(msg);
+    });
+    connect(api, &AmazonWarningsApi::progressChanged, progressDlg,
+            [progressBarPtr](int current, int total) {
+        if (!progressBarPtr) return;
+        progressBarPtr->setRange(0, total);
+        progressBarPtr->setValue(current);
+    });
+
+    m_progressDlg = progressDlg;
+    progressDlg->show();
+    setEnabled(false);
+
+    appendLog(tr("Parsed %1 warning(s) from paste.").arg(rows.size()));
+
+    // 5. Enrich rows with SKU + listing data via API
+    co_await api->enrichPastedRows(marketplaceId, &rows);
+
+    disconnect(api, &AmazonWarningsApi::logMessage,      progressDlg, nullptr);
+    disconnect(api, &AmazonWarningsApi::progressChanged, progressDlg, nullptr);
+
+    // Detect enrichment failure: if every row still has an empty SKU the FBA
+    // report step failed (FATAL, rate-limit, etc.).  Rows are still added so
+    // Ask AI can run, but warn the user that Upload will not work.
+    const bool enrichmentFailed = std::none_of(rows.constBegin(), rows.constEnd(),
+                                               [](const WarningRow &r){ return !r.sku.isEmpty(); });
+    if (enrichmentFailed) {
+        appendLog(tr("⚠ SKU enrichment failed (FBA report error — see log above). "
+                     "Rows will be added with no SKU: Ask AI works, Upload will not. "
+                     "Wait ~15 min before retrying to avoid the report rate limit."));
+        if (statusLabelPtr)
+            statusLabelPtr->setText(tr("⚠ Enrichment failed — rows added without SKU"));
+    }
+
+    // 6. Add to model (append — do not clear existing rows)
+    int added = 0;
+    for (const WarningRow &row : rows) {
+        if (isBlacklisted(row.attributeId)) {
+            const int r = ui->tableWidgetExcluded->rowCount();
+            ui->tableWidgetExcluded->insertRow(r);
+            ui->tableWidgetExcluded->setItem(r, 0, new QTableWidgetItem(row.asin));
+            ui->tableWidgetExcluded->setItem(r, 1, new QTableWidgetItem(row.sku));
+            ui->tableWidgetExcluded->setItem(r, 2, new QTableWidgetItem(row.attributeId));
+            ui->tableWidgetExcluded->setItem(r, 3, new QTableWidgetItem(row.value));
+        } else {
+            m_workingDir.mkpath(QStringLiteral("%1/%2").arg(mktSubdir, row.asin));
+            _downloadMainImage(row.mainImageUrl, row.asin, mktSubdir);
+            m_model->addRow(row);
+            ++added;
+        }
+    }
+
+    appendLog(tr("Added %1 row(s) to the warnings table.").arg(added));
+    if (statusLabelPtr) statusLabelPtr->setText(tr("Done."));
+    if (closeBtnPtr)    closeBtnPtr->setEnabled(true);
+
+    ui->tableViewWarnings->expandAll();
+    for (int col = 0; col < TreeProductWarnings::ColCount; ++col)
+        ui->tableViewWarnings->resizeColumnToContents(col);
+    ui->tableViewWarnings->header()->setStretchLastSection(true);
+
+    setEnabled(true);
+}
+
+// ---------------------------------------------------------------------------
 // _onAskAi — iterate non-AI-filled rows and run them through the selected CLI
 // ---------------------------------------------------------------------------
 
@@ -778,6 +1018,7 @@ QCoro::Task<void> PaneWarnings::_onAskAi()
     if (!cli) {
         QMessageBox::warning(this, tr("No CLI"),
                              tr("Please select a CLI in the combobox first."));
+        QTimer::singleShot(0, this, [this]() { emit askAiFinished(); });
         co_return;
     }
 
@@ -785,6 +1026,7 @@ QCoro::Task<void> PaneWarnings::_onAskAi()
     if (!selItem || !(selItem->flags() & Qt::ItemIsSelectable)) {
         QMessageBox::warning(this, tr("No marketplace"),
                              tr("Please select a marketplace first."));
+        QTimer::singleShot(0, this, [this]() { emit askAiFinished(); });
         co_return;
     }
     const QString countryCode = selItem->data(Qt::UserRole).toString();
@@ -852,6 +1094,7 @@ QCoro::Task<void> PaneWarnings::_onAskAi()
     if (candidates.isEmpty()) {
         QMessageBox::information(this, tr("Ask AI"),
                                  tr("All rows already have AI suggestions."));
+        QTimer::singleShot(0, this, [this]() { emit askAiFinished(); });
         co_return;
     }
 
@@ -869,7 +1112,7 @@ QCoro::Task<void> PaneWarnings::_onAskAi()
     auto *progressDlg = new QDialog(parentWidget());
     progressDlg->setAttribute(Qt::WA_DeleteOnClose);
     // Non-modal: PaneWarnings is disabled via setEnabled(false); other panes stay active.
-    progressDlg->setWindowTitle(tr("Asking AI…"));
+    progressDlg->setWindowTitle(tr("Asking AI… [%1]").arg(countryCode));
     progressDlg->resize(560, 400);
     auto *pLayout = new QVBoxLayout(progressDlg);
 
@@ -1111,6 +1354,7 @@ QCoro::Task<void> PaneWarnings::_onAskAi()
             else
                 ui->labelWarningsInfo->setText(
                     existing + tr("  •  %1 AI value(s) filled").arg(filled));
+            emit askAiFinished();
             return;
         }
 
@@ -1287,7 +1531,11 @@ QCoro::Task<void> PaneWarnings::_onUpload()
     auto *progressDlg = new QDialog(parentWidget());
     progressDlg->setAttribute(Qt::WA_DeleteOnClose);
     // Non-modal: PaneWarnings is disabled via setEnabled(false); other panes stay active.
-    progressDlg->setWindowTitle(tr("Uploading fixes…"));
+    {
+        const AmazonMarketplace *selMp = AmazonMarketplace::forMarketplaceId(marketplaceId);
+        const QString selCc = selMp ? selMp->countryCode() : marketplaceId;
+        progressDlg->setWindowTitle(tr("Uploading fixes… [%1]").arg(selCc));
+    }
     progressDlg->resize(560, 400);
     auto *pLayout = new QVBoxLayout(progressDlg);
 
@@ -1675,10 +1923,110 @@ void PaneWarnings::showEvent(QShowEvent *event)
     if (m_progressDlg) m_progressDlg->show();
 }
 
+// ---------------------------------------------------------------------------
+// _onAskAiUpload — chains Ask AI → Upload in one step.
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> PaneWarnings::_onAskAiUpload()
+{
+    m_askAiTask = _onAskAi();
+    co_await qCoro(this, &PaneWarnings::askAiFinished);
+
+    bool hasAiValues = false;
+    for (int vi = 0; vi < m_model->violationCount() && !hasAiValues; ++vi) {
+        const auto *vn = m_model->violationAt(vi);
+        if (!vn) continue;
+        for (const auto &child : vn->children)
+            if (!child.isCurrentValue && !child.aiValue.isEmpty())
+                { hasAiValues = true; break; }
+    }
+    if (hasAiValues)
+        co_await _onUpload();
+}
+
+// ---------------------------------------------------------------------------
+// _onLoadAskUpload — chains Load → Ask AI → Upload for the selected marketplace.
+// When "Do all Amazon" is checked, iterates every selectable marketplace in order.
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> PaneWarnings::_onLoadAskUpload()
+{
+    if (m_launchAllRunning) co_return;
+    m_launchAllRunning = true;
+    ui->buttonLoadAskUpload->setEnabled(false);
+
+    // Validate CLI upfront — Ask AI requires it.
+    AbstractCli *cli = ui->comboBoxCli->currentData().value<AbstractCli *>();
+    if (!cli) {
+        QMessageBox::warning(this, tr("Load/Ask/Upload"),
+                             tr("Please select a CLI in the combobox first."));
+        m_launchAllRunning = false;
+        ui->buttonLoadAskUpload->setEnabled(true);
+        co_return;
+    }
+
+    // Build ordered list of marketplaces to process.
+    // Current selection is always first; remaining items follow top-to-bottom.
+    QList<QListWidgetItem *> items;
+    QListWidgetItem *curItem = ui->listWidgetAmazon->currentItem();
+
+    if (ui->checkBoxDoAllAmazon->isChecked()) {
+        if (curItem && (curItem->flags() & Qt::ItemIsSelectable))
+            items.append(curItem);
+        for (int i = 0; i < ui->listWidgetAmazon->count(); ++i) {
+            QListWidgetItem *it = ui->listWidgetAmazon->item(i);
+            if (!it || !(it->flags() & Qt::ItemIsSelectable) || it == curItem) continue;
+            items.append(it);
+        }
+    } else {
+        if (!curItem || !(curItem->flags() & Qt::ItemIsSelectable)) {
+            QMessageBox::warning(this, tr("Load/Ask/Upload"),
+                                 tr("Please select a marketplace first."));
+            m_launchAllRunning = false;
+            ui->buttonLoadAskUpload->setEnabled(true);
+            co_return;
+        }
+        items.append(curItem);
+    }
+
+    for (QListWidgetItem *item : items) {
+        ui->listWidgetAmazon->setCurrentItem(item);
+
+        // Step 1: load violations.
+        co_await _onLoadWarnings();
+
+        // Step 2: ask AI (only if there are actionable violations).
+        if (m_model->violationCount() > 0) {
+            m_askAiTask = _onAskAi();
+            // _onAskAi() starts asynchronous callbacks; wait for the sentinel to fire
+            // the askAiFinished signal (emitted deferred to avoid sync vs. async race).
+            co_await qCoro(this, &PaneWarnings::askAiFinished);
+        }
+
+        // Step 3: upload any AI-filled values.
+        bool hasAiValues = false;
+        for (int vi = 0; vi < m_model->violationCount() && !hasAiValues; ++vi) {
+            const auto *vn = m_model->violationAt(vi);
+            if (!vn) continue;
+            for (const auto &child : vn->children)
+                if (!child.isCurrentValue && !child.aiValue.isEmpty())
+                    { hasAiValues = true; break; }
+        }
+        if (hasAiValues)
+            co_await _onUpload();
+    }
+
+    m_launchAllRunning = false;
+    ui->buttonLoadAskUpload->setEnabled(true);
+}
+
 void PaneWarnings::_connectSlots()
 {
     connect(ui->buttonLoadWarnings, &QPushButton::clicked,
             this, [this]() { m_loadTask = _onLoadWarnings(); });
+
+    connect(ui->buttonPasteWarnings, &QPushButton::clicked,
+            this, [this]() { m_pasteTask = _onPasteWarnings(); });
 
     // Show cache stats immediately when a marketplace is selected — no load needed.
     connect(ui->listWidgetAmazon, &QListWidget::currentItemChanged,
@@ -1723,6 +2071,9 @@ void PaneWarnings::_connectSlots()
     connect(ui->buttonAskAi, &QPushButton::clicked,
             this, [this]() { m_askAiTask = _onAskAi(); });
 
+    connect(ui->buttonAskAiUpload, &QPushButton::clicked,
+            this, [this]() { m_askAiUploadTask = _onAskAiUpload(); });
+
     connect(ui->buttonUpload, &QPushButton::clicked,
             this, [this]() { m_uploadTask = _onUpload(); });
 
@@ -1730,6 +2081,12 @@ void PaneWarnings::_connectSlots()
             this, [this]() { m_retrieveTask = _onRetrieveImages(); });
     connect(ui->buttonOpenImageDir, &QPushButton::clicked,
             this, [this]() { _onOpenImageDir(); });
+
+    connect(ui->buttonLoadAskUpload, &QPushButton::clicked,
+            this, [this]() {
+        if (!m_launchAllRunning)
+            m_launchAllTask = _onLoadAskUpload();
+    });
 
     // Template folder: browse + manual edit, both persisted to QSettings.
     connect(ui->buttonBrowseTemplateDir, &QPushButton::clicked, this, [this]() {

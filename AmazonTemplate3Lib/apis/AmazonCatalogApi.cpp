@@ -611,6 +611,7 @@ static AmazonCatalogApi::AsinItem parseAsinItem(const QString& asin, const QByte
         {"sole_material",        QStringLiteral("Sole")},
         {"lining_description",   QStringLiteral("Lining")},
         {"material_feature",     QStringLiteral("Feature")},
+        {"shoe_width",           QStringLiteral("Shoe width")},
     };
     for (const auto& [key, label] : kMatKeys) {
         const QStringList vals = allAttrValues(attrs, key);

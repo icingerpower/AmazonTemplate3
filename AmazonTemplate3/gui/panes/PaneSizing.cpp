@@ -114,8 +114,8 @@ PaneSizing::PaneSizing(QWidget *parent)
 
     connect(ui->buttonAddFromASIN,     &QPushButton::clicked,
             this, &PaneSizing::onAddFromAsinClicked);
-    connect(ui->buttonAddFromTemplate, &QPushButton::clicked,
-            this, &PaneSizing::onAddFromTemplateClicked);
+    connect(ui->buttonLoadSubFolder, &QPushButton::clicked,
+            this, &PaneSizing::onLoadSubFolderClicked);
 
     ui->comboBoxSizeType->addItem(tr("Select type..."), -1);
     for (const auto *cat : SizeTableGenerator::allCategories())
@@ -183,8 +183,6 @@ PaneSizing::PaneSizing(QWidget *parent)
     _initWorkflowCombo();
 
     // --- A+ content wiring ---
-    connect(ui->buttonAplusAddImageSlot, &QPushButton::clicked,
-            this, &PaneSizing::onAplusAddImageSlot);
     connect(ui->buttonAplusDeleteVersion, &QPushButton::clicked,
             this, &PaneSizing::onAplusDeleteVersion);
     connect(ui->buttonAplusUpload, &QPushButton::clicked,
@@ -545,6 +543,7 @@ void PaneSizing::_loadProductSettings()
     // Always initialise A+ content from disk so that m_groupImages is populated
     // even when sizing settings have never been saved for this product.
     _initAplusContent();
+    _refreshSizeImageUploadStatus();
 
     QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
                  QSettings::IniFormat);
@@ -683,7 +682,9 @@ void PaneSizing::_ensureModel(const QDir &dir)
                 // is not shown while the new product loads. The working dir is either
                 // restored below (if the folder already exists) or set by attributesFetched.
                 m_productWorkingDir = QDir{};
+                m_shoeWidths.clear();
                 ui->lineEditSubWorkingDir->clear();
+                _refreshSizeImageUploadStatus();
                 m_aplusContent.reset();
                 if (m_aplusModel) {
                     ui->aplusTreeView->setModel(nullptr);
@@ -746,9 +747,10 @@ void PaneSizing::_ensureModel(const QDir &dir)
     connect(m_treeModel.get(), &TreeSizingAsins::attributesFetched,
             this, [this](const QStringList& bullets, const QStringList& materials,
                          const QString& mainImageUrl, const QString& asin,
-                         const QString& title) {
+                         const QString& title, const QStringList& shoeWidths) {
                 m_productTitle = title;
                 m_currentAsin = asin;
+                m_shoeWidths = shoeWidths;
                 QString text;
                 if (!bullets.isEmpty()) {
                     text += tr("Bullet points:\n");
@@ -760,6 +762,25 @@ void PaneSizing::_ensureModel(const QDir &dir)
                     text += tr("Material / fabric:\n");
                     for (const QString& m : materials)
                         text += QStringLiteral("• ") + m + QLatin1Char('\n');
+                }
+                // Shoe width: collect across all variants, show the widest available.
+                // If both narrow and a regular/wider option exist, show the regular one
+                // (the wider fit that most customers should order as baseline).
+                if (!shoeWidths.isEmpty()) {
+                    auto isNarrow = [](const QString &w) {
+                        const QString l = w.toLower();
+                        return l == QLatin1String("n")
+                            || l.contains(QLatin1String("narrow"))
+                            || l.contains(QLatin1String("slim"))
+                            || l.contains(QStringLiteral("étroit"))
+                            || l.contains(QLatin1String("schmal"));
+                    };
+                    QString display;
+                    for (const QString &w : shoeWidths)
+                        if (!isNarrow(w)) { display = w; break; }
+                    if (display.isEmpty()) display = shoeWidths.first();
+                    if (!text.isEmpty()) text += QLatin1Char('\n');
+                    text += tr("Shoe width: ") + display + QLatin1Char('\n');
                 }
                 ui->textEditAttributes->setPlainText(text.trimmed());
 
@@ -1200,19 +1221,103 @@ void PaneSizing::onAddFromAsinClicked()
     m_treeModel->load(asin.trimmed());
 }
 
-void PaneSizing::onAddFromTemplateClicked()
+void PaneSizing::onLoadSubFolderClicked()
 {
-    const QDir defaultDir(
-        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
-    _ensureModel(defaultDir);
+    const QDir sizingDir(m_workingDir.filePath(QStringLiteral("sizing")));
+    if (!sizingDir.exists()) {
+        QMessageBox::information(this, tr("Load Sub Folder"),
+            tr("No sizing folder found in the working directory."));
+        return;
+    }
 
-    const QString path = QFileDialog::getOpenFileName(
-        this, tr("Open Amazon template"), {}, tr("Excel (*.xlsx)"));
-    if (path.isEmpty())
+    // Collect all subdirectories with their metadata
+    struct SubFolderEntry {
+        QDateTime  date;
+        QString    category;
+        QString    folderName;
+        QString    asin;
+    };
+    QList<SubFolderEntry> entries;
+
+    const QFileInfoList dirs = sizingDir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot,
+                                                        QDir::NoSort);
+    for (const QFileInfo &fi : dirs) {
+        SubFolderEntry e;
+        e.folderName = fi.fileName();
+        e.date       = fi.lastModified();
+
+        // Extract ASIN: everything before the first '-'
+        const int dash = e.folderName.indexOf(QLatin1Char('-'));
+        e.asin = (dash > 0) ? e.folderName.left(dash) : e.folderName;
+
+        // Read category from settings.ini if present
+        const QSettings ini(fi.filePath() + QStringLiteral("/settings.ini"),
+                            QSettings::IniFormat);
+        e.category = ini.value(QStringLiteral("sizing/type")).toString();
+
+        entries.append(e);
+    }
+
+    if (entries.isEmpty()) {
+        QMessageBox::information(this, tr("Load Sub Folder"),
+            tr("No product sub-folders found."));
+        return;
+    }
+
+    // Sort by date descending (most recent first)
+    std::sort(entries.begin(), entries.end(),
+              [](const SubFolderEntry &a, const SubFolderEntry &b) {
+                  return a.date > b.date;
+              });
+
+    // Build dialog
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Load Sub Folder"));
+    dlg.resize(800, 480);
+    auto *layout = new QVBoxLayout(&dlg);
+
+    auto *table = new QTableWidget(entries.size(), 3, &dlg);
+    table->setHorizontalHeaderLabels({tr("Date"), tr("Category"), tr("Folder")});
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table->setSelectionMode(QAbstractItemView::SingleSelection);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->horizontalHeader()->setStretchLastSection(true);
+    table->verticalHeader()->hide();
+
+    for (int i = 0; i < entries.size(); ++i) {
+        const SubFolderEntry &e = entries[i];
+        table->setItem(i, 0, new QTableWidgetItem(
+            e.date.toString(QStringLiteral("yyyy-MM-dd HH:mm"))));
+        table->setItem(i, 1, new QTableWidgetItem(e.category));
+        table->setItem(i, 2, new QTableWidgetItem(e.folderName));
+    }
+    table->resizeColumnToContents(0);
+    table->resizeColumnToContents(1);
+    table->selectRow(0);
+    layout->addWidget(table);
+
+    auto *btns = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    connect(btns, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(btns, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    // Double-click on a row also accepts
+    connect(table, &QTableWidget::cellDoubleClicked, &dlg, &QDialog::accept);
+    layout->addWidget(btns);
+
+    if (dlg.exec() != QDialog::Accepted)
         return;
 
+    const int row = table->currentRow();
+    if (row < 0 || row >= entries.size())
+        return;
+
+    const QString asin = entries[row].asin;
+    if (asin.isEmpty())
+        return;
+
+    const QDir defaultDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
+    _ensureModel(defaultDir);
     _refreshApi();
-    m_treeModel->load(path);
+    m_treeModel->load(asin);
 }
 
 void PaneSizing::onOpenSizeTableFolderClicked()
@@ -2560,8 +2665,13 @@ void PaneSizing::_loadWorkflowPrompts()
 
 APlusWorkflow *PaneSizing::_currentWorkflow() const
 {
-    return APlusWorkflow::findById(
+    APlusWorkflow *wf = APlusWorkflow::findById(
         ui->comboBoxWorkflow->currentData().toString());
+    if (wf) {
+        const AbstractSizeCategory *cat = _currentCategory();
+        wf->setCategoryKey(cat ? cat->displayName() : QString{});
+    }
+    return wf;
 }
 
 QStringList PaneSizing::_stepInstructions() const
@@ -2639,12 +2749,36 @@ static QString countryCodeToLanguage(const QString &code)
 // Builds one SizeChartTarget per unique (country-group-row, language) pair
 // found in the country list widget. English groups use the group key ("uk"/"com")
 // as groupKey; others use the first matching country code.
+//
+// For categories where allGroupsAlwaysVisible() is true (e.g. shoes), one target is
+// generated per defined group regardless of the country list, so that missing countries
+// never prevent a group's chart from being generated.
 static QList<PaneSizing::SizeChartTarget> buildSizeChartTargets(
     const AbstractSizeCategory *cat, QListWidget *countriesList)
 {
     QList<PaneSizing::SizeChartTarget> result;
     if (!cat) return result;
     const QList<CountryGroup> groups = cat->countryGroups();
+
+    if (cat->allGroupsAlwaysVisible()) {
+        for (int g = 0; g < groups.size(); ++g) {
+            const CountryGroup &grp = groups[g];
+            const QString lang = grp.isEnglish ? QStringLiteral("English")
+                                               : (!grp.codes.isEmpty()
+                                                  ? countryCodeToLanguage(grp.codes.first())
+                                                  : QString{});
+            if (lang.isEmpty()) continue;
+            PaneSizing::SizeChartTarget t;
+            t.groupKey   = grp.key.toLower();
+            t.groupLabel = grp.label;
+            t.groupRow   = g;
+            t.language   = lang;
+            t.isEnglish  = grp.isEnglish;
+            result.append(t);
+        }
+        return result;
+    }
+
     using Key = QPair<int, QString>; // (groupRow, language)
     QSet<Key> seen;
 
@@ -2852,6 +2986,16 @@ void PaneSizing::onAplusGenerateAll()
     QString faqPrompt = tr("Product:\n") + description + QStringLiteral("\n\n") + imgHintWithGap;
     if (!faqInstructions.isEmpty())
         faqPrompt += tr("Instructions:\n") + faqInstructions + QStringLiteral("\n\n");
+    {
+        const AbstractSizeCategory *cat = _currentCategory();
+        if (cat && cat->allGroupsAlwaysVisible()) {
+            faqPrompt += tr("This is a shoe product. "
+                            "If the shoe width listed in the product description is narrow, "
+                            "or if the bullet points suggest the fit runs small or recommend sizing up, "
+                            "include as the very first Q&A: "
+                            "\"Should I order a size up?\" — answer: yes, order 1–2 sizes larger than usual.\n\n");
+        }
+    }
     faqPrompt += tr("Generate a concise, engaging Amazon A+ Content FAQ section for "
                     "this product in English. Output as a list of question/answer pairs in plain text. "
                     "For any measurements (height, chest, weight, foot length, etc.), always include "
@@ -2860,7 +3004,7 @@ void PaneSizing::onAplusGenerateAll()
     // --- Prompt review dialog ---
     // For clothing: show one representative prompt per workflow step (desktop only).
     // For generic: show desktop + mobile of the first slot, same as before.
-    QString groupShotPreview, perColorPreview, detailPreview;
+    QString groupShotPreview, perColorPreview, detailPreview, aspirationalPreview;
     for (const ImageSlotSpec &spec : slotSpecs) {
         if (spec.elementId == QStringLiteral("image_group") && groupShotPreview.isEmpty())
             groupShotPreview = spec.desktopPrompt;
@@ -2868,6 +3012,8 @@ void PaneSizing::onAplusGenerateAll()
             perColorPreview = spec.desktopPrompt;
         else if (spec.elementId == QStringLiteral("image_detail") && detailPreview.isEmpty())
             detailPreview = spec.desktopPrompt;
+        else if (spec.elementId == QStringLiteral("image_aspirational") && aspirationalPreview.isEmpty())
+            aspirationalPreview = spec.desktopPrompt;
     }
     const int imageSlotCount = slotSpecs.size();
 
@@ -2893,6 +3039,10 @@ void PaneSizing::onAplusGenerateAll()
         if (!detailPreview.isEmpty()) {
             auto *ed = new QTextEdit(); ed->setPlainText(detailPreview);
             tabs->addTab(ed, tr("Detail / Fabric"));
+        }
+        if (!aspirationalPreview.isEmpty()) {
+            auto *ed = new QTextEdit(); ed->setPlainText(aspirationalPreview);
+            tabs->addTab(ed, tr("Aspirational Scene"));
         }
     } else {
         if (!slotSpecs.isEmpty()) {
@@ -3357,6 +3507,24 @@ void PaneSizing::onAplusGenerateAll()
     _runSequentially(std::move(tasks), std::move(onStart), std::move(onDone));
 }
 
+void PaneSizing::_refreshSizeImageUploadStatus()
+{
+    bool uploaded = false;
+    if (m_productWorkingDir.exists()) {
+        QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                    QSettings::IniFormat);
+        uploaded = s.contains(QStringLiteral("sizing/sizeImageUploaded"));
+    }
+    QLabel *lbl = ui->labelSizeImageUploadStatus;
+    if (uploaded) {
+        lbl->setText(tr("Images uploaded"));
+        lbl->setStyleSheet(QStringLiteral("color: #2e7d32;")); // dark green on light
+    } else {
+        lbl->setText(tr("Images not uploaded"));
+        lbl->setStyleSheet(QStringLiteral("color: #c62828;")); // dark red on light
+    }
+}
+
 void PaneSizing::_refreshSizeGroupList()
 {
     // Preserve the current selection by label text so we can restore it after rebuilding.
@@ -3429,6 +3597,43 @@ static QImage padImageToMinHeight(const QImage &src, int minH,
     return padded;
 }
 
+bool PaneSizing::_isNarrowOnlyShoe() const
+{
+    if (m_shoeWidths.isEmpty()) return false;
+    for (const QString &w : m_shoeWidths) {
+        const QString l = w.toLower();
+        const bool narrow = (l == QLatin1String("n"))
+                         || l.contains(QLatin1String("narrow"))
+                         || l.contains(QLatin1String("slim"))
+                         || l.contains(QStringLiteral("étroit"))
+                         || l.contains(QLatin1String("schmal"));
+        if (!narrow) return false; // at least one non-narrow width — no note needed
+    }
+    return true;
+}
+
+QImage PaneSizing::_appendNarrowSizingNote(const QImage &img) const
+{
+    const QString note = tr("Narrow sizing — order 1–2 sizes up for regular-width feet");
+    const int stripH = 36;
+    const QColor bg(QStringLiteral("#e8f6f3"));
+    const QColor textColor(QStringLiteral("#2a6b64"));
+
+    QImage out(img.width(), img.height() + stripH, QImage::Format_ARGB32);
+    out.fill(bg);
+
+    QPainter p(&out);
+    p.drawImage(0, 0, img);
+
+    QFont f(QStringLiteral("Arial"), 11, QFont::Normal, /*italic=*/true);
+    p.setFont(f);
+    p.setPen(textColor);
+    p.drawText(QRect(0, img.height(), img.width(), stripH),
+               Qt::AlignCenter, note);
+    p.end();
+    return out;
+}
+
 void PaneSizing::_renderAndSaveChart(const AbstractSizeCategory *cat,
                                       int groupRow,
                                       const QString &elemId,
@@ -3477,6 +3682,7 @@ void PaneSizing::_renderAndSaveChart(const AbstractSizeCategory *cat,
     // In letter mode the country-group rows were already removed from the model by
     // _rebuildSizeTable (only "Size" + measurement rows remain), so groupRow no longer
     // maps to real model rows — skip the filtering entirely.
+    // Also skip when the category requires all groups to be visible together (e.g. shoes).
     const bool lettersMode = ui->sizeRangeMain->mode() == QLatin1String("letters");
     using RowData = QList<QStandardItem *>;
     QList<QPair<int, RowData>> removedGroupRows;
@@ -3521,6 +3727,10 @@ void PaneSizing::_renderAndSaveChart(const AbstractSizeCategory *cat,
     const QColor tableBg(QStringLiteral("#e8f6f3"));
     QImage desktop = padImageToMinHeight(img.scaledToWidth(970, Qt::SmoothTransformation), 400, tableBg);
     QImage mobile  = padImageToMinHeight(img.scaledToWidth(600, Qt::SmoothTransformation), 400, tableBg);
+    if (_isNarrowOnlyShoe()) {
+        desktop = _appendNarrowSizingNote(desktop);
+        mobile  = _appendNarrowSizingNote(mobile);
+    }
     const QString relD = elemId + QStringLiteral("/size_chart.png");
     const QString relM = elemId + QStringLiteral("/size_chart_mobile.png");
     desktop.save(aplusDir.filePath(relD));
@@ -3712,6 +3922,16 @@ void PaneSizing::onAplusGenerateFaq()
     }
     if (!userPrompt.isEmpty())
         prompt += QStringLiteral("Instructions:\n") + userPrompt + QStringLiteral("\n\n");
+    {
+        const AbstractSizeCategory *cat = _currentCategory();
+        if (cat && cat->allGroupsAlwaysVisible()) {
+            prompt += tr("This is a shoe product. "
+                         "If the shoe width listed in the product description is narrow, "
+                         "or if the bullet points suggest the fit runs small or recommend sizing up, "
+                         "include as the very first Q&A: "
+                         "\"Should I order a size up?\" — answer: yes, order 1–2 sizes larger than usual.\n\n");
+        }
+    }
     prompt += QStringLiteral("Generate a concise, engaging Amazon A+ Content FAQ section for this product in English. "
                              "Output as a list of question/answer pairs in plain text. "
                              "For any measurements (height, chest, weight, foot length, etc.), always include "
@@ -4561,17 +4781,7 @@ void PaneSizing::onAplusDeleteVersion()
     _refreshAplusPreview(ui->aplusTreeView->currentIndex());
 }
 
-void PaneSizing::onAplusAddImageSlot()
-{
-    if (!m_aplusContent) return;
-    int count = 0;
-    for (const APlusElement &e : m_aplusContent->elements())
-        if (e.type == APlusElementType::Image)
-            ++count;
-    m_aplusContent->ensureImageElement(count);
-    _rebuildAplusModel();
-    _rebuildAplusMenu();
-}
+
 
 void PaneSizing::onAplusTreeClicked(const QModelIndex &idx)
 {
@@ -5425,12 +5635,13 @@ QCoro::Task<void> PaneSizing::_resolveSkus(QList<AsinSku> &items,
 
 QCoro::Task<void> PaneSizing::_uploadSizeImage(int imageIndex)
 {
-    const int row = ui->listWidgetSizeGroups->currentRow();
-    if (row < 0 || row >= m_groupImages.size()) {
-        QMessageBox::warning(this, tr("Upload"), tr("No size image selected."));
+    if (m_groupImages.isEmpty()) {
+        QMessageBox::warning(this, tr("Upload"), tr("No size image available."));
         co_return;
     }
-    const QImage img = m_groupImages.at(row);
+    // Always upload the default chart (index 0 — all size groups combined),
+    // regardless of which per-group chart is currently previewed in the list.
+    const QImage img = m_groupImages.at(0);
 
     QByteArray jpegData;
     {
@@ -5567,6 +5778,7 @@ QCoro::Task<void> PaneSizing::_uploadSizeImage(int imageIndex)
             s.setValue(QStringLiteral("sizing/sizeImageUploaded"),
                        QDateTime::currentDateTime().toString(Qt::ISODate));
         }
+        _refreshSizeImageUploadStatus();
         QMessageBox::information(this, tr("Upload"),
             tr("Image uploaded to %1 listing(s).").arg(successCount));
     } else {

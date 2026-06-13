@@ -61,8 +61,10 @@ signals:
     void loadError(const QString& message);
     // Emitted after the first variation family loads; carries the first child's
     // bullet points and material/fabric attributes for use in content generation.
+    // shoeWidths: unique shoe_width values collected across ALL children (empty for non-shoe products).
     void attributesFetched(QStringList bulletPoints, QStringList materialAttrs,
-                           QString mainImageUrl, QString parentAsin, QString firstChildTitle);
+                           QString mainImageUrl, QString parentAsin, QString firstChildTitle,
+                           QStringList shoeWidths);
     // Images grouped by color variant: each pair is (colorName, imageUrls).
     // For size-only products, deduplication by color yields a single entry.
     // For color variants, one entry per unique color is emitted so each

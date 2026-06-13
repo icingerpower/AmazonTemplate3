@@ -8,4 +8,5 @@ public:
     QList<MeasurementField>      measurementFields() const override;
     QList<CountryGroup>          countryGroups()     const override;
     QList<QHash<QString,double>> sizeRows()          const override;
+    bool                         allGroupsAlwaysVisible() const override { return true; }
 };

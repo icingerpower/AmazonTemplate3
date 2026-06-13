@@ -60,7 +60,7 @@ public:
 
 private slots:
     void onAddFromAsinClicked();
-    void onAddFromTemplateClicked();
+    void onLoadSubFolderClicked();
     void onSizeTypeChanged(int index);
     void onGenSizeTablesClicked();
     void onMakeEditableToggled(bool checked);
@@ -79,7 +79,6 @@ private slots:
     void onAplusGenerateFaq();
     void onAplusGenerateImage(const QString &elementId);
     void onAplusDeleteVersion();
-    void onAplusAddImageSlot();
     void onAplusTreeClicked(const QModelIndex &idx);
     void onAplusSelectionChanged(const QModelIndex &current, const QModelIndex &previous);
     void onAplusUploadClicked();
@@ -124,6 +123,7 @@ private:
 
     QDir                m_workingDir;
     QDir                m_productWorkingDir;
+    QStringList         m_shoeWidths;
     QString              m_productType;
     QString              m_productTitle;
     QStringList         m_variantImagePaths;
@@ -209,6 +209,9 @@ private:
                               const QStringList &translatedLabels,
                               bool keepInches);
     void _refreshSizeGroupList();
+    void _refreshSizeImageUploadStatus();
+    bool    _isNarrowOnlyShoe() const;
+    QImage  _appendNarrowSizingNote(const QImage &img) const;
     QString _aplusTimestamp() const;
     void    _aplusPushImage(const QImage &img, const QString &elementId,
                             const QString &displayName, APlusElementType type);

@@ -16,17 +16,19 @@ constexpr const char* kJsonFileName = "sizing_upload.json";
 
 // Representative marketplace ID per geographic region, tried in order when
 // auto-detecting which region a product belongs to.
-// Marketplaces tried in order when auto-detecting which region a product is in.
-// All EU entries share the EU LWA token, so trying multiple costs no extra auth
-// round-trips — Amazon EU products may be listed in one country but not another.
+// EU markets are tried first because most products managed here are EU-listed.
+// This prevents US returning a partial catalog hit (parent ASIN known globally
+// but not actually listed in NA) from being mistaken for a successful NA load,
+// which would cause the EU existence check to run against UK and fail for
+// products that are only on DE/FR/IT/ES.
 const QStringList kRegionMarketplaces = QStringList()
-    << QStringLiteral("ATVPDKIKX0DER")    // US  (NA)
-    << QStringLiteral("A1F83G8C2ARO7P")   // UK  (EU)
-    << QStringLiteral("A2EUQ1WTGCTBG2")   // CA  (NA)
+    << QStringLiteral("A1PA6795UKMFR9")   // DE  (EU) — try first, largest EU market
     << QStringLiteral("A13V1IB3VIYZZH")   // FR  (EU)
+    << QStringLiteral("A1F83G8C2ARO7P")   // UK  (EU)
     << QStringLiteral("APJ6JRA9NG5V4")    // IT  (EU)
     << QStringLiteral("A1RKKUPIHCS9HS")   // ES  (EU)
-    << QStringLiteral("A1PA6795UKMFR9")   // DE  (EU)
+    << QStringLiteral("ATVPDKIKX0DER")    // US  (NA)
+    << QStringLiteral("A2EUQ1WTGCTBG2")   // CA  (NA)
     << QStringLiteral("A1VC38T7YXB528");  // JP  (FE)
 } // namespace
 
@@ -232,7 +234,7 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
         {"A1VC38T7YXB528", JP}
     };
     // Fixed representatives for the per-region existence check (order-independent).
-    static const QString kEuRep = QStringLiteral("A1F83G8C2ARO7P"); // UK
+    static const QString kEuRep = QStringLiteral("A1PA6795UKMFR9"); // DE
     static const QString kNaRep = QStringLiteral("ATVPDKIKX0DER");  // US
     static const QString kJpRep = QStringLiteral("A1VC38T7YXB528");  // JP
 
@@ -308,11 +310,35 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
         if (!attributesEmitted && !family.children.isEmpty()) {
             probeChildAsin = family.children.first().asin;
 
+            // Collect unique shoe widths from ALL children (shoe_width varies per size variant).
+            static const QString kWidthPrefix = QStringLiteral("Shoe width: ");
+            QStringList shoeWidths;
+            for (const auto& c : family.children) {
+                for (const QString& ma : c.materialAttrs) {
+                    if (!ma.startsWith(kWidthPrefix)) continue;
+                    const QStringList vals = ma.mid(kWidthPrefix.length()).split(
+                        QStringLiteral(", "), Qt::SkipEmptyParts);
+                    for (const QString& v : vals) {
+                        const QString t = v.trimmed();
+                        if (!t.isEmpty() && !shoeWidths.contains(t, Qt::CaseInsensitive))
+                            shoeWidths.append(t);
+                    }
+                }
+            }
+
+            // Remove shoe_width from the first child's material list to avoid duplication —
+            // PaneSizing will add a deduplicated single line from shoeWidths instead.
+            QStringList filteredMaterial;
+            for (const QString& ma : family.children.first().materialAttrs)
+                if (!ma.startsWith(kWidthPrefix))
+                    filteredMaterial.append(ma);
+
             emit attributesFetched(family.children.first().bulletPoints,
-                                   family.children.first().materialAttrs,
+                                   filteredMaterial,
                                    family.children.first().mainImageUrl,
                                    family.parentAsin,
-                                   family.children.first().title);
+                                   family.children.first().title,
+                                   shoeWidths);
 
             // Emit images grouped by unique color. Color variants each have
             // their own photos; size-only variants share photos, so dedup
@@ -337,6 +363,19 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
                 if (!mainUrl.isEmpty()) seenMainUrls.insert(mainUrl);
                 if (!fingerprint.isEmpty()) seenImageFingerprints.insert(fingerprint);
                 colorImages.append({c.color, c.allImageUrls});
+            }
+            // Second pass: include any color that was entirely skipped because none
+            // of its children had image URLs (e.g. out-of-stock in the probed
+            // marketplace). The color still needs a slot in the workflow so that
+            // buildSlots() sees the correct color count and picks the right path
+            // (group shot vs single-color aspirational). The AI will generate the
+            // image without a reference photo.
+            for (const auto& c : family.children) {
+                if (c.color.isEmpty()) continue;
+                const QString colorKey = c.color.toLower();
+                if (seenColors.contains(colorKey)) continue;
+                seenColors.insert(colorKey);
+                colorImages.append({c.color, {}});
             }
             if (!colorImages.isEmpty())
                 emit variantImagesFetched(colorImages);

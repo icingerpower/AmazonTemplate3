@@ -54,6 +54,16 @@
           </widget>
          </item>
          <item>
+          <widget class="QPushButton" name="buttonPasteWarnings">
+           <property name="toolTip">
+            <string>Paste warnings from Amazon Seller Central Account Health page</string>
+           </property>
+           <property name="text">
+            <string>Paste warnings</string>
+           </property>
+          </widget>
+         </item>
+         <item>
           <widget class="Line" name="line">
            <property name="orientation">
             <enum>Qt::Orientation::Vertical</enum>
@@ -88,6 +98,16 @@
           </widget>
          </item>
          <item>
+          <widget class="QPushButton" name="buttonAskAiUpload">
+           <property name="toolTip">
+            <string>Ask AI then upload in one step</string>
+           </property>
+           <property name="text">
+            <string>Ask AI &amp; upload</string>
+           </property>
+          </widget>
+         </item>
+         <item>
           <widget class="QPushButton" name="buttonClearAiSuggestion">
            <property name="toolTip">
             <string>Clear selected rows</string>
@@ -118,6 +138,33 @@
           <widget class="QPushButton" name="buttonOpenImageDir">
            <property name="text">
             <string>Open image dir</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="Line" name="line_2">
+           <property name="orientation">
+            <enum>Qt::Orientation::Vertical</enum>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="buttonLoadAskUpload">
+           <property name="toolTip">
+            <string>Chain: Load warnings → Ask AI → Upload</string>
+           </property>
+           <property name="text">
+            <string>Load/ask/upload</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QCheckBox" name="checkBoxDoAllAmazon">
+           <property name="toolTip">
+            <string>Run on all Amazon marketplaces (current first, then top to bottom)</string>
+           </property>
+           <property name="text">
+            <string>Do all Amazon</string>
            </property>
           </widget>
          </item>

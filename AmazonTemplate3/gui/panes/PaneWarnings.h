@@ -33,6 +33,9 @@ public:
     void setWorkingDir(const QDir &workingDir);
     void setAvailableClis(const QList<AbstractCli *> &clis);
 
+signals:
+    void askAiFinished();
+
 private:
     Ui::PaneWarnings        *ui;
     QDir                     m_workingDir;
@@ -47,11 +50,16 @@ private:
 
     QPointer<QDialog>  m_progressDlg; // active progress dialog — hidden/shown with this pane
 
+    bool m_launchAllRunning = false; // guards buttonLoadAskUpload against re-entry
+
     // Held alive so the coroutine frame is not destroyed mid-execution.
     QCoro::Task<void> m_loadTask;
     QCoro::Task<void> m_askAiTask;
     QCoro::Task<void> m_uploadTask;
     QCoro::Task<void> m_retrieveTask;
+    QCoro::Task<void> m_launchAllTask;
+    QCoro::Task<void> m_askAiUploadTask;
+    QCoro::Task<void> m_pasteTask;
 
     void _populateMarketplaces();
     void _loadSettings();
@@ -66,6 +74,9 @@ private:
     QCoro::Task<void> _onAskAi();
     QCoro::Task<void> _onUpload();
     QCoro::Task<void> _onRetrieveImages();
+    QCoro::Task<void> _onAskAiUpload();
+    QCoro::Task<void> _onLoadAskUpload();
+    QCoro::Task<void> _onPasteWarnings();
     void _onOpenImageDir() const;
     void _connectSlots();
 

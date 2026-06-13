@@ -41,6 +41,10 @@ public:
                                       QList<WarningRow>* out,
                                       int maxWarnings = 0);
 
+    // Enrich pasted rows: runs FBA report to get SKU, then fetches listing data.
+    // rows[i].asin and rows[i].attributeId must be pre-filled.
+    QCoro::Task<void> enrichPastedRows(QString marketplaceId, QList<WarningRow>* rows);
+
     // Fetch the productType for a listing via the Listings Items API summaries.
     // *productType is empty on error. GCC 13 ICE workaround: params by value.
     QCoro::Task<void> fetchListingProductType(QString marketplaceId,
@@ -93,6 +97,10 @@ private:
     // Uses an output parameter (instead of co_return QString) to avoid GCC 13
     // coroutine ICE on non-trivially-destructible Task<T> return types.
     QCoro::Task<void> _getAccessToken(QString lwaRegion, QString* out);
+
+    // Extracted step 1 of fetchViolations: run FBA report → ASIN→SKU map.
+    // *out is empty on error (error already logged via logMessage signal).
+    QCoro::Task<void> _fetchFbaAsinToSku(QString marketplaceId, QHash<QString, QString>* out);
 
     QNetworkAccessManager* _nam();
 

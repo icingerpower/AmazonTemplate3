@@ -212,25 +212,17 @@ QCoro::Task<void> AmazonWarningsApi::_getAccessToken(QString lwaRegion, QString*
 }
 
 // ---------------------------------------------------------------------------
-// fetchViolations — Step 1: enumerate FBA listings; Step 2: fetch each listing.
+// _fetchFbaAsinToSku — Step 1: enumerate FBA SKUs via
+// GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA report. Fills *out with ASIN→SKU.
 // ---------------------------------------------------------------------------
 
-QCoro::Task<void> AmazonWarningsApi::fetchViolations(QString marketplaceId,
-                                                     QList<WarningRow>* out,
-                                                     int maxWarnings)
+QCoro::Task<void> AmazonWarningsApi::_fetchFbaAsinToSku(QString marketplaceId,
+                                                        QHash<QString, QString>* out)
 {
     out->clear();
 
     const QString endpoint = endpointForMarketplace(marketplaceId);
     const QString lwaReg   = lwaRegionForMarketplace(marketplaceId);
-    const QString sellerId = sellerIdForMarketplace(marketplaceId);
-
-    if (sellerId.isEmpty()) {
-        m_lastError = QStringLiteral("No seller ID configured for marketplace %1").arg(marketplaceId);
-        qWarning() << "AmazonWarningsApi:" << m_lastError;
-        emit logMessage(QStringLiteral("⚠ ") + m_lastError);
-        co_return;
-    }
 
     // -------------------------------------------------------------------
     // Step 1: enumerate FBA SKUs via GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA
@@ -238,8 +230,6 @@ QCoro::Task<void> AmazonWarningsApi::fetchViolations(QString marketplaceId,
     // -------------------------------------------------------------------
     emit logMessage(QStringLiteral("Step 1: Requesting FBA inventory report…"));
     emit progressChanged(0, 0);
-
-    QHash<QString, QString> asinToSku;
 
     // 1a — create report
     QString reportId;
@@ -444,14 +434,39 @@ QCoro::Task<void> AmazonWarningsApi::fetchViolations(QString marketplaceId,
             if (cols.size() <= qMax(skuCol, asinCol)) continue;
             const QString sku  = cols.at(skuCol).trimmed();
             const QString asin = cols.at(asinCol).trimmed();
-            if (!sku.isEmpty() && !asin.isEmpty() && !asinToSku.contains(asin))
-                asinToSku.insert(asin, sku);
+            if (!sku.isEmpty() && !asin.isEmpty() && !out->contains(asin))
+                out->insert(asin, sku);
         }
 
-        emit logMessage(QStringLiteral("Step 1 complete: %1 FBA listing(s) found.").arg(asinToSku.size()));
-        qDebug() << "AmazonWarningsApi: step1 complete via FBA report, ASINs=" << asinToSku.size();
+        emit logMessage(QStringLiteral("Step 1 complete: %1 FBA listing(s) found.").arg(out->size()));
+        qDebug() << "AmazonWarningsApi: step1 complete via FBA report, ASINs=" << out->size();
+    }
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
+// fetchViolations — Step 1: enumerate FBA listings; Step 2: fetch each listing.
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonWarningsApi::fetchViolations(QString marketplaceId,
+                                                     QList<WarningRow>* out,
+                                                     int maxWarnings)
+{
+    out->clear();
+
+    const QString endpoint = endpointForMarketplace(marketplaceId);
+    const QString lwaReg   = lwaRegionForMarketplace(marketplaceId);
+    const QString sellerId = sellerIdForMarketplace(marketplaceId);
+
+    if (sellerId.isEmpty()) {
+        m_lastError = QStringLiteral("No seller ID configured for marketplace %1").arg(marketplaceId);
+        qWarning() << "AmazonWarningsApi:" << m_lastError;
+        emit logMessage(QStringLiteral("⚠ ") + m_lastError);
+        co_return;
     }
 
+    QHash<QString, QString> asinToSku;
+    co_await _fetchFbaAsinToSku(marketplaceId, &asinToSku);
     if (asinToSku.isEmpty()) {
         emit logMessage(QStringLiteral("No FBA listings found for this marketplace."));
         emit progressChanged(1, 1);
@@ -642,6 +657,176 @@ QCoro::Task<void> AmazonWarningsApi::fetchViolations(QString marketplaceId,
     qDebug() << "AmazonWarningsApi: fetchViolations complete, listings checked="
              << processed << "warning rows=" << out->size();
     co_return;
+}
+
+// ---------------------------------------------------------------------------
+// enrichPastedRows — Step 1: FBA report for SKU; Step 2: per-ASIN listing data.
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonWarningsApi::enrichPastedRows(QString marketplaceId,
+                                                        QList<WarningRow>* rows)
+{
+    const QString endpoint = endpointForMarketplace(marketplaceId);
+    const QString lwaReg   = lwaRegionForMarketplace(marketplaceId);
+    const QString sellerId = sellerIdForMarketplace(marketplaceId);
+
+    if (sellerId.isEmpty()) {
+        m_lastError = QStringLiteral("No seller ID configured for marketplace %1").arg(marketplaceId);
+        emit logMessage(QStringLiteral("⚠ ") + m_lastError);
+        co_return;
+    }
+
+    QHash<QString, QString> asinToSku;
+    co_await _fetchFbaAsinToSku(marketplaceId, &asinToSku);
+    if (asinToSku.isEmpty()) {
+        emit logMessage(QStringLiteral("No FBA listings found for this marketplace."));
+        emit progressChanged(1, 1);
+        co_return;
+    }
+
+    // Build ordered unique-ASIN list preserving row order
+    QStringList uniqueAsins;
+    {
+        QSet<QString> seen;
+        for (const WarningRow &row : *rows) {
+            if (!seen.contains(row.asin)) {
+                seen.insert(row.asin);
+                uniqueAsins.append(row.asin);
+            }
+        }
+    }
+
+    int processed = 0;
+    const int total = uniqueAsins.size();
+    emit logMessage(QStringLiteral("Step 2: Fetching data for %1 ASIN(s)…").arg(total));
+    emit progressChanged(0, total);
+
+    for (int ai = 0; ai < uniqueAsins.size(); ++ai) {
+        const QString asin = uniqueAsins.at(ai);
+        ++processed;
+        const QString sku = asinToSku.value(asin);
+
+        emit logMessage(QStringLiteral("  [%1/%2] %3  %4")
+            .arg(processed).arg(total).arg(asin,
+                 sku.isEmpty() ? QStringLiteral("(not in FBA report)") : sku));
+
+        if (!sku.isEmpty()) {
+            // Rate limit: 600ms minimum between listings API calls
+            constexpr int kMinIntervalMs = 600;
+            const int elapsed = m_lastRequestTime.isValid()
+                ? static_cast<int>(m_lastRequestTime.msecsTo(QDateTime::currentDateTimeUtc()))
+                : kMinIntervalMs;
+            if (elapsed < kMinIntervalMs) {
+                QTimer throttleTimer;
+                throttleTimer.setSingleShot(true);
+                throttleTimer.start(kMinIntervalMs - elapsed);
+                co_await qCoro(&throttleTimer).waitForTimeout();
+            }
+            m_lastRequestTime = QDateTime::currentDateTimeUtc();
+
+            QString token;
+            co_await _getAccessToken(lwaReg, &token);
+            if (token.isEmpty()) co_return;
+
+            QUrl url;
+            url.setScheme(QStringLiteral("https"));
+            url.setHost(endpoint);
+            url.setPath(QStringLiteral("/listings/2021-08-01/items/") + sellerId + QStringLiteral("/") + sku);
+
+            QUrlQuery q;
+            q.addQueryItem(QStringLiteral("marketplaceIds"), marketplaceId);
+            q.addQueryItem(QStringLiteral("includedData"), QStringLiteral("summaries,attributes"));
+            url.setQuery(q);
+
+            QNetworkRequest req(url);
+            req.setRawHeader("x-amz-access-token", token.toUtf8());
+            req.setRawHeader("accept", "application/json");
+
+            QNetworkReply* reply = _nam()->get(req);
+            co_await qCoro(reply).waitForFinished();
+
+            const QByteArray data = reply->readAll();
+            const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            reply->deleteLater();
+
+            if (status == 200) {
+                const QJsonObject root = QJsonDocument::fromJson(data).object();
+
+                QString itemTitle;
+                QString mainImageUrl;
+                {
+                    const QJsonArray summaries = root.value(QStringLiteral("summaries")).toArray();
+                    for (const QJsonValue& sv : summaries) {
+                        const QJsonObject sobj = sv.toObject();
+                        if (sobj.value(QStringLiteral("marketplaceId")).toString() == marketplaceId) {
+                            itemTitle    = sobj.value(QStringLiteral("itemName")).toString();
+                            mainImageUrl = sobj.value(QStringLiteral("mainImage")).toObject()
+                                               .value(QStringLiteral("link")).toString();
+                            break;
+                        }
+                    }
+                }
+
+                const QJsonObject attributesObj = root.value(QStringLiteral("attributes")).toObject();
+
+                auto resolveValue = [&attributesObj](const QString &attrId) -> QString {
+                    const QJsonArray arr = attributesObj.value(attrId).toArray();
+                    if (arr.isEmpty()) return {};
+                    const QJsonObject obj = arr.first().toObject();
+                    if (!obj.contains(QStringLiteral("value"))) return {};
+                    const QJsonValue v = obj.value(QStringLiteral("value"));
+                    if (v.isString())  return v.toString();
+                    if (v.isDouble())  return QString::number(v.toDouble());
+                    if (v.isBool())    return v.toBool() ? QStringLiteral("true") : QStringLiteral("false");
+                    return {};
+                };
+
+                QStringList bulletPoints;
+                {
+                    const QJsonArray bulletsArr =
+                        attributesObj.value(QStringLiteral("bullet_point")).toArray();
+                    for (const QJsonValue &bv : bulletsArr) {
+                        const QString bp =
+                            bv.toObject().value(QStringLiteral("value")).toString();
+                        if (!bp.isEmpty()) bulletPoints.append(bp);
+                    }
+                }
+
+                for (WarningRow &row : *rows) {
+                    if (row.asin != asin) continue;
+                    row.sku          = sku;
+                    if (row.title.isEmpty()) row.title = itemTitle;
+                    row.mainImageUrl = mainImageUrl;
+                    row.value        = resolveValue(row.attributeId);
+                    if (row.attributeId == QStringLiteral("bullet_point"))
+                        row.bulletPoints = bulletPoints;
+                }
+            } else {
+                emit logMessage(QStringLiteral("    ⚠ HTTP %1 for SKU %2").arg(status).arg(sku));
+                for (WarningRow &row : *rows) {
+                    if (row.asin == asin) row.sku = sku;
+                }
+            }
+        }
+
+        emit progressChanged(processed, total);
+    }
+
+    // Summary: how many pasted ASINs were matched vs. not found in the FBA report.
+    QStringList missing;
+    for (const QString &asin : uniqueAsins) {
+        if (!asinToSku.contains(asin)) missing.append(asin);
+    }
+    const int matched = total - missing.size();
+    emit logMessage(QStringLiteral("Enrichment complete: %1/%2 ASIN(s) matched in FBA report.")
+                    .arg(matched).arg(total));
+    if (!missing.isEmpty()) {
+        emit logMessage(QStringLiteral("⚠ %1 ASIN(s) NOT found in FBA report "
+                                       "(MFN listing, wrong marketplace, or report gap):")
+                        .arg(missing.size()));
+        for (const QString &asin : missing)
+            emit logMessage(QStringLiteral("    • %1").arg(asin));
+    }
 }
 
 // ---------------------------------------------------------------------------
