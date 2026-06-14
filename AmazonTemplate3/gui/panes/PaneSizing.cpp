@@ -66,6 +66,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QColor>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -248,6 +249,20 @@ PaneSizing::PaneSizing(QWidget *parent)
 
     ui->treeViewAsins->setItemDelegateForColumn(
         TreeSizingAsins::Title, new MiddleTruncateDelegate(this));
+
+    ui->textEditAttributes->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(ui->textEditAttributes, &QTextEdit::customContextMenuRequested,
+            this, [this](const QPoint &pos) {
+                QMenu *menu = ui->textEditAttributes->createStandardContextMenu();
+                menu->addSeparator();
+                QAction *copyAll = menu->addAction(tr("Copy all"));
+                connect(copyAll, &QAction::triggered, this, [this]() {
+                    QGuiApplication::clipboard()->setText(
+                        ui->textEditAttributes->toPlainText());
+                });
+                menu->exec(ui->textEditAttributes->mapToGlobal(pos));
+                menu->deleteLater();
+            });
 
     m_templateModel = new SizingTableTemplateModel(this);
     connect(ui->buttonSavedSizeAdd,  &QPushButton::clicked, this, &PaneSizing::onSavedSizeAddClicked);
@@ -515,7 +530,7 @@ void PaneSizing::_saveProductSettings()
         const QString base = mPrefix + w.fieldId;
         s.setValue(base + QStringLiteral("/ref"),   w.refSpinBox->value());
         s.setValue(base + QStringLiteral("/step"),  w.stepSpinBox->value());
-        s.setValue(base + QStringLiteral("/range"), w.rangeSpinBox->value());
+        if (w.rangeSpinBox) s.setValue(base + QStringLiteral("/range"), w.rangeSpinBox->value());
     }
 
     // Save SKUs from the tree model
@@ -581,7 +596,7 @@ void PaneSizing::_loadProductSettings()
         if (s.contains(base + QStringLiteral("/ref"))) {
             w.refSpinBox->setValue( s.value(base + QStringLiteral("/ref")).toDouble());
             w.stepSpinBox->setValue(s.value(base + QStringLiteral("/step")).toDouble());
-            w.rangeSpinBox->setValue(s.value(base + QStringLiteral("/range")).toDouble());
+            if (w.rangeSpinBox) w.rangeSpinBox->setValue(s.value(base + QStringLiteral("/range")).toDouble());
         }
     }
 
@@ -742,6 +757,13 @@ void PaneSizing::_ensureModel(const QDir &dir)
     connect(m_treeModel.get(), &TreeSizingAsins::loadError,
             this, [this](const QString& message) {
                 QMessageBox::warning(this, tr("Amazon API error"), message);
+            });
+
+    connect(m_treeModel.get(), &TreeSizingAsins::colorLog,
+            this, [this](const QString& log) {
+                const QString cur = ui->textEditAttributes->toPlainText();
+                ui->textEditAttributes->setPlainText(
+                    cur.isEmpty() ? log : cur + QStringLiteral("\n\n") + log);
             });
 
     connect(m_treeModel.get(), &TreeSizingAsins::attributesFetched,
@@ -924,14 +946,16 @@ void PaneSizing::_rebuildMeasurementForm()
         stepSpin->setValue(field.defaultStep);
         layout->addWidget(stepSpin);
 
-        layout->addWidget(new QLabel(tr("range")));
-
-        auto *rangeSpin = new QDoubleSpinBox;
-        rangeSpin->setRange(0, 50);
-        rangeSpin->setDecimals(1);
-        rangeSpin->setSingleStep(0.5);
-        rangeSpin->setValue(0.0);
-        layout->addWidget(rangeSpin);
+        QDoubleSpinBox *rangeSpin = nullptr;
+        if (!field.noRange) {
+            layout->addWidget(new QLabel(tr("range")));
+            rangeSpin = new QDoubleSpinBox;
+            rangeSpin->setRange(0, 50);
+            rangeSpin->setDecimals(1);
+            rangeSpin->setSingleStep(0.5);
+            rangeSpin->setValue(0.0);
+            layout->addWidget(rangeSpin);
+        }
 
         layout->addSpacing(16);
         m_measurementWidgets.append({field.id, refSpin, stepSpin, rangeSpin});
@@ -946,7 +970,7 @@ void PaneSizing::_rebuildMeasurementForm()
         if (s->contains(base + QStringLiteral("/ref"))) {
             w.refSpinBox->setValue( s->value(base + QStringLiteral("/ref")).toDouble());
             w.stepSpinBox->setValue(s->value(base + QStringLiteral("/step")).toDouble());
-            w.rangeSpinBox->setValue(s->value(base + QStringLiteral("/range")).toDouble());
+            if (w.rangeSpinBox) w.rangeSpinBox->setValue(s->value(base + QStringLiteral("/range")).toDouble());
         }
     }
 }
@@ -982,7 +1006,8 @@ bool PaneSizing::_rebuildSizeTable()
 
     QMap<QString, MeasurementInput> measurements;
     for (const auto &w : m_measurementWidgets)
-        measurements[w.fieldId] = {w.refSpinBox->value(), w.stepSpinBox->value(), w.rangeSpinBox->value()};
+        measurements[w.fieldId] = {w.refSpinBox->value(), w.stepSpinBox->value(),
+                                   w.rangeSpinBox ? w.rangeSpinBox->value() : 0.0};
 
     try {
         ui->tableViewSizing->setModel(nullptr);
@@ -1043,7 +1068,7 @@ void PaneSizing::onGenSizeTablesClicked()
             const QString base = prefix + w.fieldId;
             s->setValue(base + QStringLiteral("/ref"),   w.refSpinBox->value());
             s->setValue(base + QStringLiteral("/step"),  w.stepSpinBox->value());
-            s->setValue(base + QStringLiteral("/range"), w.rangeSpinBox->value());
+            if (w.rangeSpinBox) s->setValue(base + QStringLiteral("/range"), w.rangeSpinBox->value());
         }
 
         if (m_aplusContent)
@@ -1236,6 +1261,8 @@ void PaneSizing::onLoadSubFolderClicked()
         QString    category;
         QString    folderName;
         QString    asin;
+        bool       euParentFailed = false;  // any EU mp has exists+!hasParent
+        bool       amParentFailed = false;  // any AM mp has exists+!hasParent
     };
     QList<SubFolderEntry> entries;
 
@@ -1255,6 +1282,49 @@ void PaneSizing::onLoadSubFolderClicked()
                             QSettings::IniFormat);
         e.category = ini.value(QStringLiteral("sizing/type")).toString();
 
+        // Parse broken_child_health.json for EU/America broken-parent status
+        {
+            static const QSet<QString> euSet = {
+                QStringLiteral("A1F83G8C2ARO7P"),  // UK
+                QStringLiteral("A1PA6795UKMFR9"),  // DE
+                QStringLiteral("A13V1IB3VIYZZH"),  // FR
+                QStringLiteral("A1RKKUPIHCS9HS"),  // ES
+                QStringLiteral("APJ6JRA9NG5V4"),   // IT
+                QStringLiteral("A1805IZSGTT6HS"),  // NL
+            };
+            static const QSet<QString> amSet = {
+                QStringLiteral("ATVPDKIKX0DER"),   // US/COM
+                QStringLiteral("A2EUQ1WTGCTBG2"),  // CA
+            };
+
+            QFile healthFile(fi.filePath() + QStringLiteral("/broken_child_health.json"));
+            if (healthFile.open(QIODevice::ReadOnly)) {
+                const QJsonDocument doc = QJsonDocument::fromJson(healthFile.readAll());
+                healthFile.close();
+                const QJsonObject root = doc.object();
+
+                const QJsonArray mps  = root.value(QStringLiteral("marketplaces")).toArray();
+                const QJsonArray rows = root.value(QStringLiteral("rows")).toArray();
+
+                for (const QJsonValue &rowVal : rows) {
+                    const QJsonArray health = rowVal.toObject()
+                        .value(QStringLiteral("health")).toArray();
+                    for (int idx = 0; idx < health.size() && idx < mps.size(); ++idx) {
+                        const QJsonObject h = health[idx].toObject();
+                        const bool exists    = h.value(QStringLiteral("exists")).toBool();
+                        const bool hasParent = h.value(QStringLiteral("hasParent")).toBool();
+                        if (exists && !hasParent) {
+                            const QString mp = mps[idx].toString();
+                            if (euSet.contains(mp))
+                                e.euParentFailed = true;
+                            if (amSet.contains(mp))
+                                e.amParentFailed = true;
+                        }
+                    }
+                }
+            }
+        }
+
         entries.append(e);
     }
 
@@ -1273,11 +1343,12 @@ void PaneSizing::onLoadSubFolderClicked()
     // Build dialog
     QDialog dlg(this);
     dlg.setWindowTitle(tr("Load Sub Folder"));
-    dlg.resize(800, 480);
+    dlg.resize(900, 480);
     auto *layout = new QVBoxLayout(&dlg);
 
-    auto *table = new QTableWidget(entries.size(), 3, &dlg);
-    table->setHorizontalHeaderLabels({tr("Date"), tr("Category"), tr("Folder")});
+    auto *table = new QTableWidget(entries.size(), 5, &dlg);
+    table->setHorizontalHeaderLabels(
+        {tr("Date"), tr("Category"), tr("EU Parent"), tr("America"), tr("Folder")});
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setSelectionMode(QAbstractItemView::SingleSelection);
     table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -1289,10 +1360,31 @@ void PaneSizing::onLoadSubFolderClicked()
         table->setItem(i, 0, new QTableWidgetItem(
             e.date.toString(QStringLiteral("yyyy-MM-dd HH:mm"))));
         table->setItem(i, 1, new QTableWidgetItem(e.category));
-        table->setItem(i, 2, new QTableWidgetItem(e.folderName));
+
+        // EU Parent column
+        {
+            auto *it = new QTableWidgetItem(
+                e.euParentFailed ? QStringLiteral("✗") : QStringLiteral("✓"));
+            it->setTextAlignment(Qt::AlignCenter);
+            if (e.euParentFailed)
+                it->setBackground(QColor(220, 60, 60));
+            table->setItem(i, 2, it);
+        }
+        // America column
+        {
+            auto *it = new QTableWidgetItem(
+                e.amParentFailed ? QStringLiteral("✗") : QStringLiteral("✓"));
+            it->setTextAlignment(Qt::AlignCenter);
+            if (e.amParentFailed)
+                it->setBackground(QColor(220, 60, 60));
+            table->setItem(i, 3, it);
+        }
+        table->setItem(i, 4, new QTableWidgetItem(e.folderName));
     }
     table->resizeColumnToContents(0);
     table->resizeColumnToContents(1);
+    table->resizeColumnToContents(2);
+    table->resizeColumnToContents(3);
     table->selectRow(0);
     layout->addWidget(table);
 
@@ -4316,6 +4408,12 @@ void PaneSizing::onAplusGenerateSelected()
         QMessageBox::warning(this, tr("Generate Selected"), tr("No CLI tool selected."));
         return;
     }
+    if (!cli->canGenImages()) {
+        QMessageBox::warning(this, tr("Generate Selected"),
+            tr("The selected CLI (%1) cannot generate images. "
+               "Please switch to an image-capable CLI (e.g., Codex).").arg(cli->getName()));
+        return;
+    }
     APlusWorkflow *workflow = _currentWorkflow();
     if (!workflow) {
         QMessageBox::warning(this, tr("Generate Selected"), tr("No workflow selected."));
@@ -4630,6 +4728,16 @@ void PaneSizing::onAplusGenerateSelected()
                     }
                 }
                 if (!m_aplusContent) return;
+                // Only create a version entry if at least one real image was produced.
+                // Text fallback files (.txt) are skipped — they mean the CLI produced
+                // prose instead of an image, which creates junk version entries.
+                const bool hasDesktopImg = !filePair->first.isEmpty()
+                    && QFileInfo(filePair->first).suffix().compare(
+                           QLatin1String("txt"), Qt::CaseInsensitive) != 0;
+                const bool hasMobileImg = !filePair->second.isEmpty()
+                    && QFileInfo(filePair->second).suffix().compare(
+                           QLatin1String("txt"), Qt::CaseInsensitive) != 0;
+                if (!hasDesktopImg && !hasMobileImg) return;
                 const QDir aDir = m_aplusContent->dir();
                 APlusVersion ver;
                 ver.generated   = QDateTime::currentDateTime();
@@ -4732,6 +4840,9 @@ void PaneSizing::onAplusGenerateSelected()
                 .arg(step).arg(total).arg(label)
                 .arg(r.processStarted ? QObject::tr("ok") : QObject::tr("failed"))
                 .arg(secs));
+            const QString errOut = r.errorOutput.trimmed();
+            if (!errOut.isEmpty())
+                appendLog(QObject::tr("  stderr: %1").arg(errOut.right(400)));
             if (barPtr) barPtr->setValue(step);
         });
 }
@@ -5837,7 +5948,7 @@ void PaneSizing::onSavedSizeAddClicked()
             data.measurements[w.fieldId] = {
                 w.refSpinBox->value(),
                 w.stepSpinBox->value(),
-                w.rangeSpinBox->value()
+                w.rangeSpinBox ? w.rangeSpinBox->value() : 0.0
             };
         m_templateModel->updateTemplate(row, data);
     }
@@ -5902,7 +6013,7 @@ void PaneSizing::onSavedSizeSaveClicked()
         newData.measurements[w.fieldId] = {
             w.refSpinBox->value(),
             w.stepSpinBox->value(),
-            w.rangeSpinBox->value()
+            w.rangeSpinBox ? w.rangeSpinBox->value() : 0.0
         };
     }
 
@@ -5977,7 +6088,7 @@ void PaneSizing::onSavedSizeLoadClicked()
             if (w.fieldId == it.key()) {
                 w.refSpinBox->setValue(it.value().refValue);
                 w.stepSpinBox->setValue(it.value().step);
-                w.rangeSpinBox->setValue(it.value().rangeVal);
+                if (w.rangeSpinBox) w.rangeSpinBox->setValue(it.value().rangeVal);
                 break;
             }
         }
@@ -6579,10 +6690,8 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
         co_return;
     }
 
-    // ── 5e2. Fetch variation_theme to include in all parent + child patches ─────
-    // The flat file that works manually includes variation_theme on every row.
-    // Fetching it live ensures we use the exact value already stored on the listing.
-    QString feedBrand, variationTheme;
+    // ── 5e2. Fetch variation_theme for the parent PATCH (step 5f) ────────────
+    QString variationTheme;
     if (fixParents) {
         const QString primaryMpId = firstMarketplaceIdFromCountryList(ui->listWidgetCountries);
         QString parentSkuForFetch;
@@ -6591,44 +6700,25 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
             if (!parentSkuForFetch.isEmpty()) break;
         }
         if (!primaryMpId.isEmpty() && !parentSkuForFetch.isEmpty()) {
+            QString unused;
             co_await m_api->fetchListingBrandAndTheme(primaryMpId, parentSkuForFetch,
-                                                      &feedBrand, &variationTheme);
-            appendLog(tr("variation_theme for patches: %1").arg(
+                                                      &unused, &variationTheme);
+            appendLog(tr("variation_theme: %1").arg(
                 variationTheme.isEmpty() ? tr("(not found)") : variationTheme));
         }
     }
 
-    // ── 5f. Patch each parent listing as "parent" on every broken marketplace ──
-    // Before linking children to the parent, ensure the parent virtual listing has
-    // a recognised presence on those marketplaces. We patch once per (parentSku,
-    // marketplace) pair to avoid duplicate calls.
+    // ── 5f. Individual parent patches skipped (useless for refresh) ────────
+    /*
     if (fixParents) {
-        QSet<QString> patchedParentMarkets;
-        for (const auto &target : targets) {
-            if (!target.needsParent) continue;
-            const auto &row = m_brokenChildTable->rows().at(target.rowIdx);
-            const QString parentSku = asinToSku.value(row.parentAsin);
-            if (parentSku.isEmpty()) continue;
-            const QString mpId   = m_brokenChildTable->marketplaceAt(target.mktIdx).id;
-            const QString mpCode = m_brokenChildTable->marketplaceAt(target.mktIdx).code;
-            const QString key    = parentSku + QLatin1Char('|') + mpId;
-            if (patchedParentMarkets.contains(key)) continue;
-            patchedParentMarkets.insert(key);
-
-            QString details;
-            co_await m_api->patchListingAsParent(mpId, parentSku, m_productType,
-                                                variationTheme, &details);
-            appendLog(tr("  [parent] %1 on %2 — %3").arg(parentSku, mpCode, details));
-        }
+        ...
     }
+    */
 
-    // ── 5g. Upload variation relationship flat file feed ─────────────────────
-    // Flat-file feed approach: programmatic equivalent of a Seller Central template upload.
-    // Fetches brand and variation_theme live from the parent listing on the primary marketplace.
+    // ── 5g. Upload JSON_LISTINGS_FEED variation relationship feed ───────────
     if (fixParents) {
         const QString primaryMpId = firstMarketplaceIdFromCountryList(ui->listWidgetCountries);
         if (!primaryMpId.isEmpty()) {
-            // Find the parent SKU (resolved in step 4d)
             QString feedParentSku;
             for (const auto &t : targets) {
                 const auto &row = m_brokenChildTable->rows().at(t.rowIdx);
@@ -6639,13 +6729,8 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
             }
 
             if (!feedParentSku.isEmpty()) {
-                // Reuse brand and variation_theme already fetched in step 5e2
-                const QString &brand = feedBrand;
-
-                // Build feed entries: parent + unique children that need fixing
                 QList<AmazonCatalogApi::VariationFeedEntry> feedEntries;
 
-                // Parent row (use parentAsin from first target)
                 {
                     QString parentAsin;
                     for (const auto &t : targets) {
@@ -6655,7 +6740,6 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                     feedEntries.append({feedParentSku, parentAsin, true, {}});
                 }
 
-                // Child rows (deduplicated by child SKU)
                 QSet<QString> addedChildSkus;
                 for (const auto &t : targets) {
                     if (!t.needsParent) continue;
@@ -6666,7 +6750,6 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                     feedEntries.append({childSku, row.asin, false, feedParentSku});
                 }
 
-                // Collect unique broken marketplace IDs
                 QStringList brokenMpIds;
                 for (const auto &t : targets) {
                     if (!t.needsParent) continue;
@@ -6674,64 +6757,12 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                     if (!brokenMpIds.contains(mpId)) brokenMpIds << mpId;
                 }
 
-                // Map SP-API product type to flat-file feed_product_type.
-                const QString feedProductType = QStringLiteral("Clothing");
-
-                // Ask the CLI for the update_delete value — it varies by country
-                // and product type ("PartialUpdate", "Update", etc.).
-                // Use runPromptAsync (safe callback version) rather than co_await
-                // cli->runPrompt() which nests Task<CliRunResult> and crashes due
-                // to the GCC 13 coroutine frame issue with non-trivially-destructible
-                // Task<T> return types. Poll until the callback fires.
-                QString updateDelete;
-                AbstractCli *cli = ui->comboBoxCli->currentData().value<AbstractCli *>();
-                if (cli) {
-                    const QString prompt = QStringLiteral(
-                        "You are helping fill an Amazon Seller Central flat file template.\n"
-                        "Product type: %1\n"
-                        "Marketplace region: EU\n"
-                        "What is the exact value for the 'update_delete' column to perform "
-                        "a partial update (update only the specified columns without clearing "
-                        "or deleting other fields)?\n"
-                        "Reply with only the value, no explanation."
-                    ).arg(m_productType);
-
-                    appendLog(tr("Asking CLI for update_delete value…"));
-
-                    QString cliResult;
-                    bool cliDone = false;
-                    cli->runPromptAsync(prompt, this, [&cliResult, &cliDone](CliRunResult res) {
-                        cliResult = res.output.trimmed();
-                        if (cliResult.startsWith(QLatin1Char('"')) &&
-                            cliResult.endsWith(QLatin1Char('"')))
-                            cliResult = cliResult.mid(1, cliResult.size() - 2);
-                        cliDone = true;
-                    });
-
-                    // Poll until the callback fires (200ms intervals).
-                    // Qt's single-threaded event loop prevents any race between the
-                    // callback and the timer — the callback fires during a poll wait.
-                    while (!cliDone) {
-                        QTimer pollTimer;
-                        pollTimer.setSingleShot(true);
-                        pollTimer.start(200);
-                        co_await qCoro(&pollTimer).waitForTimeout();
-                    }
-
-                    updateDelete = cliResult;
-                    appendLog(tr("  update_delete = \"%1\"").arg(updateDelete));
-                }
-                if (updateDelete.isEmpty()) {
-                    appendLog(tr("  (no CLI — defaulting to PartialUpdate)"));
-                    updateDelete = QStringLiteral("PartialUpdate");
-                }
-
-                appendLog(tr("Uploading variation feed for %1 marketplace(s), %2 entry(ies)…")
+                appendLog(tr("Uploading JSON_LISTINGS_FEED for %1 marketplace(s), %2 entry(ies)…")
                               .arg(brokenMpIds.size()).arg(feedEntries.size()));
 
                 QString feedResult;
-                co_await m_api->uploadVariationFeed(brokenMpIds, feedProductType, brand,
-                                                    updateDelete, variationTheme,
+                co_await m_api->uploadVariationFeed(brokenMpIds, m_productType,
+                                                    variationTheme,
                                                     feedEntries, &feedResult);
                 appendLog(tr("Feed result: %1").arg(feedResult));
             } else {
@@ -6765,36 +6796,12 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
             continue;
         }
 
-        // 6a. Parent fix
+        // 6a. Parent fix skipped (useless for refresh)
+        /*
         if (target.needsParent && fixParents) {
-            const QString parentSku = asinToSku.value(row.parentAsin);
-            if (row.parentAsin.isEmpty() || parentSku.isEmpty()) {
-                appendLog(tr("[%1] %2: parent SKU unknown — skipping parent fix")
-                              .arg(mpCode, row.asin));
-                _appendFixLog(row.asin, mpCode,
-                              QStringLiteral("SKIP — parent SKU unknown (parentAsin=%1)")
-                              .arg(row.parentAsin));
-            } else {
-                bool ok = false;
-                QString details;
-                co_await m_api->patchListingParent(mpId, childSku, m_productType,
-                                                   parentSku, variationTheme,
-                                                   &ok, &details);
-                if (ok) {
-                    appendLog(tr("[%1] %2: ✓ parent fix sent — %3")
-                                  .arg(mpCode, row.asin, details));
-                    _appendFixLog(row.asin, mpCode,
-                                  QStringLiteral("PARENT OK — parentSku=%1 | %2")
-                                  .arg(parentSku, details));
-                } else {
-                    appendLog(tr("[%1] %2: ✗ parent fix REJECTED — %3")
-                                  .arg(mpCode, row.asin, details));
-                    _appendFixLog(row.asin, mpCode,
-                                  QStringLiteral("PARENT FAILED — parentSku=%1 | %2")
-                                  .arg(parentSku, details));
-                }
-            }
+            ...
         }
+        */
 
         // 6b. Image fix
         if (target.needsImages && fixImages) {
