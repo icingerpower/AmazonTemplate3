@@ -462,7 +462,7 @@ static void injectColorImageHints(QList<ImageSlotSpec> &imageSpecs, const QDir &
 // Resolve the first marketplace ID matching a country code from the
 // listWidgetCountries widget. Falls back to UK (A1F83G8C2ARO7P) if no entry
 // matches a known country code.
-static QString firstMarketplaceIdFromCountryList(QListWidget *listWidget)
+static const QHash<QString, QString> &countryCodeToMarketplaceId()
 {
     static const QHash<QString, QString> kCodeToMp = {
         {QStringLiteral("fr"), QStringLiteral("A13V1IB3VIYZZH")},
@@ -481,13 +481,40 @@ static QString firstMarketplaceIdFromCountryList(QListWidget *listWidget)
         {QStringLiteral("mx"), QStringLiteral("A1AM78C64UM0Y8")},
         {QStringLiteral("jp"), QStringLiteral("A1VC38T7YXB528")},
     };
+    return kCodeToMp;
+}
+
+static QString firstMarketplaceIdFromCountryList(QListWidget *listWidget)
+{
+    const auto &m = countryCodeToMarketplaceId();
     for (int i = 0; i < listWidget->count(); ++i) {
         const QString code = listWidget->item(i)->text()
                                  .trimmed().toLower().split(QLatin1Char(' ')).first();
-        const QString mp = kCodeToMp.value(code);
+        const QString mp = m.value(code);
         if (!mp.isEmpty()) return mp;
     }
     return QStringLiteral("A1F83G8C2ARO7P"); // fallback: UK
+}
+
+// Returns all marketplace IDs from the country list (in order), with CA and US
+// appended as final fallbacks — so products that only exist in NA are still found
+// when the country list is EU-only.
+static QStringList allMarketplaceIdsFromCountryList(QListWidget *listWidget)
+{
+    const auto &m = countryCodeToMarketplaceId();
+    QStringList result;
+    for (int i = 0; i < listWidget->count(); ++i) {
+        const QString code = listWidget->item(i)->text()
+                                 .trimmed().toLower().split(QLatin1Char(' ')).first();
+        const QString mp = m.value(code);
+        if (!mp.isEmpty() && !result.contains(mp))
+            result << mp;
+    }
+    // Always try CA and US as fallbacks for NA-only products.
+    for (const QString &fb : {QStringLiteral("A2EUQ1WTGCTBG2"),
+                               QStringLiteral("ATVPDKIKX0DER")})
+        if (!result.contains(fb)) result << fb;
+    return result;
 }
 
 QDir PaneSizing::_resolveProductDir(const QString &asin, const QString &title)
@@ -5419,8 +5446,13 @@ QCoro::Task<void> PaneSizing::_saveToSizeTableFolder()
         }
 
         if (!sku.isEmpty()) {
-            const QString mpId = firstMarketplaceIdFromCountryList(ui->listWidgetCountries);
-            co_await m_api->fetchListingProductType(mpId, sku, &m_productType);
+            // Try every marketplace in the country list, then CA and US as fallbacks,
+            // so products that only exist in Canada (or any single NA market) are found
+            // without asking the user.
+            for (const QString &mpId : allMarketplaceIdsFromCountryList(ui->listWidgetCountries)) {
+                co_await m_api->fetchListingProductType(mpId, sku, &m_productType);
+                if (!m_productType.isEmpty()) break;
+            }
             if (!m_productType.isEmpty() && m_productWorkingDir.exists()) {
                 QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
                              QSettings::IniFormat);
