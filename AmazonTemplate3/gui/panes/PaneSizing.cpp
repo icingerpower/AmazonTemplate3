@@ -3296,6 +3296,13 @@ void PaneSizing::onAplusGenerateAll()
     // Accumulates absolute paths of every image file produced, for the assessment step.
     auto generatedImages = QSharedPointer<QStringList>::create();
 
+    // Tracks image tasks that produced no output file, for the post-run recovery dialog.
+    struct FailedEntry {
+        CliTask              task;       // original task — can be re-run as-is
+        std::function<void()> fillBlack; // alternative: write a black PNG and push it
+    };
+    auto failedEntries = QSharedPointer<QList<FailedEntry>>::create();
+
     // One desktop + mobile task pair per workflow slot.
     // If the current version has exactly one side (the other was explicitly deleted),
     // only regenerate the missing side and inherit the surviving file into the new version.
@@ -3364,6 +3371,24 @@ void PaneSizing::onAplusGenerateAll()
                         }
                     }
                 };
+                // Wrap to detect failure (file still empty after onDone ran).
+                {
+                    auto origDone     = desktopTask.onDone;
+                    CliTask origTask  = desktopTask;  // snapshot with original onDone
+                    QDir capturedDir  = elemDir;
+                    auto fillBlackFn  = [origDone, capturedDir]() {
+                        QImage img(1920, 1080, QImage::Format_RGB888);
+                        img.fill(Qt::black);
+                        img.save(capturedDir.filePath(QStringLiteral("desktop.png")), "PNG");
+                        origDone({});
+                    };
+                    desktopTask.onDone = [origDone, filePair, origTask, fillBlackFn, failedEntries]
+                                         (CliRunResult r) {
+                        origDone(r);
+                        if (filePair->first.isEmpty())
+                            failedEntries->append({origTask, fillBlackFn});
+                    };
+                }
                 tasks.append(desktopTask);
             }
 
@@ -3419,6 +3444,24 @@ void PaneSizing::onAplusGenerateAll()
                         }
                     }
                 };
+                // Wrap to detect failure (file still empty after onDone ran).
+                {
+                    auto origDone     = mobileTask.onDone;
+                    CliTask origTask  = mobileTask;
+                    QDir capturedDir  = elemDir;
+                    auto fillBlackFn  = [origDone, capturedDir]() {
+                        QImage img(600, 600, QImage::Format_RGB888);
+                        img.fill(Qt::black);
+                        img.save(capturedDir.filePath(QStringLiteral("mobile.png")), "PNG");
+                        origDone({});
+                    };
+                    mobileTask.onDone = [origDone, filePair, origTask, fillBlackFn, failedEntries]
+                                        (CliRunResult r) {
+                        origDone(r);
+                        if (filePair->second.isEmpty())
+                            failedEntries->append({origTask, fillBlackFn});
+                    };
+                }
                 tasks.append(mobileTask);
             }
         }
@@ -3618,83 +3661,165 @@ void PaneSizing::onAplusGenerateAll()
 
     QPointer<PaneSizing>   selfPtr(this);
     auto onDone = [selfPtr, statusLabelPtr, progressBarPtr, logEditPtr, appendLog,
-                   generatedImages, workDir, startOverPtr]
+                   generatedImages, workDir, startOverPtr, failedEntries]
                   (int step, int total, const QString &label, CliRunResult result) mutable {
         if (step == total + 1) {
-            // All content tasks done — run assessment.
-            if (statusLabelPtr) statusLabelPtr->setText(
-                QObject::tr("Step %1 of %2: %3").arg(total + 1).arg(total + 1)
-                            .arg(QObject::tr("Assessing images…")));
-            appendLog(QObject::tr("▶ Assessing generated images…"));
+            // All content tasks done.
 
-            if (!selfPtr) return;
-            AbstractCli *assessCli =
-                selfPtr->ui->comboBoxCli->currentData().value<AbstractCli *>();
-            if (!assessCli) {
-                appendLog(QObject::tr("⚠ No CLI available for assessment."));
-                if (statusLabelPtr) statusLabelPtr->setText(QObject::tr("Done."));
-                if (progressBarPtr) progressBarPtr->setValue(progressBarPtr->maximum());
-                if (startOverPtr) startOverPtr->setEnabled(true);
-                return;
-            }
+            // --- Build the assessment runner (called after any recovery action) ---
+            auto runAssessment = [selfPtr, statusLabelPtr, progressBarPtr, logEditPtr, appendLog,
+                                  generatedImages, workDir, startOverPtr]() mutable {
+                if (statusLabelPtr) statusLabelPtr->setText(
+                    QObject::tr("Step %1 of %2: %3")
+                        .arg(progressBarPtr ? progressBarPtr->maximum() : 0)
+                        .arg(progressBarPtr ? progressBarPtr->maximum() : 0)
+                        .arg(QObject::tr("Assessing images…")));
+                appendLog(QObject::tr("▶ Assessing generated images…"));
 
-            // Build the assessment prompt now (generatedImages is fully populated)
-            QString p = QStringLiteral(
-                "You just generated Amazon A+ content images. "
-                "Please verify the following output files:\n\n");
-            if (generatedImages->isEmpty()) {
-                p += QStringLiteral("(no image files were recorded — generation may have failed)\n");
-            } else {
-                for (const QString &path : std::as_const(*generatedImages)) {
-                    const bool exists = QFileInfo::exists(path);
-                    p += (exists ? QStringLiteral("  [EXISTS]  ")
-                                 : QStringLiteral("  [MISSING] "))
-                         + path + QLatin1Char('\n');
-                }
-            }
-            p += QStringLiteral(
-                "\nFor each [EXISTS] image:\n"
-                "1. Confirm it is a valid, non-empty image file.\n"
-                "2. Briefly describe its content and whether it looks like a proper "
-                   "Amazon A+ marketing image.\n"
-                "3. Flag any file that looks wrong or is unexpectedly small.\n"
-                "\nFor each [MISSING] file, explain what likely went wrong.\n");
-
-            // List any FAQ files for assessment
-            p += QStringLiteral("\nAlso check the FAQ files:\n");
-            if (selfPtr && selfPtr->m_aplusContent) {
-                const QDir aplusDir = selfPtr->m_aplusContent->dir();
-                const QDir faqDir(aplusDir.filePath(QStringLiteral("faq")));
-                if (faqDir.exists()) {
-                    const QStringList faqFiles = faqDir.entryList(
-                        {QStringLiteral("*.txt")}, QDir::Files, QDir::Name);
-                    for (const QString &f : faqFiles)
-                        p += QStringLiteral("  ") + faqDir.absoluteFilePath(f)
-                             + QLatin1Char('\n');
-                }
-            }
-            p += QStringLiteral(
-                "For each FAQ: confirm it reads naturally in the correct language "
-                "and is relevant to the product.\n");
-
-            p += QStringLiteral(
-                "\nFinish with a one-line summary: PASS (all content OK) or FAIL (issues found).");
-
-            assessCli->runPromptAsync(p, workDir, selfPtr,
-                [statusLabelPtr, progressBarPtr, logEditPtr, appendLog, startOverPtr]
-                (CliRunResult assessResult) {
-                    const QString out = assessResult.output.trimmed();
-                    const QString display = out.isEmpty()
-                                         ? assessResult.errorOutput.trimmed() : out;
-                    if (!display.isEmpty())
-                        appendLog(QStringLiteral("Assessment:\n") + display);
-                    else
-                        appendLog(QObject::tr("(assessment produced no output)"));
-
-                    if (statusLabelPtr) statusLabelPtr->setText(QObject::tr("All done!"));
+                if (!selfPtr) return;
+                AbstractCli *assessCli =
+                    selfPtr->ui->comboBoxCli->currentData().value<AbstractCli *>();
+                if (!assessCli) {
+                    appendLog(QObject::tr("⚠ No CLI available for assessment."));
+                    if (statusLabelPtr) statusLabelPtr->setText(QObject::tr("Done."));
                     if (progressBarPtr) progressBarPtr->setValue(progressBarPtr->maximum());
                     if (startOverPtr) startOverPtr->setEnabled(true);
-                });
+                    return;
+                }
+
+                QString p = QStringLiteral(
+                    "You just generated Amazon A+ content images. "
+                    "Please verify the following output files:\n\n");
+                if (generatedImages->isEmpty()) {
+                    p += QStringLiteral("(no image files were recorded — generation may have failed)\n");
+                } else {
+                    for (const QString &path : std::as_const(*generatedImages)) {
+                        const bool exists = QFileInfo::exists(path);
+                        p += (exists ? QStringLiteral("  [EXISTS]  ")
+                                     : QStringLiteral("  [MISSING] "))
+                             + path + QLatin1Char('\n');
+                    }
+                }
+                p += QStringLiteral(
+                    "\nFor each [EXISTS] image:\n"
+                    "1. Confirm it is a valid, non-empty image file.\n"
+                    "2. Briefly describe its content and whether it looks like a proper "
+                       "Amazon A+ marketing image.\n"
+                    "3. Flag any file that looks wrong or is unexpectedly small.\n"
+                    "\nFor each [MISSING] file, explain what likely went wrong.\n");
+
+                p += QStringLiteral("\nAlso check the FAQ files:\n");
+                if (selfPtr && selfPtr->m_aplusContent) {
+                    const QDir aplusDir = selfPtr->m_aplusContent->dir();
+                    const QDir faqDir(aplusDir.filePath(QStringLiteral("faq")));
+                    if (faqDir.exists()) {
+                        const QStringList faqFiles = faqDir.entryList(
+                            {QStringLiteral("*.txt")}, QDir::Files, QDir::Name);
+                        for (const QString &f : faqFiles)
+                            p += QStringLiteral("  ") + faqDir.absoluteFilePath(f)
+                                 + QLatin1Char('\n');
+                    }
+                }
+                p += QStringLiteral(
+                    "For each FAQ: confirm it reads naturally in the correct language "
+                    "and is relevant to the product.\n");
+
+                p += QStringLiteral(
+                    "\nFinish with a one-line verdict using exactly one of these three labels:\n"
+                    "  PASS               — everything looks correct, no issues\n"
+                    "  PASS_WITH_WARNINGS — minor issues only (slightly awkward phrasing, "
+                                           "small stylistic imperfections) that do not affect usability\n"
+                    "  FAIL               — structural problems: missing files, broken images, "
+                                           "wrong language, content unrelated to the product, "
+                                           "or anything that would prevent publication\n"
+                    "Put the verdict label alone on its own line at the very end.");
+
+                assessCli->runPromptAsync(p, workDir, selfPtr,
+                    [statusLabelPtr, progressBarPtr, logEditPtr, appendLog, startOverPtr]
+                    (CliRunResult assessResult) {
+                        const QString out = assessResult.output.trimmed();
+                        const QString display = out.isEmpty()
+                                             ? assessResult.errorOutput.trimmed() : out;
+                        if (!display.isEmpty()) {
+                            const QStringList lines = display.split(QLatin1Char('\n'));
+                            QString verdict;
+                            for (int i = lines.size() - 1; i >= 0; --i) {
+                                const QString t = lines.at(i).trimmed();
+                                if (!t.isEmpty()) { verdict = t; break; }
+                            }
+                            QString icon;
+                            if (verdict == QLatin1String("PASS"))
+                                icon = QStringLiteral("✓");
+                            else if (verdict == QLatin1String("PASS_WITH_WARNINGS"))
+                                icon = QStringLiteral("⚠");
+                            else
+                                icon = QStringLiteral("✗");
+                            appendLog(QStringLiteral("Assessment:\n") + display
+                                      + QStringLiteral("\n") + icon + QStringLiteral(" ") + verdict);
+                        } else {
+                            appendLog(QObject::tr("(assessment produced no output)"));
+                        }
+
+                        if (statusLabelPtr) statusLabelPtr->setText(QObject::tr("All done!"));
+                        if (progressBarPtr) progressBarPtr->setValue(progressBarPtr->maximum());
+                        if (startOverPtr) startOverPtr->setEnabled(true);
+                    });
+            }; // end runAssessment
+
+            // --- Recovery dialog if any image tasks produced no output ---
+            if (!failedEntries->isEmpty() && selfPtr) {
+                QStringList failedLabels;
+                for (const auto &e : std::as_const(*failedEntries))
+                    failedLabels << e.task.label;
+
+                QMessageBox box(selfPtr);
+                box.setWindowTitle(QObject::tr("Some images failed to generate"));
+                box.setText(QObject::tr("%n image generation(s) produced no output file.", "",
+                                        failedEntries->size()));
+                box.setInformativeText(failedLabels.join(QStringLiteral("\n")));
+                auto *retryBtn = box.addButton(QObject::tr("Run again the failed ones"),
+                                               QMessageBox::AcceptRole);
+                auto *blackBtn = box.addButton(QObject::tr("Fill with black images"),
+                                               QMessageBox::ActionRole);
+                box.addButton(QObject::tr("Leave it like this"), QMessageBox::RejectRole);
+                box.exec();
+
+                if (box.clickedButton() == retryBtn) {
+                    QList<CliTask> retryTasks;
+                    for (const auto &e : std::as_const(*failedEntries))
+                        retryTasks.append(e.task);
+                    failedEntries->clear();
+
+                    const int n = retryTasks.size();
+                    if (progressBarPtr) { progressBarPtr->setRange(0, n + 1); progressBarPtr->setValue(0); }
+                    appendLog(QObject::tr("↩ Retrying %1 failed image(s)…").arg(n));
+
+                    selfPtr->_runSequentially(std::move(retryTasks),
+                        [statusLabelPtr, progressBarPtr, appendLog]
+                        (int s, int tot, const QString &lbl) {
+                            if (statusLabelPtr) statusLabelPtr->setText(
+                                QObject::tr("Step %1 of %2: %3").arg(s).arg(tot).arg(lbl));
+                            if (progressBarPtr) progressBarPtr->setValue(s - 1);
+                            appendLog(QObject::tr("▶ %1").arg(lbl));
+                        },
+                        [runAssessment](int s, int tot, const QString &, CliRunResult) mutable {
+                            if (s == tot + 1) runAssessment();
+                        });
+                    return;
+                } else if (box.clickedButton() == blackBtn) {
+                    appendLog(QObject::tr("↩ Filling %1 failed image(s) with black placeholders…")
+                                  .arg(failedEntries->size()));
+                    for (const auto &e : std::as_const(*failedEntries))
+                        e.fillBlack();
+                    failedEntries->clear();
+                } else {
+                    appendLog(QObject::tr("↩ Leaving %1 failed image(s) as-is.")
+                                  .arg(failedEntries->size()));
+                    failedEntries->clear();
+                }
+            }
+
+            runAssessment();
             return;
         }
 
