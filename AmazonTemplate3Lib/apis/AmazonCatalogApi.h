@@ -6,6 +6,8 @@
 #include <QList>
 #include <QMap>
 #include <QHash>
+#include <QSet>
+#include <QDate>
 #include <QDateTime>
 #include <QByteArray>
 #include <QStringList>
@@ -39,6 +41,23 @@ public:
         QString parentAsin;
         QString parentSku;  // usually empty when loaded from ASIN only
         QList<AsinItem> children;
+    };
+
+    // Per-listing item for store browsing (Brand → Category → Gender → Age)
+    struct StoreItem {
+        QString asin;
+        QString sku;
+        QString title;
+        QString brand;
+        QString category;    // productType from summaries
+        QString gender;      // target_gender[0].value
+        QString age;         // age_range_description[0].value
+        QString color;       // color_name[0].value (color[0].value fallback)
+        QString sizeValue;   // size[0].value (size_name[0].value fallback) — raw string
+        QString mainImageUrl; // from summaries[0].mainImage.link
+        QDate   createdDate; // summaries[0].createdDate (ISO 8601 date part)
+        int     inventory = 0; // quantity from merchant listings report
+        QSet<QString> existsInMarketplaces; // marketplaceIds where this SKU is listed
     };
 
     explicit AmazonCatalogApi(const QString& lwaClientId,
@@ -145,17 +164,13 @@ public:
         QString parentSku;  // empty for parent rows
     };
 
-    // Builds and uploads a flat-file variation relationship feed via the Feeds API.
+    // Builds and uploads a JSON_LISTINGS_FEED variation relationship feed via the Feeds API.
     // Fetches nothing — all data is passed in. Polls until DONE (3 min max).
     // Returns a human-readable status string in *resultOut.
     // GCC 13 ICE workaround: all non-trivially-destructible params by value.
-    // updateDelete: the "update_delete" column value for this template/marketplace
-    // (e.g. "PartialUpdate"). Ask the CLI — it varies by country and product type.
-    // All other values must be fetched from the live listing; do not invent them.
+    // productType: SP-API product type string (e.g. "CLOTHING", "SHIRT").
     QCoro::Task<void> uploadVariationFeed(QStringList marketplaceIds,
-                                           QString feedProductType,
-                                           QString brand,
-                                           QString updateDelete,
+                                           QString productType,
                                            QString variationTheme,
                                            QList<VariationFeedEntry> entries,
                                            QString* resultOut);
@@ -218,9 +233,11 @@ public:
     // Fetch ALL listings (FBA + MFN) via the Reports API GET_MERCHANT_LISTINGS_ALL_DATA.
     // Requests the report, polls until ready (up to ~3 min), downloads and parses the TSV.
     // Fills *asinToSku with ASIN → sellerSku pairs.
+    // Optionally fills *asinToInventory with ASIN → quantity-available.
     // GCC 13 ICE workaround: params by value.
     QCoro::Task<void> fetchAllSkusViaReport(QString marketplaceId,
-                                            QHash<QString, QString>* asinToSku);
+                                            QHash<QString, QString>* asinToSku,
+                                            QHash<QString, int>* asinToInventory = nullptr);
 
     // Retrieve the productType of a seller listing via the Listings Items API summaries.
     // *productType is empty on error or when the listing is not found.
@@ -245,6 +262,24 @@ public:
     QCoro::Task<void> fetchSizeChartAttributeName(QString marketplaceId,
                                                    QString productType,
                                                    QString* attrName);
+
+    // Fetch brand/category/gender/age attributes for a single listing SKU.
+    // The caller must pre-set item->asin and item->sku; this fills title/brand/category/gender/age.
+    // allMarketplaceIds: if non-empty, the API is queried for all those IDs at once so
+    // item->existsInMarketplaces is populated with every marketplace where the SKU is listed.
+    // Must all belong to the same SP-API region as marketplaceId.
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> fetchListingAttributes(QString marketplaceId,
+                                              QString sku,
+                                              StoreItem* item,
+                                              QStringList allMarketplaceIds = {});
+
+    // Key: marketplaceId → { asin → units sold }.
+    // Uses GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL.
+    QCoro::Task<void> fetchSalesReport(QStringList marketplaceIds,
+                                        QDateTime dataStartTime,
+                                        QDateTime dataEndTime,
+                                        QHash<QString, QHash<QString,int>>* mpToAsinUnits);
 
 #ifdef AMAZONCATALOGAPI_UNIT_TESTS
     // Mock is called instead of real HTTP. Receives the path
@@ -278,6 +313,9 @@ private:
     // Fetch a single item and fill it into *out
     // (passes by value: GCC 13 ICE workaround for coroutine frame with const-ref params)
     QCoro::Task<void> _fetchAsinItem(QString asin, QString marketplaceId, AsinItem* out);
+
+    QCoro::Task<void> _fetchListingAttributesFull(QString marketplaceId, QString sku, StoreItem* item,
+                                                   QStringList allMarketplaceIds = {});
 
     // Fallback when the direct /items/{asin} endpoint returns 403:
     // retries via GET /catalog/2022-04-01/items?identifiers=…&identifierType=ASIN

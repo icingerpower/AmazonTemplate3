@@ -7,6 +7,7 @@
 // form of the same GCC 13 bug).
 #pragma GCC optimize("O1")
 #include "AmazonCatalogApi.h"
+#include "AmazonMarketplace.h"
 
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
@@ -1019,9 +1020,25 @@ AmazonCatalogApi::patchListingAsParent(QString marketplaceId, QString parentSku,
         {QStringLiteral("value"), QJsonArray{parentageValue}},
     };
 
+    QJsonArray patches{patchParentage};
+
+    // variation_theme uses the "name" key (enum key like "SIZE/COLOR"), not "value".
+    // Required on the parent listing for Amazon to recognise it as a variation parent.
+    if (!variationTheme.isEmpty()) {
+        const QJsonObject themeValue{
+            {QStringLiteral("name"),           variationTheme},
+            {QStringLiteral("marketplace_id"), marketplaceId},
+        };
+        patches.append(QJsonObject{
+            {QStringLiteral("op"),    QStringLiteral("replace")},
+            {QStringLiteral("path"),  QStringLiteral("/attributes/variation_theme")},
+            {QStringLiteral("value"), QJsonArray{themeValue}},
+        });
+    }
+
     const QJsonObject bodyObj{
         {QStringLiteral("productType"), productType},
-        {QStringLiteral("patches"),     QJsonArray{patchParentage}},
+        {QStringLiteral("patches"),     patches},
     };
     const QByteArray jsonBody = QJsonDocument(bodyObj).toJson(QJsonDocument::Compact);
 
@@ -1113,9 +1130,24 @@ AmazonCatalogApi::patchListingParent(QString marketplaceId, QString childSku,
         {QStringLiteral("value"), QJsonArray{relValue}},
     };
 
+    QJsonArray patches{patchParentage, patchRel};
+
+    // variation_theme on child uses the "name" key (enum key like "SIZE/COLOR").
+    if (!variationTheme.isEmpty()) {
+        const QJsonObject themeValue{
+            {QStringLiteral("name"),           variationTheme},
+            {QStringLiteral("marketplace_id"), marketplaceId},
+        };
+        patches.append(QJsonObject{
+            {QStringLiteral("op"),    QStringLiteral("replace")},
+            {QStringLiteral("path"),  QStringLiteral("/attributes/variation_theme")},
+            {QStringLiteral("value"), QJsonArray{themeValue}},
+        });
+    }
+
     const QJsonObject bodyObj{
         {QStringLiteral("productType"), productType},
-        {QStringLiteral("patches"),     QJsonArray{patchParentage, patchRel}},
+        {QStringLiteral("patches"),     patches},
     };
     const QByteArray jsonBody = QJsonDocument(bodyObj).toJson(QJsonDocument::Compact);
 
@@ -1285,35 +1317,19 @@ AmazonCatalogApi::fetchListingBrandAndTheme(QString marketplaceId,
 }
 
 // ---------------------------------------------------------------------------
-// uploadVariationFeed — POST_FLAT_FILE_LISTINGS_DATA via the Feeds API.
+// uploadVariationFeed — JSON_LISTINGS_FEED via the Feeds API.
+// POST_FLAT_FILE_LISTINGS_DATA was sunset March 31 2025; JSON_LISTINGS_FEED is the replacement.
 //
 // Three-step flow (Amazon Feeds API 2021-06-30):
 //   1. POST /feeds/2021-06-30/feedDocuments  → presigned S3 URL + feedDocumentId
-//   2. PUT  {presigned S3 URL}                → upload the TSV bytes
+//   2. PUT  {presigned S3 URL}                → upload the JSON bytes
 //   3. POST /feeds/2021-06-30/feeds           → submit feedId for processing
 //   4. GET  /feeds/2021-06-30/feeds/{feedId}  → poll until DONE / FATAL / CANCELLED
 // ---------------------------------------------------------------------------
 
-// "SIZE_NAME" → "SizeName",  "COLOR_NAME/SIZE_NAME" → "ColorName-SizeName"
-static QString toFlatFileTheme(const QString &spApiTheme)
-{
-    QStringList segments;
-    for (const QString &part : spApiTheme.split(QLatin1Char('/'))) {
-        QString seg;
-        for (const QString &word : part.toLower().split(QLatin1Char('_'))) {
-            if (!word.isEmpty())
-                seg += word.at(0).toUpper() + word.mid(1);
-        }
-        segments << seg;
-    }
-    return segments.join(QLatin1Char('-'));
-}
-
 QCoro::Task<void>
 AmazonCatalogApi::uploadVariationFeed(QStringList marketplaceIds,
-                                       QString feedProductType,
-                                       QString brand,
-                                       QString updateDelete,
+                                       QString productType,
                                        QString variationTheme,
                                        QList<VariationFeedEntry> entries,
                                        QString* resultOut)
@@ -1334,6 +1350,7 @@ AmazonCatalogApi::uploadVariationFeed(QStringList marketplaceIds,
     const QString primaryMpId  = marketplaceIds.first();
     const QString endpointHost = endpointForMarketplace(primaryMpId);
     const QString lwaRegion    = lwaRegionForMarketplace(primaryMpId);
+    const QString sellerId     = sellerIdForMarketplace(primaryMpId);
 
     QString token;
     co_await _getAccessToken(lwaRegion, &token);
@@ -1343,96 +1360,152 @@ AmazonCatalogApi::uploadVariationFeed(QStringList marketplaceIds,
     }
 
     // -------------------------------------------------------------------
-    // Build the TSV body
+    // Build the JSON_LISTINGS_FEED body
     // -------------------------------------------------------------------
-    // Use variation_theme as returned by the listing API — do not transform or invent.
-    // Columns follow the user-specified order for the variation relationship template.
-    // Columns: feed_product_type, item_sku, brand_name, update_delete,
-    //          external_product_id, external_product_id_type,
-    //          parent_child, parent_sku, relationship_type, variation_theme
+    // Format: { header, messages[] } where each message is a PATCH operation.
+    // Each entry × each marketplace produces a separate attribute patch block
+    // so Amazon can apply per-marketplace parentage data.
 
-    QByteArray tsv;
-    tsv += "TemplateType=Flat.File.Clothing.EU\n";
-    tsv += "feed_product_type\titem_sku\tbrand_name\tupdate_delete"
-           "\texternal_product_id\texternal_product_id_type"
-           "\tparent_child\tparent_sku\trelationship_type\tvariation_theme\n";
-    tsv += "\n";
-
+    QJsonArray messages;
+    int messageId = 1;
     for (const VariationFeedEntry &e : entries) {
-        const QString asinType = e.asin.isEmpty() ? QString() : QStringLiteral("ASIN");
-        QString row;
-        if (e.isParent) {
-            // parent row: no parent_sku, no relationship_type
-            row = QStringLiteral("%1\t%2\t%3\t%4\t%5\t%6\tparent\t\t\t%7\n")
-                      .arg(feedProductType, e.sku, brand, updateDelete,
-                           e.asin, asinType, variationTheme);
-        } else {
-            // child row: parent_sku + relationship_type filled
-            row = QStringLiteral("%1\t%2\t%3\t%4\t%5\t%6\tchild\t%7\tVariation\t%8\n")
-                      .arg(feedProductType, e.sku, brand, updateDelete,
-                           e.asin, asinType, e.parentSku, variationTheme);
+        QJsonArray patches;
+
+        // 1. parentage_level
+        QJsonArray parentageLevelValues;
+        for (const QString &mpId : marketplaceIds) {
+            parentageLevelValues.append(QJsonObject{
+                {QStringLiteral("value"),          e.isParent ? QStringLiteral("parent") : QStringLiteral("child")},
+                {QStringLiteral("marketplace_id"), mpId},
+            });
         }
-        tsv += row.toUtf8();
+        patches.append(QJsonObject{
+            {QStringLiteral("op"),    QStringLiteral("replace")},
+            {QStringLiteral("path"),  QStringLiteral("/attributes/parentage_level")},
+            {QStringLiteral("value"), parentageLevelValues},
+        });
+
+        // 2. child_parent_sku_relationship (children only)
+        if (!e.isParent && !e.parentSku.isEmpty()) {
+            QJsonArray relValues;
+            for (const QString &mpId : marketplaceIds) {
+                relValues.append(QJsonObject{
+                    {QStringLiteral("child_relationship_type"), QStringLiteral("variation")},
+                    {QStringLiteral("parent_sku"),              e.parentSku},
+                    {QStringLiteral("marketplace_id"),          mpId},
+                });
+            }
+            patches.append(QJsonObject{
+                {QStringLiteral("op"),    QStringLiteral("replace")},
+                {QStringLiteral("path"),  QStringLiteral("/attributes/child_parent_sku_relationship")},
+                {QStringLiteral("value"), relValues},
+            });
+        }
+
+        // 3. variation_theme (parent and children)
+        if (!variationTheme.isEmpty()) {
+            QJsonArray themeValues;
+            for (const QString &mpId : marketplaceIds) {
+                themeValues.append(QJsonObject{
+                    {QStringLiteral("name"),           variationTheme},
+                    {QStringLiteral("marketplace_id"), mpId},
+                });
+            }
+            patches.append(QJsonObject{
+                {QStringLiteral("op"),    QStringLiteral("replace")},
+                {QStringLiteral("path"),  QStringLiteral("/attributes/variation_theme")},
+                {QStringLiteral("value"), themeValues},
+            });
+        }
+
+        messages.append(QJsonObject{
+            {QStringLiteral("messageId"),     messageId++},
+            {QStringLiteral("sku"),           e.sku},
+            {QStringLiteral("operationType"), QStringLiteral("PATCH")},
+            {QStringLiteral("productType"),   productType},
+            {QStringLiteral("patches"),       patches},
+        });
     }
 
-    qDebug() << "AmazonCatalogApi::uploadVariationFeed: TSV body (" << tsv.size() << "bytes):\n"
-             << QString::fromUtf8(tsv);
+    const QJsonObject feedBody{
+        {QStringLiteral("header"), QJsonObject{
+            {QStringLiteral("sellerId"),    sellerId},
+            {QStringLiteral("version"),     QStringLiteral("2.0")},
+            {QStringLiteral("issueLocale"), QStringLiteral("en_US")},
+        }},
+        {QStringLiteral("messages"), messages},
+    };
+    const QByteArray feedBytes = QJsonDocument(feedBody).toJson(QJsonDocument::Compact);
 
-    // -------------------------------------------------------------------
+    qDebug() << "AmazonCatalogApi::uploadVariationFeed: JSON body (" << feedBytes.size() << "bytes):\n"
+             << QString::fromUtf8(feedBytes);
+
     // 1. Create the feed document (request a presigned upload URL)
     // -------------------------------------------------------------------
     QString feedDocumentId;
     QString uploadUrl;
     {
-        // Some SP-API implementations require marketplaceIds as a query parameter
-        // even on endpoints where it is not formally documented (regional routing).
-        QUrlQuery docQuery;
-        docQuery.addQueryItem(QStringLiteral("marketplaceIds"), primaryMpId);
-
         QUrl url;
         url.setScheme(QStringLiteral("https"));
         url.setHost(endpointHost);
         url.setPath(QStringLiteral("/feeds/2021-06-30/feedDocuments"));
-        url.setQuery(docQuery);
 
         QNetworkRequest req(url);
         req.setRawHeader("x-amz-access-token", token.toUtf8());
         req.setRawHeader("accept", "application/json");
-        req.setHeader(QNetworkRequest::ContentTypeHeader,
-                      QStringLiteral("application/json"));
+        req.setRawHeader("User-Agent", "AmazonTemplate3/1.0 (Language=C++; Platform=Linux)");
+        req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
 
+        // feedType is NOT sent here — only contentType belongs in this body.
+        // feedType is declared later in POST /feeds (step 3).
         const QJsonObject body{
-            {QStringLiteral("contentType"),
-             QStringLiteral("text/tab-separated-values; charset=UTF-8")},
+            {QStringLiteral("contentType"), QStringLiteral("application/json; charset=UTF-8")},
         };
         const QByteArray bodyBytes = QJsonDocument(body).toJson(QJsonDocument::Compact);
 
         qDebug() << "AmazonCatalogApi::uploadVariationFeed: POST feedDocuments"
-                 << url.toString() << "token first 20:" << token.left(20)
-                 << "body:" << bodyBytes;
+                 << url.toString() << "body:" << bodyBytes;
         QNetworkReply* reply = _nam()->post(req, bodyBytes);
         co_await qCoro(reply).waitForFinished();
 
-        const QByteArray data = reply->readAll();
-        const int httpStatus  = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        reply->deleteLater();
+        const QByteArray data       = reply->readAll();
+        const int httpStatus        = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QString requestId     = QString::fromUtf8(reply->rawHeader("x-amzn-RequestId"));
+        const QString errorType     = QString::fromUtf8(reply->rawHeader("x-amzn-ErrorType"));
+        const QList<QByteArray> responseHeaderNames = reply->rawHeaderList();
 
         if (httpStatus != 201) {
-            // Also log response headers (x-amzn-RequestId, x-amzn-ErrorType) to
-            // help diagnose 403 — they sometimes carry more context than the body.
-            const QString requestId = QString::fromUtf8(
-                reply->rawHeader("x-amzn-RequestId"));
-            const QString errorType = QString::fromUtf8(
-                reply->rawHeader("x-amzn-ErrorType"));
+            // Dump full request + response to /tmp for Amazon support cases.
+            const QString dumpPath = QStringLiteral("/tmp/sp-api-feeds-%1.txt")
+                                         .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
+            QFile dumpFile(dumpPath);
+            if (dumpFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                QTextStream ts(&dumpFile);
+                ts << "=== REQUEST ===\n";
+                ts << "POST " << url.toString() << "\n";
+                ts << "x-amz-access-token: " << token.left(20) << "...[truncated]\n";
+                ts << "accept: application/json\n";
+                ts << "User-Agent: AmazonTemplate3/1.0 (Language=C++; Platform=Linux)\n";
+                ts << "Content-Type: application/json\n";
+                ts << "Body: " << bodyBytes << "\n\n";
+                ts << "=== RESPONSE ===\n";
+                ts << "HTTP " << httpStatus << "\n";
+                for (const QByteArray &name : responseHeaderNames)
+                    ts << name << ": " << reply->rawHeader(name) << "\n";
+                ts << "\nBody:\n" << data << "\n";
+            }
+            qWarning() << "AmazonCatalogApi::uploadVariationFeed: dump written to" << dumpPath;
+
             *resultOut = QStringLiteral(
                 "ERROR: createFeedDocument HTTP %1 "
-                "(requestId=%2 errorType=%3) — %4")
+                "(requestId=%2 errorType=%3) — %4\nDump: %5")
                     .arg(httpStatus)
-                    .arg(requestId, errorType,
-                         QString::fromUtf8(data));
+                    .arg(requestId, errorType, QString::fromUtf8(data), dumpPath);
             qWarning() << "AmazonCatalogApi::uploadVariationFeed:" << *resultOut;
+            reply->deleteLater();
             co_return;
         }
+        reply->deleteLater();
 
         const QJsonObject obj = QJsonDocument::fromJson(data).object();
         feedDocumentId = obj.value(QStringLiteral("feedDocumentId")).toString();
@@ -1447,16 +1520,16 @@ AmazonCatalogApi::uploadVariationFeed(QStringList marketplaceIds,
     }
 
     // -------------------------------------------------------------------
-    // 2. PUT the TSV body to the presigned S3 URL (no auth headers).
+    // 2. PUT the JSON body to the presigned S3 URL (no auth headers).
     // -------------------------------------------------------------------
     {
         QNetworkRequest s3Req((QUrl(uploadUrl)));
         s3Req.setHeader(QNetworkRequest::ContentTypeHeader,
-                        QStringLiteral("text/tab-separated-values; charset=UTF-8"));
+                        QStringLiteral("application/json"));
 
         qDebug() << "AmazonCatalogApi::uploadVariationFeed: PUT to S3 url=" << uploadUrl
-                 << " bytes=" << tsv.size();
-        QNetworkReply* s3Reply = _nam()->put(s3Req, tsv);
+                 << " bytes=" << feedBytes.size();
+        QNetworkReply* s3Reply = _nam()->put(s3Req, feedBytes);
         co_await qCoro(s3Reply).waitForFinished();
 
         const QByteArray s3Data = s3Reply->readAll();
@@ -1491,9 +1564,9 @@ AmazonCatalogApi::uploadVariationFeed(QStringList marketplaceIds,
         QJsonArray mpArr;
         for (const QString &m : marketplaceIds) mpArr.append(m);
         const QJsonObject body{
-            {QStringLiteral("feedType"),       QStringLiteral("POST_FLAT_FILE_LISTINGS_DATA")},
-            {QStringLiteral("feedDocumentId"), feedDocumentId},
-            {QStringLiteral("marketplaceIds"), mpArr},
+            {QStringLiteral("feedType"),            QStringLiteral("JSON_LISTINGS_FEED")},
+            {QStringLiteral("inputFeedDocumentId"), feedDocumentId},
+            {QStringLiteral("marketplaceIds"),      mpArr},
         };
         const QByteArray bodyBytes = QJsonDocument(body).toJson(QJsonDocument::Compact);
 
@@ -2500,9 +2573,11 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllFbaSkus(QString marketplaceId,
 // ---------------------------------------------------------------------------
 
 QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
-                                                           QHash<QString, QString>* asinToSku)
+                                                           QHash<QString, QString>* asinToSku,
+                                                           QHash<QString, int>* asinToInventory)
 {
     asinToSku->clear();
+    if (asinToInventory) asinToInventory->clear();
 
     const QString endpoint = endpointForMarketplace(marketplaceId);
     const QString lwaReg   = lwaRegionForMarketplace(marketplaceId);
@@ -2698,6 +2773,7 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
         if (asinCol < 0) asinCol = headers.indexOf(QStringLiteral("product-id"));
         // "product-id-type" column: 1 = ASIN; absent means assume ASIN
         const int typeCol = headers.indexOf(QStringLiteral("product-id-type"));
+        const int qtyCol  = headers.indexOf(QStringLiteral("quantity"));
 
         if (skuCol < 0 || asinCol < 0) {
             m_lastError = QStringLiteral("Report TSV: could not find seller-sku/asin1 columns. Headers: ")
@@ -2731,6 +2807,8 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
                 if (!sku.isEmpty() && !asin.isEmpty()) {
                     if (!asinToSku->contains(asin))
                         asinToSku->insert(asin, sku);
+                    if (asinToInventory && qtyCol >= 0 && qtyCol < cols.size())
+                        (*asinToInventory)[asin] += cols.at(qtyCol).trimmed().toInt();
                 } else {
                     skippedRows++;
                 }
@@ -3057,5 +3135,358 @@ QCoro::Task<void> AmazonCatalogApi::fetchSizeChartAttributeName(QString marketpl
                << productType << "in" << marketplaceId
                << "— schema saved to" << diagPath
                << "— size-related keys:" << sizeKeys;
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
+// fetchListingAttributes — public single-SKU wrapper
+// ---------------------------------------------------------------------------
+QCoro::Task<void> AmazonCatalogApi::fetchListingAttributes(
+    QString marketplaceId, QString sku, StoreItem* item, QStringList allMarketplaceIds)
+{
+    co_await _fetchListingAttributesFull(std::move(marketplaceId), std::move(sku), item,
+                                         std::move(allMarketplaceIds));
+}
+
+// ---------------------------------------------------------------------------
+// _fetchListingAttributesFull — GET /listings/{sku}?includedData=summaries,attributes
+// Fills title (itemName from summaries), category (productType from summaries),
+// brand (attributes.brand[0].value), gender (attributes.target_gender[0].value),
+// age (attributes.age_range_description[0].value).
+// If allMarketplaceIds is non-empty, passes all IDs in one query and populates
+// item->existsInMarketplaces with the set of marketplaces where the SKU is found.
+// ---------------------------------------------------------------------------
+QCoro::Task<void> AmazonCatalogApi::_fetchListingAttributesFull(
+    QString marketplaceId, QString sku, StoreItem* item, QStringList allMarketplaceIds)
+{
+    const QString sellerId = sellerIdForMarketplace(marketplaceId);
+    if (sellerId.isEmpty()) co_return;
+
+    QString token;
+    co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
+    if (token.isEmpty()) co_return;
+
+    QUrl url;
+    url.setScheme(QStringLiteral("https"));
+    url.setHost(endpointForMarketplace(marketplaceId));
+    url.setPath(QStringLiteral("/listings/2021-08-01/items/%1/%2").arg(sellerId, sku));
+
+    QUrlQuery q;
+    // Use all same-region marketplace IDs when provided (single call, multi-marketplace existence)
+    const QString mpIdsParam = allMarketplaceIds.isEmpty()
+        ? marketplaceId
+        : allMarketplaceIds.join(QLatin1Char(','));
+    q.addQueryItem(QStringLiteral("marketplaceIds"), mpIdsParam);
+    q.addQueryItem(QStringLiteral("includedData"),   QStringLiteral("summaries,attributes"));
+    url.setQuery(q);
+
+    QNetworkRequest req(url);
+    req.setRawHeader("x-amz-access-token", token.toUtf8());
+    req.setRawHeader("accept", "application/json");
+
+    qDebug() << "AmazonCatalogApi::_fetchListingAttributesFull GET" << url.toString();
+    QNetworkReply* reply = _nam()->get(req);
+    co_await qCoro(reply).waitForFinished();
+
+    const QByteArray data   = reply->readAll();
+    const int        status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    reply->deleteLater();
+
+    if (status != 200 || data.isEmpty()) {
+        qWarning() << "AmazonCatalogApi::_fetchListingAttributesFull: HTTP"
+                   << status << "for SKU" << sku;
+        co_return;
+    }
+
+    const QJsonObject root = QJsonDocument::fromJson(data).object();
+
+    // summaries — one entry per marketplace where the SKU is listed.
+    // If marketplaceId field is present, use it to track existence per marketplace.
+    // Use the primary marketplace's summary for title/category/mainImage/createdDate;
+    // fall back to the first available summary if the primary isn't found.
+    const QJsonArray summaries = root.value(QStringLiteral("summaries")).toArray();
+    const QJsonObject primarySummary = [&]() -> QJsonObject {
+        QJsonObject first;
+        for (const QJsonValue &sv : summaries) {
+            const QJsonObject s = sv.toObject();
+            const QString mpId = s.value(QStringLiteral("marketplaceId")).toString();
+            if (!mpId.isEmpty())
+                item->existsInMarketplaces.insert(mpId);
+            if (first.isEmpty())
+                first = s;
+            if (mpId == marketplaceId)
+                return s;
+        }
+        return first; // primary not found — use first available
+    }();
+
+    if (!primarySummary.isEmpty()) {
+        item->title    = primarySummary.value(QStringLiteral("itemName")).toString();
+        item->category = primarySummary.value(QStringLiteral("productType")).toString();
+        const QJsonObject img = primarySummary.value(QStringLiteral("mainImage")).toObject();
+        item->mainImageUrl = img.value(QStringLiteral("link")).toString();
+        const QString dateStr = primarySummary.value(QStringLiteral("createdDate")).toString();
+        if (!dateStr.isEmpty())
+            item->createdDate = QDate::fromString(dateStr.left(10), QStringLiteral("yyyy-MM-dd"));
+    }
+
+    // If no marketplaceId fields were present in summaries (single-marketplace response),
+    // at least mark the queried marketplace as existing.
+    if (item->existsInMarketplaces.isEmpty() && !summaries.isEmpty())
+        item->existsInMarketplaces.insert(marketplaceId);
+
+    // attributes → brand, target_gender, age_range_description, color, size
+    const QJsonObject attrs = root.value(QStringLiteral("attributes")).toObject();
+
+    auto firstValue = [&](const QString& key) -> QString {
+        const QJsonArray arr = attrs.value(key).toArray();
+        return arr.isEmpty() ? QString{}
+                             : arr.first().toObject().value(QStringLiteral("value")).toString();
+    };
+
+    item->brand  = firstValue(QStringLiteral("brand"));
+    item->gender = firstValue(QStringLiteral("target_gender"));
+    item->age    = firstValue(QStringLiteral("age_range_description"));
+
+    item->color = firstValue(QStringLiteral("color_name"));
+    if (item->color.isEmpty())
+        item->color = firstValue(QStringLiteral("color"));
+
+    item->sizeValue = firstValue(QStringLiteral("size"));
+    if (item->sizeValue.isEmpty())
+        item->sizeValue = firstValue(QStringLiteral("size_name"));
+
+    qDebug() << "AmazonCatalogApi::_fetchListingAttributesFull: SKU" << sku
+             << "→ brand=" << item->brand << "exists in" << item->existsInMarketplaces.size()
+             << "marketplace(s)";
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
+// fetchSalesReport — Reports API GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL
+// Aggregates units shipped per ASIN across all given marketplace IDs.
+// ---------------------------------------------------------------------------
+QCoro::Task<void> AmazonCatalogApi::fetchSalesReport(
+    QStringList marketplaceIds,
+    QDateTime dataStartTime,
+    QDateTime dataEndTime,
+    QHash<QString, QHash<QString,int>>* mpToAsinUnits)
+{
+    mpToAsinUnits->clear();
+    if (marketplaceIds.isEmpty()) co_return;
+
+    const QString primaryId = marketplaceIds.first();
+    const QString endpoint  = endpointForMarketplace(primaryId);
+    const QString lwaReg    = lwaRegionForMarketplace(primaryId);
+
+    QString token;
+    co_await _getAccessToken(lwaReg, &token);
+    if (token.isEmpty()) co_return;
+
+    // --- Step 1: Create the report ---
+    {
+        QUrl url;
+        url.setScheme(QStringLiteral("https"));
+        url.setHost(endpoint);
+        url.setPath(QStringLiteral("/reports/2021-06-30/reports"));
+
+        QJsonArray mpArray;
+        for (const QString &mpId : marketplaceIds)
+            mpArray.append(mpId);
+
+        QJsonObject body;
+        body[QStringLiteral("reportType")]    = QStringLiteral("GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL");
+        body[QStringLiteral("marketplaceIds")] = mpArray;
+        body[QStringLiteral("dataStartTime")]  = dataStartTime.toString(Qt::ISODate);
+        body[QStringLiteral("dataEndTime")]    = dataEndTime.toString(Qt::ISODate);
+
+        QNetworkRequest req(url);
+        req.setRawHeader("x-amz-access-token", token.toUtf8());
+        req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+        qDebug() << "AmazonCatalogApi: requesting sales report for" << marketplaceIds;
+        QNetworkReply* reply = _nam()->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+        co_await qCoro(reply).waitForFinished();
+
+        const QByteArray data   = reply->readAll();
+        const int        status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        reply->deleteLater();
+
+        if (status != 202) {
+            m_lastError = QStringLiteral("Sales report creation failed: HTTP %1 — %2")
+                          .arg(status).arg(QString::fromUtf8(data.left(400)));
+            qWarning() << "AmazonCatalogApi:" << m_lastError;
+            co_return;
+        }
+
+        const QString reportId = QJsonDocument::fromJson(data).object()
+                                     .value(QStringLiteral("reportId")).toString();
+        if (reportId.isEmpty()) {
+            m_lastError = QStringLiteral("Sales report: no reportId — ") + QString::fromUtf8(data.left(300));
+            qWarning() << "AmazonCatalogApi:" << m_lastError;
+            co_return;
+        }
+
+        // --- Step 2: Poll until DONE ---
+        static const int kMaxPolls = 36;
+        static const int kPollMs   = 5000;
+        QString reportDocumentId;
+
+        for (int poll = 0; poll < kMaxPolls; ++poll) {
+            QTimer timer;
+            timer.setSingleShot(true);
+            timer.start(kPollMs);
+            co_await qCoro(&timer).waitForTimeout();
+
+            co_await _getAccessToken(lwaReg, &token);
+            if (token.isEmpty()) co_return;
+
+            QUrl pollUrl;
+            pollUrl.setScheme(QStringLiteral("https"));
+            pollUrl.setHost(endpoint);
+            pollUrl.setPath(QStringLiteral("/reports/2021-06-30/reports/") + reportId);
+
+            QNetworkRequest pollReq(pollUrl);
+            pollReq.setRawHeader("x-amz-access-token", token.toUtf8());
+            pollReq.setRawHeader("accept", "application/json");
+
+            QNetworkReply* pollReply = _nam()->get(pollReq);
+            co_await qCoro(pollReply).waitForFinished();
+
+            const QByteArray pollData   = pollReply->readAll();
+            const int        pollStatus = pollReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            pollReply->deleteLater();
+
+            if (pollStatus != 200) { continue; }
+
+            const QJsonObject pollObj  = QJsonDocument::fromJson(pollData).object();
+            const QString     procStat = pollObj.value(QStringLiteral("processingStatus")).toString();
+            qDebug() << "AmazonCatalogApi: sales report poll" << (poll + 1) << procStat;
+
+            if (procStat == QStringLiteral("DONE")) {
+                reportDocumentId = pollObj.value(QStringLiteral("reportDocumentId")).toString();
+                break;
+            }
+            if (procStat == QStringLiteral("FATAL") || procStat == QStringLiteral("CANCELLED")) {
+                m_lastError = QStringLiteral("Sales report failed: ") + procStat;
+                qWarning() << "AmazonCatalogApi:" << m_lastError;
+                co_return;
+            }
+        }
+
+        if (reportDocumentId.isEmpty()) {
+            m_lastError = QStringLiteral("Sales report did not complete within 3 minutes");
+            qWarning() << "AmazonCatalogApi:" << m_lastError;
+            co_return;
+        }
+
+        // --- Step 3: Get download URL ---
+        co_await _getAccessToken(lwaReg, &token);
+        if (token.isEmpty()) co_return;
+
+        QUrl docUrl;
+        docUrl.setScheme(QStringLiteral("https"));
+        docUrl.setHost(endpoint);
+        docUrl.setPath(QStringLiteral("/reports/2021-06-30/documents/") + reportDocumentId);
+
+        QNetworkRequest docReq(docUrl);
+        docReq.setRawHeader("x-amz-access-token", token.toUtf8());
+        docReq.setRawHeader("accept", "application/json");
+
+        QNetworkReply* docReply = _nam()->get(docReq);
+        co_await qCoro(docReply).waitForFinished();
+
+        const QByteArray docData   = docReply->readAll();
+        const int        docStatus = docReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        docReply->deleteLater();
+
+        if (docStatus != 200) {
+            m_lastError = QStringLiteral("Sales report document fetch failed: HTTP %1").arg(docStatus);
+            qWarning() << "AmazonCatalogApi:" << m_lastError;
+            co_return;
+        }
+
+        const QJsonObject docObj      = QJsonDocument::fromJson(docData).object();
+        const QString     downloadUrl = docObj.value(QStringLiteral("url")).toString();
+        const QString     compression = docObj.value(QStringLiteral("compressionAlgorithm")).toString();
+
+        if (downloadUrl.isEmpty()) {
+            m_lastError = QStringLiteral("Sales report: no download URL");
+            qWarning() << "AmazonCatalogApi:" << m_lastError;
+            co_return;
+        }
+
+        // --- Step 4: Download ---
+        QNetworkReply* dlReply = _nam()->get(QNetworkRequest{QUrl(downloadUrl)});
+        co_await qCoro(dlReply).waitForFinished();
+
+        QByteArray tsvData  = dlReply->readAll();
+        const int  dlStatus = dlReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        dlReply->deleteLater();
+
+        if (dlStatus != 200) {
+            m_lastError = QStringLiteral("Sales report download failed: HTTP %1").arg(dlStatus);
+            qWarning() << "AmazonCatalogApi:" << m_lastError;
+            co_return;
+        }
+
+        if (compression == QStringLiteral("GZIP")) {
+            const QByteArray decompressed = gunzip(tsvData);
+            if (decompressed.isEmpty()) {
+                m_lastError = QStringLiteral("Sales report decompression failed");
+                qWarning() << "AmazonCatalogApi:" << m_lastError;
+                co_return;
+            }
+            tsvData = decompressed;
+        }
+
+        // --- Step 5: Parse TSV ---
+        const QString     text    = QString::fromUtf8(tsvData);
+        const QStringList lines   = text.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+        if (lines.isEmpty()) co_return;
+
+        // Build sales-channel → marketplaceId map from AmazonMarketplace::all()
+        QHash<QString, QString> channelToMp;
+        for (const AmazonMarketplace &mp : AmazonMarketplace::all())
+            channelToMp.insert(mp.salesChannelName(), mp.marketplaceId());
+
+        const QStringList headers  = lines.at(0).split(QLatin1Char('\t'));
+        const int asinCol    = headers.indexOf(QStringLiteral("asin"));
+        const int qtyCol     = headers.indexOf(QStringLiteral("quantity"));
+        const int statusCol  = headers.indexOf(QStringLiteral("order-status"));
+        const int channelCol = headers.indexOf(QStringLiteral("sales-channel"));
+
+        if (asinCol < 0 || qtyCol < 0) {
+            qWarning() << "AmazonCatalogApi: sales report TSV missing columns. Headers:" << headers;
+            co_return;
+        }
+
+        for (int i = 1; i < lines.size(); ++i) {
+            const QStringList cols = lines.at(i).split(QLatin1Char('\t'));
+            if (cols.size() <= qMax(asinCol, qtyCol)) continue;
+
+            if (statusCol >= 0 && statusCol < cols.size()) {
+                const QString status = cols.at(statusCol).trimmed();
+                if (status.compare(QStringLiteral("Canceled"),  Qt::CaseInsensitive) == 0
+                 || status.compare(QStringLiteral("Cancelled"), Qt::CaseInsensitive) == 0
+                 || status.compare(QStringLiteral("Pending"),   Qt::CaseInsensitive) == 0)
+                    continue;
+            }
+
+            const QString asin = cols.at(asinCol).trimmed();
+            const int     qty  = cols.at(qtyCol).trimmed().toInt();
+            if (asin.isEmpty() || qty <= 0) continue;
+
+            QString mpId;
+            if (channelCol >= 0 && channelCol < cols.size())
+                mpId = channelToMp.value(cols.at(channelCol).trimmed());
+
+            if (!mpId.isEmpty())
+                (*mpToAsinUnits)[mpId][asin] += qty;
+        }
+
+        qDebug() << "AmazonCatalogApi: sales report parsed."
+                 << "Marketplaces with data:" << mpToAsinUnits->size();
+    }
     co_return;
 }
