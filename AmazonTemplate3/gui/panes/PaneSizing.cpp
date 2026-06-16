@@ -86,6 +86,9 @@
 #include <QBuffer>
 #include <QSet>
 #include <QCoro/QCoroTimer>
+#include <QFuture>
+#include <QPromise>
+#include <QCoro/QCoroFuture>
 #include <QTabWidget>
 #include <xlsxdocument.h>
 
@@ -2162,7 +2165,7 @@ void setAplusStatus(const AplusProgressUi &ui, const QString &msg, int step)
 
 void PaneSizing::onAplusUploadClicked()
 {
-    _uploadAplusContent();
+    m_uploadTask = _uploadAplusContent();
 }
 
 // Helper: find element from flat list by type + exact id, with fallback to base id.
@@ -2180,9 +2183,17 @@ findAplusElement(const QList<APlusUploadDialog::ElementInfo> &infos,
     return nullptr;
 }
 
+// Forward declaration — defined later in this file.
+static QString extractFaqContent(const QString &raw);
+
 QCoro::Task<void> PaneSizing::_uploadAplusContent()
 {
     if (!m_aplusContent || !m_aplusApi) co_return;
+
+    // CLI and working directory for FAQ regeneration on keyword-violation retries.
+    AbstractCli *cli = ui->comboBoxCli->currentData().value<AbstractCli *>();
+    const QDir &faqEffDir = m_productWorkingDir.exists() ? m_productWorkingDir : m_workingDir;
+    const QString faqWorkDir = faqEffDir.isAbsolute() ? faqEffDir.path() : QString{};
 
     // --- Sync prep ---
     QList<APlusUploadDialog::ElementInfo> infos = buildAplusElementInfos(*m_aplusContent);
@@ -2251,7 +2262,9 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                 ? tr("─── %1  |  color set %2/%3 ───").arg(mpId).arg(colorIdx + 1).arg(imageSets.size())
                 : tr("─── %1 ───").arg(mpId));
 
-            QJsonArray moduleList;
+            // Build the base module list (size chart + images). The FAQ is kept
+            // separately so it can be regenerated and retried on keyword violations.
+            QJsonArray moduleListBase;
 
             // --- Size chart ---
             if (addSizeChart) {
@@ -2291,8 +2304,8 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                         appendAplusLog(progressUi.logPtr,
                             tr("  ✓ Uploaded — ID: %1").arg(uploadId.left(40)));
                         // Module headline used (same Amazon font/style as FAQ headline).
-                        moduleList.append(buildImageModule(uploadId, sc->displayName, imgW, imgH,
-                                                           sizeChartTitle(locale)));
+                        moduleListBase.append(buildImageModule(uploadId, sc->displayName, imgW, imgH,
+                                                               sizeChartTitle(locale)));
                     } else {
                         appendAplusLog(progressUi.logPtr,
                             tr("  ⚠ Cannot load size chart image — skipped"));
@@ -2343,10 +2356,11 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                     tr("  ✓ Uploaded — ID: %1").arg(uploadId.left(40)));
                 // Module headline — same Amazon font/style as the size chart and FAQ.
                 const QString imgHeadline = (ii == 0 && useSlogan) ? apparelSlogan(locale) : QString{};
-                moduleList.append(buildImageModule(uploadId, info.displayName, imgW, imgH, imgHeadline));
+                moduleListBase.append(buildImageModule(uploadId, info.displayName, imgW, imgH, imgHeadline));
             }
 
-            // --- FAQ ---
+            // --- FAQ text (kept separate for retry on keyword violations) ---
+            QString faqText;
             if (addFaq) {
                 const QString faqKey = APlusUploadDialog::faqLangKeyForMarketplace(mpId);
                 const auto *faq = findAplusElement(infos, APlusElementType::Faq,
@@ -2355,26 +2369,20 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                     appendAplusLog(progressUi.logPtr,
                         tr("  ⚠ FAQ '%1' not found — skipped").arg(faqKey));
                 } else {
-                    const QString text = faq->textContent.isEmpty()
+                    faqText = faq->textContent.isEmpty()
                         ? QStringLiteral("(no FAQ content)") : faq->textContent;
-                    moduleList.append(buildFaqModule(text));
                     appendAplusLog(progressUi.logPtr,
-                        tr("  ✓ FAQ '%1' included (%2 chars)").arg(faq->displayName).arg(text.size()));
+                        tr("  ✓ FAQ '%1' included (%2 chars)").arg(faq->displayName).arg(faqText.size()));
                 }
             }
 
-            if (moduleList.isEmpty()) {
+            if (moduleListBase.isEmpty() && faqText.isEmpty()) {
                 appendAplusLog(progressUi.logPtr, tr("  ⚠ No modules — skipping this upload."));
                 step += fixedPerUpload;
                 continue;
             }
 
-            // --- Create content document ---
-            ++step;
-            setAplusStatus(progressUi, tr("Creating A+ content document…"), step - 1);
-            appendAplusLog(progressUi.logPtr,
-                tr("▶ Creating document (locale: %1)").arg(locale));
-            // --- Resolve child ASINs for this color set (needed for name + association) ---
+            // --- Resolve child ASINs and document name (once, before retry loop) ---
             QStringList asinList;
             {
                 const QString colorKey = (colorIdx < colorNames.size())
@@ -2387,9 +2395,6 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                             if (!asinList.contains(a)) asinList << a;
                 }
             }
-
-            // Build a per-color document name prefixed with the smallest-size child ASIN
-            // so the document is findable by ASIN in the Seller Central search bar.
             QString docName = m_productTitle.isEmpty() ? QStringLiteral("A+ Content") : m_productTitle;
             if (colorIdx < colorNames.size() && !colorNames.at(colorIdx).isEmpty()) {
                 const int paren = docName.indexOf(QLatin1Char('('));
@@ -2401,81 +2406,191 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                 if (!smallAsin.isEmpty())
                     docName = smallAsin + QStringLiteral(" - ") + docName;
             }
-            QJsonObject contentDoc{
-                {QStringLiteral("name"),              docName.left(100)},
-                {QStringLiteral("contentType"),       QStringLiteral("EBC")},
-                {QStringLiteral("locale"),            locale},
-                {QStringLiteral("contentModuleList"), moduleList}
-            };
-            QString contentReferenceKey;
-            co_await m_aplusApi->createContentDocument(mpId, contentDoc, &contentReferenceKey);
-            if (contentReferenceKey.isEmpty()) {
-                appendAplusLog(progressUi.logPtr,
-                    tr("✗ createContentDocument failed: %1").arg(m_aplusApi->lastError()));
-                setAplusStatus(progressUi, tr("Create document failed."), step);
-                co_return;
-            }
-            appendAplusLog(progressUi.logPtr,
-                tr("  ✓ Document created — key: %1").arg(contentReferenceKey.left(40)));
 
-            // --- Associate with ASINs ---
-            ++step;
-            setAplusStatus(progressUi, tr("Associating with ASINs…"), step - 1);
-            if (asinList.isEmpty()) {
-                appendAplusLog(progressUi.logPtr,
-                    tr("  ⚠ No child ASINs available — skipping association."));
-            } else {
-                appendAplusLog(progressUi.logPtr,
-                    tr("▶ Associating with %1 ASIN(s): %2")
-                        .arg(asinList.size())
-                        .arg(asinList.join(QStringLiteral(", "))));
-                bool asinOk = false;
-                co_await m_aplusApi->postAsinRelations(contentReferenceKey, mpId,
-                                                       asinList, &asinOk);
-                appendAplusLog(progressUi.logPtr, asinOk
-                    ? tr("  ✓ ASINs associated.")
-                    : tr("  ⚠ ASIN association failed: %1 (continuing)")
-                          .arg(m_aplusApi->lastError()));
-            }
+            // === Create / validate / submit — retried on FAQ keyword violations ===
+            const int kMaxFaqRetries = 5;
+            int faqAttempt = 0;
+            QStringList allBlockedKeywords; // accumulated across retries for cumulative feedback
+            while (true) {
+                // Assemble full module list from base + current FAQ text.
+                QJsonArray moduleList = moduleListBase;
+                if (!faqText.isEmpty())
+                    moduleList.append(buildFaqModule(faqText));
 
-            // --- Validate ---
-            ++step;
-            setAplusStatus(progressUi, tr("Validating content…"), step - 1);
-            appendAplusLog(progressUi.logPtr, tr("▶ Validating content document…"));
-            {
-                QStringList valErrors, valWarnings;
-                co_await m_aplusApi->validateContentDocumentAsinRelations(
-                    contentReferenceKey, mpId, contentDoc,
-                    asinList, &valErrors, &valWarnings);
-                for (const QString &w : std::as_const(valWarnings))
-                    appendAplusLog(progressUi.logPtr, tr("  ⚠ Warning: %1").arg(w));
-                for (const QString &e : std::as_const(valErrors))
-                    appendAplusLog(progressUi.logPtr, tr("  ✗ Error: %1").arg(e));
-                if (!valErrors.isEmpty()) {
-                    setAplusStatus(progressUi, tr("Validation failed."), step);
+                // --- Create content document ---
+                // Step counter advances only on first attempt (retries aren't pre-budgeted).
+                if (faqAttempt == 0) ++step;
+                setAplusStatus(progressUi,
+                    faqAttempt == 0 ? tr("Creating A+ content document…")
+                                    : tr("Retry %1 — Creating A+ content document…").arg(faqAttempt),
+                    step - 1);
+                appendAplusLog(progressUi.logPtr,
+                    faqAttempt == 0
+                        ? tr("▶ Creating document (locale: %1)").arg(locale)
+                        : tr("▶ Retry %1 — Creating document (locale: %2)").arg(faqAttempt).arg(locale));
+
+                QJsonObject contentDoc{
+                    {QStringLiteral("name"),              docName.left(100)},
+                    {QStringLiteral("contentType"),       QStringLiteral("EBC")},
+                    {QStringLiteral("locale"),            locale},
+                    {QStringLiteral("contentModuleList"), moduleList}
+                };
+                QString contentReferenceKey;
+                co_await m_aplusApi->createContentDocument(mpId, contentDoc, &contentReferenceKey);
+                if (contentReferenceKey.isEmpty()) {
                     appendAplusLog(progressUi.logPtr,
-                        tr("✗ Created (key: %1) but not submitted.").arg(contentReferenceKey));
+                        tr("✗ createContentDocument failed: %1").arg(m_aplusApi->lastError()));
+                    setAplusStatus(progressUi, tr("Create document failed."), step);
                     co_return;
                 }
-                appendAplusLog(progressUi.logPtr, valWarnings.isEmpty()
-                    ? tr("  ✓ Validation passed.")
-                    : tr("  ✓ Validation passed (with warnings)."));
-            }
+                appendAplusLog(progressUi.logPtr,
+                    tr("  ✓ Document created — key: %1").arg(contentReferenceKey.left(40)));
 
-            // --- Submit for approval ---
-            if (submitApproval) {
-                ++step;
-                setAplusStatus(progressUi, tr("Submitting for approval…"), step - 1);
-                appendAplusLog(progressUi.logPtr, tr("▶ Submitting for approval…"));
-                bool approvalOk = false;
-                co_await m_aplusApi->submitForApproval(contentReferenceKey, mpId, &approvalOk);
-                appendAplusLog(progressUi.logPtr, approvalOk
-                    ? tr("  ✓ Submitted. Amazon reviews within 24–48 hours.")
-                    : tr("  ⚠ Approval submission failed: %1").arg(m_aplusApi->lastError()));
-            }
+                // --- Associate with ASINs ---
+                if (faqAttempt == 0) ++step;
+                setAplusStatus(progressUi, tr("Associating with ASINs…"), step - 1);
+                if (asinList.isEmpty()) {
+                    appendAplusLog(progressUi.logPtr,
+                        tr("  ⚠ No child ASINs available — skipping association."));
+                } else {
+                    appendAplusLog(progressUi.logPtr,
+                        tr("▶ Associating with %1 ASIN(s): %2")
+                            .arg(asinList.size())
+                            .arg(asinList.join(QStringLiteral(", "))));
+                    bool asinOk = false;
+                    co_await m_aplusApi->postAsinRelations(contentReferenceKey, mpId,
+                                                           asinList, &asinOk);
+                    appendAplusLog(progressUi.logPtr, asinOk
+                        ? tr("  ✓ ASINs associated.")
+                        : tr("  ⚠ ASIN association failed: %1 (continuing)")
+                              .arg(m_aplusApi->lastError()));
+                }
 
-            appendAplusLog(progressUi.logPtr,
-                tr("  ✓ Upload complete — key: %1").arg(contentReferenceKey));
+                // --- Validate ---
+                if (faqAttempt == 0) ++step;
+                setAplusStatus(progressUi, tr("Validating content…"), step - 1);
+                appendAplusLog(progressUi.logPtr, tr("▶ Validating content document…"));
+                {
+                    QStringList valErrors, valWarnings;
+                    co_await m_aplusApi->validateContentDocumentAsinRelations(
+                        contentReferenceKey, mpId, contentDoc,
+                        asinList, &valErrors, &valWarnings);
+                    for (const QString &w : std::as_const(valWarnings))
+                        appendAplusLog(progressUi.logPtr, tr("  ⚠ Warning: %1").arg(w));
+                    for (const QString &e : std::as_const(valErrors))
+                        appendAplusLog(progressUi.logPtr, tr("  ✗ Error: %1").arg(e));
+                    if (!valErrors.isEmpty()) {
+                        setAplusStatus(progressUi, tr("Validation failed."), step);
+                        appendAplusLog(progressUi.logPtr,
+                            tr("✗ Created (key: %1) but not submitted.").arg(contentReferenceKey));
+                        co_return;
+                    }
+                    appendAplusLog(progressUi.logPtr, valWarnings.isEmpty()
+                        ? tr("  ✓ Validation passed.")
+                        : tr("  ✓ Validation passed (with warnings)."));
+                }
+
+                // --- Submit for approval ---
+                if (submitApproval) {
+                    if (faqAttempt == 0) ++step;
+                    setAplusStatus(progressUi, tr("Submitting for approval…"), step - 1);
+                    appendAplusLog(progressUi.logPtr, tr("▶ Submitting for approval…"));
+                    bool approvalOk = false;
+                    QStringList blocked;
+                    co_await m_aplusApi->submitForApproval(contentReferenceKey, mpId, &approvalOk, &blocked);
+                    if (!approvalOk) {
+                        // Accumulate all blocked keywords across retries for cumulative feedback.
+                        for (const QString &kw : std::as_const(blocked))
+                            if (!allBlockedKeywords.contains(kw))
+                                allBlockedKeywords.append(kw);
+
+                        if (!blocked.isEmpty() && cli && !faqText.isEmpty()
+                                && faqAttempt < kMaxFaqRetries) {
+                            ++faqAttempt;
+                            appendAplusLog(progressUi.logPtr,
+                                tr("  ↩ FAQ rejected (attempt %1/%2) — forbidden: %3 — regenerating…")
+                                    .arg(faqAttempt).arg(kMaxFaqRetries)
+                                    .arg(blocked.join(QStringLiteral(", "))));
+                            // Pass ALL accumulated forbidden words so the model doesn't
+                            // reintroduce words that were banned in earlier rounds.
+                            const QString rewritePrompt =
+                                QStringLiteral("Rewrite the following Amazon A+ Content FAQ.\n"
+                                               "The words/phrases below are STRICTLY forbidden by Amazon's "
+                                               "community guidelines and MUST NOT appear anywhere in the output "
+                                               "(this list grows with each rejection round — honour all of them): ")
+                                + allBlockedKeywords.join(QStringLiteral(", "))
+                                + QStringLiteral(".\n\n"
+                                               "Rules:\n"
+                                               "- Replace or rephrase every sentence containing a forbidden word\n"
+                                               "- Keep all Q&A pairs\n"
+                                               "- Keep the Q:/A: format exactly\n"
+                                               "- Return ONLY the FAQ, no extra text\n\n")
+                                + faqText;
+                            // Bridge runPromptAsync → QFuture to avoid co_await on a QProcess
+                            // signal: the QCoro::Task<T> temporary from runPrompt() has its
+                            // lifetime managed by GCC's frame analysis, which may prematurely
+                            // call ~Task() → handle.destroy() while QProcess::finished is
+                            // still queued, crashing the QCoroSignal resume lambda.
+                            QPromise<CliRunResult> cliPromise;
+                            cliPromise.start();
+                            QFuture<CliRunResult> cliFuture = cliPromise.future();
+                            {
+                                auto sp = QSharedPointer<QPromise<CliRunResult>>::create(
+                                    std::move(cliPromise));
+                                cli->runPromptAsync(rewritePrompt, faqWorkDir, this,
+                                    [sp](CliRunResult r) mutable {
+                                        sp->addResult(std::move(r));
+                                        sp->finish();
+                                    });
+                            }
+                            const CliRunResult r = co_await qCoro(cliFuture).result();
+                            const QString newFaq = extractFaqContent(r.output.trimmed());
+                            if (!newFaq.isEmpty()) {
+                                faqText = newFaq;
+                                continue; // retry with regenerated FAQ
+                            }
+                            appendAplusLog(progressUi.logPtr,
+                                tr("  ⚠ CLI rewrite returned empty output — keeping original FAQ"));
+                        }
+
+                        // All retries exhausted (or no CLI / non-keyword failure).
+                        // If a FAQ was involved, ask whether to skip it or abort.
+                        if (!allBlockedKeywords.isEmpty() && !faqText.isEmpty()) {
+                            const QString detail = tr(
+                                "The FAQ was rejected by Amazon %1 time(s).\n\n"
+                                "All forbidden words found: %2\n\n"
+                                "Skip FAQ and upload without it, or interrupt the entire upload?")
+                                    .arg(faqAttempt)
+                                    .arg(allBlockedKeywords.join(QStringLiteral(", ")));
+                            const auto btn = QMessageBox::question(
+                                this,
+                                tr("FAQ blocked by Amazon"),
+                                detail,
+                                QMessageBox::Ignore | QMessageBox::Abort,
+                                QMessageBox::Ignore);
+                            if (btn == QMessageBox::Abort) {
+                                appendAplusLog(progressUi.logPtr,
+                                    tr("  ✗ Upload interrupted by user."));
+                                co_return;
+                            }
+                            faqText.clear();
+                            appendAplusLog(progressUi.logPtr,
+                                tr("  ↩ Retrying without FAQ…"));
+                            continue;
+                        }
+
+                        appendAplusLog(progressUi.logPtr,
+                            tr("  ⚠ Approval submission failed: %1").arg(m_aplusApi->lastError()));
+                    } else {
+                        appendAplusLog(progressUi.logPtr,
+                            tr("  ✓ Submitted. Amazon reviews within 24–48 hours."));
+                    }
+                }
+
+                appendAplusLog(progressUi.logPtr,
+                    tr("  ✓ Upload complete — key: %1").arg(contentReferenceKey));
+                break; // done (success or non-retryable failure)
+            } // end FAQ retry loop
         }
     }
 
@@ -4600,9 +4715,16 @@ void PaneSizing::onAplusGenerateSelected()
             finalSels.append(sel);
 
     if (finalSels.isEmpty()) {
+        QStringList selectedIds, workflowIds;
+        for (const SlotSel &s : selections) selectedIds << s.elemId;
+        for (const QString &k : slotByElemId.keys()) workflowIds << k;
+        workflowIds.sort();
         QMessageBox::information(this, tr("Generate Selected"),
-            tr("The selected image slots are not produced by the current workflow. "
-               "Try Generate All instead."));
+            tr("The selected image slots are not produced by the current workflow.\n\n"
+               "Selected: %1\n\nWorkflow produces (colors: %2): %3")
+            .arg(selectedIds.join(QStringLiteral(", ")))
+            .arg(colors.join(QStringLiteral(", ")))
+            .arg(workflowIds.join(QStringLiteral(", "))));
         return;
     }
 
