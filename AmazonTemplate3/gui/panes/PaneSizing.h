@@ -67,7 +67,9 @@ private slots:
     void updateButtonStates();
     void onGroupImageSelected(int row);
     void onUploadSizeImageClicked();
-    void onVariantImageSelected(int row);
+    void onVariantTreeSelectionChanged();
+    void onBrowseVariantImageClicked();
+    void onUploadVariantImageClicked();
     void onOpenSizeTableFolderClicked();
     void onAddSkusFromTemplateClicked();
     void onFactorizeSizeTables();
@@ -82,6 +84,7 @@ private slots:
     void onAplusTreeClicked(const QModelIndex &idx);
     void onAplusSelectionChanged(const QModelIndex &current, const QModelIndex &previous);
     void onAplusUploadClicked();
+    void onAplusExcludedColors();
     void onEditPromptsClicked();
 
     void onPickSizeTableTemplateClicked();
@@ -127,17 +130,23 @@ private:
     QString              m_productType;
     QString              m_productTitle;
     QStringList         m_variantImagePaths;
+    QString             m_variantBrowsedImagePath;
+    QCoro::Task<void>   m_variantUploadTask;
     QString             m_mainImageLocalPath;
     QList<AbstractCli *>  m_availableClis;
     QNetworkAccessManager *m_imageNam = nullptr;
     QList<QPair<QString, QStringList>> m_colorVariants;
-    QMap<QString, QStringList>         m_colorAsins;  // color.toLower() → child ASINs
+    QMap<QString, QStringList>         m_colorAsins;     // color.toLower() → child ASINs
+    QStringList                        m_aplusExcludedColors;
 
     // A+ content state
     std::unique_ptr<APlusContent> m_aplusContent;
     APlusTreeModel               *m_aplusModel   = nullptr;
     bool                          m_aplusDesktop = true;
     QMenu                        *m_aplusMenu    = nullptr;
+    // Pinned so the coroutine frame (and its stack-allocated QProcess inside
+    // cli->runPrompt) is not GC'd while the task is suspended mid-upload.
+    QCoro::Task<void>             m_uploadTask;
 
     SizingTableTemplateModel     *m_templateModel    = nullptr;
     BrokenChildTable             *m_brokenChildTable = nullptr;
@@ -160,6 +169,7 @@ private:
     bool _rebuildSizeTable();
     const AbstractSizeCategory* _currentCategory() const;
     QCoro::Task<void> _uploadSizeImage(int imageIndex);
+    QCoro::Task<void> _uploadVariantImage(int imageIndex);
     QCoro::Task<void> _saveToSizeTableFolder();
     QCoro::Task<void> _addSkusFromTemplate();
     QCoro::Task<void> _uploadAplusContent();

@@ -36,6 +36,8 @@
 #include <QStandardItem>
 #include <QListWidget>
 #include <QListView>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
 #include <QCheckBox>
 #include <QFont>
 #include <QIcon>
@@ -142,8 +144,16 @@ PaneSizing::PaneSizing(QWidget *parent)
     connect(ui->listWidgetSizeGroups, &QListWidget::currentRowChanged,
             this, &PaneSizing::onGroupImageSelected);
 
-    connect(ui->listWidgetImages, &QListWidget::currentRowChanged,
-            this, &PaneSizing::onVariantImageSelected);
+    connect(ui->treeWidgetColorVariants, &QTreeWidget::currentItemChanged,
+            this, [this](QTreeWidgetItem *, QTreeWidgetItem *) {
+                onVariantTreeSelectionChanged();
+            });
+    connect(ui->buttonBrowseVariantImage, &QPushButton::clicked,
+            this, &PaneSizing::onBrowseVariantImageClicked);
+    connect(ui->buttonUploadVariantImage, &QPushButton::clicked,
+            this, &PaneSizing::onUploadVariantImageClicked);
+    connect(ui->radioButtonVariantReplaceAt, &QRadioButton::toggled,
+            ui->spinBoxVariantImagePos, &QSpinBox::setEnabled);
 
     auto makePromptSaver = [this](QTextEdit* editor, int step) {
         connect(editor, &QTextEdit::textChanged, this, [this, editor, step]() {
@@ -592,6 +602,9 @@ void PaneSizing::_loadProductSettings()
 
     QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
                  QSettings::IniFormat);
+
+    m_aplusExcludedColors = s.value(QStringLiteral("aplus/excluded_colors"))
+        .toString().split(QLatin1Char(','), Qt::SkipEmptyParts);
 
     if (!s.contains(QStringLiteral("sizing/type")))
         return;
@@ -1654,29 +1667,46 @@ void PaneSizing::_downloadVariantImages(const QList<QPair<QString, QStringList>>
 
     m_colorVariants = colorImages;
 
-    ui->listWidgetImages->clear();
+    ui->treeWidgetColorVariants->clear();
     m_variantImagePaths.clear();
+    m_variantBrowsedImagePath.clear();
+    ui->labelBrowsedImage->setText(tr("(no browsed image)"));
+    ui->labelBrowsedImage->setPixmap({});
 
     const bool multiColor = colorImages.size() > 1;
     const QString dir = m_productWorkingDir.absolutePath();
 
     for (const auto &[color, urls] : colorImages) {
+        auto *colorItem = new QTreeWidgetItem(ui->treeWidgetColorVariants);
+        colorItem->setText(0, color.isEmpty() ? tr("(default)") : color);
+
         const QString prefix = multiColor
             ? colorToFileSegment(color) + QLatin1Char('-')
             : QString{};
         int index = 1;
+        bool firstForColor = true;
+
         for (const QString &url : urls) {
             const QString filename = QStringLiteral("%1image-%2.jpg")
                 .arg(prefix).arg(index, 2, 10, QLatin1Char('0'));
             const QString localPath = dir + QLatin1Char('/') + filename;
             m_variantImagePaths.append(localPath);
-            ui->listWidgetImages->addItem(filename);
+
+            auto *imgItem = new QTreeWidgetItem(colorItem);
+            imgItem->setText(0, filename);
+            imgItem->setData(0, Qt::UserRole, localPath);
+
+            if (firstForColor) {
+                colorItem->setData(0, Qt::UserRole, localPath);
+                firstForColor = false;
+            }
 
             if (!QFileInfo::exists(localPath)) {
                 QNetworkRequest req{QUrl(url)};
                 QNetworkReply *reply = m_imageNam->get(req);
                 const QString savedPath = localPath;
-                connect(reply, &QNetworkReply::finished, this, [this, reply, savedPath]() {
+                connect(reply, &QNetworkReply::finished, this,
+                        [this, reply, savedPath]() {
                     reply->deleteLater();
                     if (reply->error() != QNetworkReply::NoError)
                         return;
@@ -1685,37 +1715,76 @@ void PaneSizing::_downloadVariantImages(const QList<QPair<QString, QStringList>>
                         f.write(reply->readAll());
                         f.close();
                     }
-                    const int row = m_variantImagePaths.indexOf(savedPath);
-                    if (row >= 0 && ui->listWidgetImages->currentRow() == row)
-                        onVariantImageSelected(row);
+                    // Refresh display if this image is currently selected
+                    auto *cur = ui->treeWidgetColorVariants->currentItem();
+                    if (cur && cur->data(0, Qt::UserRole).toString() == savedPath)
+                        onVariantTreeSelectionChanged();
                 });
             }
             ++index;
         }
+        colorItem->setExpanded(true);
     }
 
-    if (ui->listWidgetImages->count() > 0) {
-        ui->listWidgetImages->setCurrentRow(0);
-        onVariantImageSelected(0);
+    if (ui->treeWidgetColorVariants->topLevelItemCount() > 0) {
+        ui->treeWidgetColorVariants->setCurrentItem(
+            ui->treeWidgetColorVariants->topLevelItem(0));
+        onVariantTreeSelectionChanged();
     }
 }
 
-void PaneSizing::onVariantImageSelected(int row)
+void PaneSizing::onVariantTreeSelectionChanged()
 {
-    if (row < 0 || row >= m_variantImagePaths.size()) {
-        ui->labelVariantImage->clear();
-        return;
-    }
-    const QPixmap pm(m_variantImagePaths.at(row));
+    auto *item = ui->treeWidgetColorVariants->currentItem();
+    if (!item) { ui->labelVariantImage->clear(); return; }
+
+    const QString path = item->data(0, Qt::UserRole).toString();
+    if (path.isEmpty()) { ui->labelVariantImage->clear(); return; }
+
+    const QPixmap pm(path);
     if (pm.isNull()) {
         ui->labelVariantImage->setText(tr("(image not yet downloaded)"));
         return;
     }
-    const QSize vp = ui->scrollAreaImage->viewport()->size();
-    const int maxW = vp.width()  - 4;
-    const int maxH = vp.height() - 4;
+    const QSize sz = ui->labelVariantImage->size().isEmpty()
+                   ? QSize(400, 300) : ui->labelVariantImage->size();
     ui->labelVariantImage->setPixmap(
-        pm.scaled(maxW, maxH, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        pm.scaled(sz, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+}
+
+void PaneSizing::onBrowseVariantImageClicked()
+{
+    const QString startDir = m_productWorkingDir.exists()
+                           ? m_productWorkingDir.absolutePath() : QString{};
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Select image to upload"),
+        startDir,
+        tr("Images (*.jpg *.jpeg *.png)"));
+    if (path.isEmpty()) return;
+
+    m_variantBrowsedImagePath = path;
+    const QPixmap pm(path);
+    if (!pm.isNull()) {
+        const QSize sz = ui->labelBrowsedImage->size().isEmpty()
+                       ? QSize(400, 300) : ui->labelBrowsedImage->size();
+        ui->labelBrowsedImage->setPixmap(
+            pm.scaled(sz, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    } else {
+        ui->labelBrowsedImage->setText(tr("(failed to load image)"));
+    }
+}
+
+void PaneSizing::onUploadVariantImageClicked()
+{
+    int imageIndex;
+    if (ui->radioButtonVariantAppend->isChecked())
+        imageIndex = -1;
+    else if (ui->radioButtonVariantReplaceLast->isChecked())
+        imageIndex = -2;
+    else
+        imageIndex = ui->spinBoxVariantImagePos->value();
+
+    m_variantUploadTask = _uploadVariantImage(imageIndex);
 }
 
 QCoro::Task<void> PaneSizing::_fetchAllSkusCached(const QString &marketplaceId,
@@ -2677,6 +2746,59 @@ void PaneSizing::_rebuildAplusMenu()
     m_aplusMenu->addSeparator();
     QAction *faqAct = m_aplusMenu->addAction(tr("FAQ"));
     connect(faqAct, &QAction::triggered, this, &PaneSizing::onAplusGenerateFaq);
+
+    m_aplusMenu->addSeparator();
+    QAction *excludeAct = m_aplusMenu->addAction(tr("Excluded colors…"));
+    connect(excludeAct, &QAction::triggered, this, &PaneSizing::onAplusExcludedColors);
+}
+
+void PaneSizing::onAplusExcludedColors()
+{
+    if (m_colorVariants.isEmpty()) {
+        QMessageBox::information(this, tr("Excluded Colors"),
+            tr("No color variants loaded. Load a product first."));
+        return;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Excluded colors from A+ generation"));
+    dlg.resize(380, 280);
+    auto *lay = new QVBoxLayout(&dlg);
+
+    auto *infoLabel = new QLabel(
+        tr("Uncheck colors to exclude them from A+ content generation:"), &dlg);
+    infoLabel->setWordWrap(true);
+    lay->addWidget(infoLabel);
+
+    auto *list = new QListWidget(&dlg);
+    for (const auto &[color, urls] : std::as_const(m_colorVariants)) {
+        if (color.isEmpty()) continue;
+        auto *item = new QListWidgetItem(color, list);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(m_aplusExcludedColors.contains(color)
+                            ? Qt::Unchecked : Qt::Checked);
+    }
+    lay->addWidget(list);
+
+    auto *btns = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    connect(btns, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(btns, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    lay->addWidget(btns);
+
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    m_aplusExcludedColors.clear();
+    for (int i = 0; i < list->count(); ++i) {
+        if (list->item(i)->checkState() == Qt::Unchecked)
+            m_aplusExcludedColors << list->item(i)->text();
+    }
+
+    if (m_productWorkingDir.exists()) {
+        QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                    QSettings::IniFormat);
+        s.setValue(QStringLiteral("aplus/excluded_colors"),
+                   m_aplusExcludedColors.join(QLatin1Char(',')));
+    }
 }
 
 QString PaneSizing::_aplusTimestamp() const
@@ -3189,7 +3311,7 @@ void PaneSizing::onAplusGenerateAll()
     // Collect colors from m_colorVariants (focus = first entry)
     QStringList colors;
     for (const auto &[color, urls] : std::as_const(m_colorVariants))
-        if (!color.isEmpty())
+        if (!color.isEmpty() && !m_aplusExcludedColors.contains(color))
             colors << color;
     const QString focusColor = colors.isEmpty() ? QString{} : colors.first();
 
@@ -4321,15 +4443,40 @@ void PaneSizing::onAplusGenerateFaq()
     auto *resultDlg = new QDialog(this);
     resultDlg->setAttribute(Qt::WA_DeleteOnClose);
     resultDlg->setWindowTitle(tr("FAQ — %1").arg(cli->getName()));
-    resultDlg->resize(700, 500);
+    resultDlg->resize(700, 540);
     auto *resultLayout = new QVBoxLayout(resultDlg);
+
+    auto *faqStatusLabel = new QLabel(tr("Generating FAQ with %1…").arg(cli->getName()), resultDlg);
+    { QFont f = faqStatusLabel->font(); f.setBold(true); faqStatusLabel->setFont(f); }
+    resultLayout->addWidget(faqStatusLabel);
+
+    auto *faqProgressBar = new QProgressBar(resultDlg);
+    faqProgressBar->setRange(0, 0);  // indeterminate while English FAQ is being generated
+    resultLayout->addWidget(faqProgressBar);
+
     auto *output = new QTextEdit(resultDlg);
     output->setReadOnly(true);
-    output->setPlainText(tr("Generating FAQ with %1…").arg(cli->getName()));
     resultLayout->addWidget(output);
+
+    auto *faqBtnRow = new QHBoxLayout();
+    auto *faqCopyBtn = new QPushButton(tr("Copy"), resultDlg);
+    faqBtnRow->addWidget(faqCopyBtn);
+    faqBtnRow->addStretch();
     auto *closeBtns = new QDialogButtonBox(QDialogButtonBox::Close, resultDlg);
+    QPushButton *faqCloseBtn = closeBtns->button(QDialogButtonBox::Close);
+    if (faqCloseBtn) faqCloseBtn->setEnabled(false);
+    faqBtnRow->addWidget(closeBtns);
+    resultLayout->addLayout(faqBtnRow);
+
+    connect(faqCopyBtn, &QPushButton::clicked, resultDlg, [output]() {
+        QGuiApplication::clipboard()->setText(output->toPlainText());
+    });
     connect(closeBtns, &QDialogButtonBox::rejected, resultDlg, &QDialog::reject);
-    resultLayout->addWidget(closeBtns);
+
+    QPointer<QLabel>       faqStatusPtr(faqStatusLabel);
+    QPointer<QProgressBar> faqBarPtr(faqProgressBar);
+    QPointer<QPushButton>  faqCloseBtnPtr(faqCloseBtn);
+
     resultDlg->show();
 
     // Save text result to APlusContent when it arrives.
@@ -4388,8 +4535,19 @@ void PaneSizing::onAplusGenerateFaq()
     }
 
     cli->runPromptAsync(finalPrompt, workDir, resultDlg,
-                        [output, saveFaqToAplus, workDir, faqDirSnap, guard](CliRunResult result) {
+        [output, saveFaqToAplus, workDir, faqDirSnap, guard,
+         faqStatusPtr, faqBarPtr, faqCloseBtnPtr](CliRunResult result) {
+
+        auto markFaqDone = [faqStatusPtr, faqBarPtr, faqCloseBtnPtr]() {
+            if (faqStatusPtr) faqStatusPtr->setText(QObject::tr("Done."));
+            if (faqBarPtr) { faqBarPtr->setRange(0, 1); faqBarPtr->setValue(1); }
+            if (faqCloseBtnPtr) faqCloseBtnPtr->setEnabled(true);
+        };
+
         if (!result.processStarted) {
+            if (faqStatusPtr)
+                faqStatusPtr->setText(QObject::tr("Failed to start CLI process."));
+            markFaqDone();
             output->setPlainText(QObject::tr("Failed to start CLI process."));
             return;
         }
@@ -4409,15 +4567,53 @@ void PaneSizing::onAplusGenerateFaq()
         output->setPlainText(display);
         text = extractFaqContent(text);
 
-        if (text.isEmpty() || !guard) return;
+        if (text.isEmpty() || !guard) { markFaqDone(); return; }
+
+        // Pre-count unique non-English target languages to size the progress bar
+        int uniqueLangCount = 0;
+        {
+            QSet<QString> seen;
+            for (int i = 0; i < guard->ui->listWidgetCountries->count(); ++i) {
+                const QString code = guard->ui->listWidgetCountries->item(i)->text().trimmed();
+                if (code.contains(QStringLiteral("(missing)"))) continue;
+                const QString lang = countryCodeToLanguage(code);
+                if (lang.isEmpty() || seen.contains(lang)) continue;
+                seen.insert(lang);
+                ++uniqueLangCount;
+            }
+        }
+        // format + validate for English, then translate + format + validate per language
+        const int totalTasks = 2 + uniqueLangCount * 3;
+        if (faqBarPtr) faqBarPtr->setRange(0, totalTasks);
+
+        auto globalStep = QSharedPointer<int>::create(0);
+        using StartFn = std::function<void(int, int, const QString &)>;
+        using DoneFn  = std::function<void(int, int, const QString &, CliRunResult)>;
+
+        StartFn onTaskStart{[faqStatusPtr, faqBarPtr, globalStep, totalTasks]
+            (int, int, const QString &label) {
+                ++(*globalStep);
+                if (faqStatusPtr)
+                    faqStatusPtr->setText(QStringLiteral("(%1/%2) %3")
+                        .arg(*globalStep).arg(totalTasks).arg(label));
+                if (faqBarPtr) faqBarPtr->setValue(*globalStep - 1);
+            }};
 
         auto textHolder = QSharedPointer<QString>::create(text);
 
         QList<PaneSizing::CliTask> fvTasks;
         guard->_appendFaqFormatValidateTasks(fvTasks, textHolder, workDir,
-            [saveFaqToAplus, guard, workDir, textHolder](const QString &finalText) {
+            [saveFaqToAplus, guard, workDir, textHolder,
+             onTaskStart, faqStatusPtr, faqBarPtr, faqCloseBtnPtr, totalTasks]
+            (const QString &finalText) {
+
                 saveFaqToAplus(finalText);
-                if (finalText.isEmpty() || !guard) return;
+                if (finalText.isEmpty() || !guard) {
+                    if (faqStatusPtr) faqStatusPtr->setText(QObject::tr("Done."));
+                    if (faqBarPtr) faqBarPtr->setValue(totalTasks);
+                    if (faqCloseBtnPtr) faqCloseBtnPtr->setEnabled(true);
+                    return;
+                }
 
                 // Collect unique non-English target languages
                 QList<QPair<QString,QString>> targetLangs;
@@ -4433,7 +4629,12 @@ void PaneSizing::onAplusGenerateFaq()
                         targetLangs.append({code, lang});
                     }
                 }
-                if (targetLangs.isEmpty()) return;
+                if (targetLangs.isEmpty()) {
+                    if (faqStatusPtr) faqStatusPtr->setText(QObject::tr("Done."));
+                    if (faqBarPtr) faqBarPtr->setValue(totalTasks);
+                    if (faqCloseBtnPtr) faqCloseBtnPtr->setEnabled(true);
+                    return;
+                }
 
                 QList<PaneSizing::CliTask> transTasks;
                 for (const auto &[langCode, langName] : std::as_const(targetLangs)) {
@@ -4477,9 +4678,17 @@ void PaneSizing::onAplusGenerateFaq()
                             if (guard->m_aplusModel) guard->_rebuildAplusModel();
                         });
                 }
-                guard->_runSequentially(std::move(transTasks));
+                DoneFn onTransDone{[faqStatusPtr, faqBarPtr, faqCloseBtnPtr, totalTasks]
+                    (int step, int total, const QString &, CliRunResult) {
+                        if (step == total + 1) {
+                            if (faqStatusPtr) faqStatusPtr->setText(QObject::tr("Done."));
+                            if (faqBarPtr) faqBarPtr->setValue(totalTasks);
+                            if (faqCloseBtnPtr) faqCloseBtnPtr->setEnabled(true);
+                        }
+                    }};
+                guard->_runSequentially(std::move(transTasks), onTaskStart, std::move(onTransDone));
             });
-        guard->_runSequentially(std::move(fvTasks));
+        guard->_runSequentially(std::move(fvTasks), std::move(onTaskStart), {});
     });
 }
 
@@ -4508,7 +4717,7 @@ void PaneSizing::onAplusGenerateImage(const QString &elementId)
         // Collect colors from m_colorVariants (focus = first entry)
         QStringList colors;
         for (const auto &[color, urls] : std::as_const(m_colorVariants))
-            if (!color.isEmpty())
+            if (!color.isEmpty() && !m_aplusExcludedColors.contains(color))
                 colors << color;
         const QString focusColor = colors.isEmpty() ? QString{} : colors.first();
 
@@ -4587,7 +4796,7 @@ void PaneSizing::onAplusGenerateImage(const QString &elementId)
         // Collect colors from m_colorVariants (focus = first entry)
         QStringList colors;
         for (const auto &[color, urls] : std::as_const(m_colorVariants))
-            if (!color.isEmpty())
+            if (!color.isEmpty() && !m_aplusExcludedColors.contains(color))
                 colors << color;
         const QString focusColor = colors.isEmpty() ? QString{} : colors.first();
 
@@ -4690,7 +4899,7 @@ void PaneSizing::onAplusGenerateSelected()
     // --- Selection dialog (table with per-slot Desktop / Mobile checkboxes) ---
     QDialog dlg(this);
     dlg.setWindowTitle(tr("Select images to regenerate"));
-    dlg.resize(960, 540);
+    dlg.resize(1100, 560);
     auto *lay = new QVBoxLayout(&dlg);
 
     // Toolbar row
@@ -4707,13 +4916,15 @@ void PaneSizing::onAplusGenerateSelected()
     lay->addWidget(splitter, 1);
 
     auto *table = new QTableWidget(splitter);
-    table->setColumnCount(3);
-    table->setHorizontalHeaderLabels({tr("Image"), tr("Desktop"), tr("Mobile")});
-    table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    table->setColumnCount(4);
+    table->setHorizontalHeaderLabels({tr("Image"), tr("Desktop"), tr("Mobile"), tr("Extra instructions")});
+    table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
     table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Fixed);
     table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
-    table->setColumnWidth(1, 90);
-    table->setColumnWidth(2, 90);
+    table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    table->setColumnWidth(0, 180);
+    table->setColumnWidth(1, 80);
+    table->setColumnWidth(2, 80);
     table->verticalHeader()->setVisible(false);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -4766,6 +4977,11 @@ void PaneSizing::onAplusGenerateSelected()
         mItem->setCheckState(Qt::Checked);
         mItem->setTextAlignment(Qt::AlignCenter);
         table->setItem(row, 2, mItem);
+
+        auto *instrEdit = new QLineEdit(table);
+        instrEdit->setPlaceholderText(tr("Optional extra prompt…"));
+        instrEdit->setFrame(false);
+        table->setCellWidget(row, 3, instrEdit);
 
         elementIds << e.id;
         imagePaths << imgPath;
@@ -4826,13 +5042,16 @@ void PaneSizing::onAplusGenerateSelected()
         return;
 
     // Collect per-slot desktop/mobile selections
-    struct SlotSel { QString elemId; bool desktop; bool mobile; };
+    struct SlotSel { QString elemId; bool desktop; bool mobile; QString extraInstr; };
     QList<SlotSel> selections;
     for (int r = 0; r < table->rowCount(); ++r) {
         const bool d = table->item(r, 1)->checkState() == Qt::Checked;
         const bool m = table->item(r, 2)->checkState() == Qt::Checked;
+        QString extra;
+        if (auto *le = qobject_cast<QLineEdit *>(table->cellWidget(r, 3)))
+            extra = le->text().trimmed();
         if (d || m)
-            selections.append({elementIds.at(r), d, m});
+            selections.append({elementIds.at(r), d, m, extra});
     }
 
     if (selections.isEmpty()) {
@@ -4844,7 +5063,7 @@ void PaneSizing::onAplusGenerateSelected()
     const QString description = ui->textEditAttributes->toPlainText().trimmed();
     QStringList colors;
     for (const auto &[color, urls] : std::as_const(m_colorVariants))
-        if (!color.isEmpty()) colors << color;
+        if (!color.isEmpty() && !m_aplusExcludedColors.contains(color)) colors << color;
     const QString focusColor = colors.isEmpty() ? QString{} : colors.first();
     const QString mainImageHint = m_mainImageLocalPath.isEmpty() ? QString{}
         : tr("A product photo is available at \"%1\". "
@@ -4914,6 +5133,8 @@ void PaneSizing::onAplusGenerateSelected()
             CliTask dt;
             dt.label   = tr("Desktop image — %1").arg(displayName);
             dt.prompt  = spec.desktopPrompt;
+            if (!sel.extraInstr.isEmpty())
+                dt.prompt += QStringLiteral("\n\nAdditional instruction: ") + sel.extraInstr;
             dt.workDir = elemWorkDir;
             dt.onBefore = [beforeSnap, elemDir]() {
                 *beforeSnap = elemDir.entryList(
@@ -4967,6 +5188,8 @@ void PaneSizing::onAplusGenerateSelected()
             CliTask mt;
             mt.label   = tr("Mobile image — %1").arg(displayName);
             mt.prompt  = spec.mobilePrompt;
+            if (!sel.extraInstr.isEmpty())
+                mt.prompt += QStringLiteral("\n\nAdditional instruction: ") + sel.extraInstr;
             mt.workDir = elemWorkDir;
             mt.onBefore = [beforeSnap, elemDir]() {
                 *beforeSnap = elemDir.entryList(
@@ -6174,6 +6397,155 @@ QCoro::Task<void> PaneSizing::_uploadSizeImage(int imageIndex)
     } else {
         QMessageBox::warning(this, tr("Upload"),
             tr("Uploaded image to %1 of %2 listing(s).\n\nErrors:\n%3")
+                .arg(successCount).arg(totalAttempts).arg(errors.join('\n')));
+    }
+    co_return;
+}
+
+QCoro::Task<void> PaneSizing::_uploadVariantImage(int imageIndex)
+{
+    // Determine which color is selected
+    auto *selItem = ui->treeWidgetColorVariants->currentItem();
+    if (!selItem) {
+        QMessageBox::warning(this, tr("Upload"), tr("No color selected."));
+        co_return;
+    }
+    auto *colorItem = selItem->parent() ? selItem->parent() : selItem;
+    const QString color = colorItem->text(0);
+
+    // Image to upload: prefer locally browsed image, otherwise selected Amazon variant
+    const QString imgPath = m_variantBrowsedImagePath.isEmpty()
+        ? selItem->data(0, Qt::UserRole).toString()
+        : m_variantBrowsedImagePath;
+    if (imgPath.isEmpty()) {
+        QMessageBox::warning(this, tr("Upload"), tr("No image selected."));
+        co_return;
+    }
+
+    QImage img(imgPath);
+    if (img.isNull()) {
+        QMessageBox::warning(this, tr("Upload"), tr("Could not load image from:\n%1").arg(imgPath));
+        co_return;
+    }
+
+    QByteArray jpegData;
+    {
+        QBuffer buf(&jpegData);
+        buf.open(QIODevice::WriteOnly);
+        img.save(&buf, "JPEG", 90);
+    }
+    if (jpegData.isEmpty()) {
+        QMessageBox::warning(this, tr("Upload"), tr("Failed to encode image as JPEG."));
+        co_return;
+    }
+
+    // Collect child ASINs belonging to this color (empty = upload to all children)
+    const QStringList colorAsins = m_colorAsins.value(color.toLower());
+
+    QList<AsinSku> treeItems;
+    if (m_treeModel) {
+        for (int i = 0; i < m_treeModel->rowCount(); ++i) {
+            const QModelIndex pi = m_treeModel->index(i, 0);
+            for (int j = 0; j < m_treeModel->rowCount(pi); ++j) {
+                const QString asin = m_treeModel->data(
+                    m_treeModel->index(j, TreeSizingAsins::ASIN, pi),
+                    Qt::DisplayRole).toString().trimmed();
+                const QString sku = m_treeModel->data(
+                    m_treeModel->index(j, TreeSizingAsins::SKU, pi),
+                    Qt::DisplayRole).toString().trimmed();
+                if (!asin.isEmpty() && (colorAsins.isEmpty() || colorAsins.contains(asin)))
+                    treeItems << AsinSku{asin, sku};
+            }
+        }
+    }
+    if (treeItems.isEmpty()) {
+        QMessageBox::warning(this, tr("Upload"),
+            tr("No child ASINs found for color \"%1\".").arg(color));
+        co_return;
+    }
+
+    const QStringList marketplaceIds = allMarketplaceIdsFromCountryList(ui->listWidgetCountries);
+
+    auto *prog = new QProgressDialog(tr("Resolving SKUs…"), QString{}, 0, 0, this);
+    prog->setAttribute(Qt::WA_DeleteOnClose);
+    prog->setWindowTitle(tr("Upload variant image"));
+    prog->setWindowModality(Qt::WindowModal);
+    prog->setMinimumDuration(0);
+    prog->show();
+    QPointer<QProgressDialog> progPtr(prog);
+
+    bool cancelled = false;
+    co_await _resolveSkus(treeItems, marketplaceIds.first(), &cancelled);
+    if (cancelled) { if (progPtr) progPtr->close(); co_return; }
+
+    QList<AsinSku> uploadItems;
+    for (const auto &item : treeItems)
+        if (!item.sku.isEmpty()) uploadItems << item;
+
+    if (uploadItems.isEmpty()) {
+        if (progPtr) progPtr->close();
+        QMessageBox::warning(this, tr("Upload"), tr("No SKUs resolved. Upload cancelled."));
+        co_return;
+    }
+
+    if (progPtr) progPtr->setLabelText(tr("Detecting product type…"));
+    QString productType;
+    co_await m_api->fetchListingProductType(
+        marketplaceIds.first(), uploadItems.first().sku, &productType);
+
+    if (productType.isEmpty()) {
+        if (progPtr) progPtr->close();
+        bool ok = false;
+        const QString entered = QInputDialog::getText(
+            this, tr("Product Type"),
+            tr("Could not auto-detect product type.\nEnter the Amazon product type (e.g. DRESS, SHOES):"),
+            QLineEdit::Normal, {}, &ok);
+        if (!ok || entered.trimmed().isEmpty()) co_return;
+        productType = entered.trimmed().toUpper();
+        auto *prog2 = new QProgressDialog(QString{}, QString{}, 0, uploadItems.size(), this);
+        prog2->setAttribute(Qt::WA_DeleteOnClose);
+        prog2->setWindowTitle(tr("Upload variant image"));
+        prog2->setWindowModality(Qt::WindowModal);
+        prog2->setMinimumDuration(0);
+        prog2->show();
+        progPtr = prog2;
+    } else {
+        if (progPtr) { progPtr->setRange(0, uploadItems.size()); progPtr->setValue(0); }
+    }
+
+    int successCount = 0;
+    const int totalAttempts = marketplaceIds.size() * uploadItems.size();
+    QStringList errors;
+    int step = 0;
+
+    for (const QString &mpId : marketplaceIds) {
+        for (const auto &item : uploadItems) {
+            if (progPtr) {
+                progPtr->setLabelText(
+                    tr("Uploading %1 / %2 (%3)…").arg(step + 1).arg(uploadItems.size()).arg(mpId));
+                progPtr->setValue(step);
+            }
+            bool ok = false;
+            co_await m_api->patchListingImage(mpId, item.sku, productType,
+                                              jpegData, imageIndex, &ok);
+            if (ok) ++successCount;
+            else errors << QStringLiteral("%1 / %2 (%3): %4")
+                               .arg(mpId, item.sku, item.asin, m_api->lastError());
+            m_api->clearLastError();
+            ++step;
+        }
+    }
+
+    if (progPtr) progPtr->close();
+
+    if (errors.isEmpty()) {
+        ui->labelVariantUploadStatus->setText(
+            tr("✓ Uploaded to %1 listing(s)").arg(successCount));
+        QMessageBox::information(this, tr("Upload"),
+            tr("Image uploaded to %1 listing(s).").arg(successCount));
+    } else {
+        QMessageBox::warning(this, tr("Upload"),
+            tr("Uploaded to %1 of %2 listing(s).\n\nErrors:\n%3")
                 .arg(successCount).arg(totalAttempts).arg(errors.join('\n')));
     }
     co_return;
