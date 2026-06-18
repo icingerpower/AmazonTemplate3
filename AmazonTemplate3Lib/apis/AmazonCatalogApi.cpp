@@ -26,6 +26,7 @@
 #include <QFile>
 #include <QTextStream>
 #include <QCryptographicHash>
+#include <QRegularExpression>
 
 #include <QCoro/QCoroNetworkReply>
 #include <QCoro/QCoroTimer>
@@ -1936,6 +1937,8 @@ AmazonCatalogApi::fetchVariationFamily(const QString& asin,
     QStringList unusedParents;
     QStringList uniqueChildAsins;
     AsinItem fallback;
+    QByteArray fbRelBody;
+    QStringList fbRelChildren;
 
     static const QStringList kRelOnly =
         QStringList() << "relationships";
@@ -1967,25 +1970,90 @@ AmazonCatalogApi::fetchVariationFamily(const QString& asin,
     }
 
     _parseRelationships(firstBody, &parentAsins, &childAsins);
+
+    // Step 1 fallback: when the primary marketplace returns no relationships, probe
+    // FR → UK → US and UNION all results. Amazon partitions variation families
+    // differently per storefront — DE may give parent A while US gives parent B, and
+    // each may list a different subset of children. We collect every unique parent ASIN
+    // so Step 2 can retrieve the complete child set.
+    if (parentAsins.isEmpty() && childAsins.isEmpty()) {
+        static const QStringList kStep1Fallbacks = {
+            QStringLiteral("A13V1IB3VIYZZH"), // FR
+            QStringLiteral("A1F83G8C2ARO7P"), // UK
+            QStringLiteral("ATVPDKIKX0DER"),  // US
+        };
+        for (const QString &fbMp : kStep1Fallbacks) {
+            if (fbMp == marketplaceId) continue;
+            fbRelBody.clear();
+            QStringList fbParents, fbChildren;
+            co_await _doGet(fbMp, asin, kRelOnly, &fbRelBody);
+            _parseRelationships(fbRelBody, &fbParents, &fbChildren);
+            for (const QString &p : fbParents)
+                if (!parentAsins.contains(p)) parentAsins.append(p);
+            for (const QString &c : fbChildren)
+                if (!c.isEmpty() && !childAsins.contains(c)) childAsins.append(c);
+        }
+        if (!parentAsins.isEmpty() || !childAsins.isEmpty())
+            qDebug() << "AmazonCatalogApi: step-1 fallback for" << asin
+                     << "parentAsins:" << parentAsins
+                     << "childAsins count:" << childAsins.size();
+    }
+
     qDebug() << "AmazonCatalogApi: ASIN" << asin
              << "parentAsins:" << parentAsins
              << "childAsins:" << childAsins;
 
+    // Use the first found parent as the canonical parent ASIN for folder naming.
     if (!parentAsins.isEmpty()) {
-        // The given ASIN is a child -> fetch its parent
         parentAsinToUse = parentAsins.first();
     } else {
-        // Treat the given ASIN as the parent
         parentAsinToUse = asin;
     }
     family.parentAsin = parentAsinToUse;
 
-    // Step 2: fetch parent to get its childAsins list (only if we don't have it yet).
-    if (parentAsinToUse == asin) {
-        finalChildAsins = childAsins;
-    } else {
-        co_await _doGet(marketplaceId, parentAsinToUse, kRelOnly, &parentBody);
-        _parseRelationships(parentBody, &unusedParents, &finalChildAsins);
+    // Step 2: collect children for every parent ASIN found (there can be more than one
+    // when Amazon uses different parent ASINs on different storefronts for the same
+    // logical product family). For each parent, try the primary marketplace first and
+    // fall through to FR → UK → US if it returns nothing. Union all results.
+    {
+        const QStringList parentsToQuery = parentAsins.isEmpty() ? QStringList{asin} : parentAsins;
+        static const QStringList kChildFallbacks = {
+            QStringLiteral("A13V1IB3VIYZZH"), // FR
+            QStringLiteral("A1F83G8C2ARO7P"), // UK
+            QStringLiteral("ATVPDKIKX0DER"),  // US
+        };
+        for (const QString &pa : parentsToQuery) {
+            fbRelBody.clear();
+            fbRelChildren.clear();
+            // If the entered ASIN is itself the parent and we already have its children
+            // from Step 1, reuse them directly without an extra round-trip.
+            if (pa == asin && !childAsins.isEmpty()) {
+                fbRelChildren = childAsins;
+            } else {
+                co_await _doGet(marketplaceId, pa, kRelOnly, &fbRelBody);
+                _parseRelationships(fbRelBody, &unusedParents, &fbRelChildren);
+                if (fbRelChildren.isEmpty()) {
+                    for (const QString &fbMp : kChildFallbacks) {
+                        if (fbMp == marketplaceId) continue;
+                        fbRelBody.clear();
+                        fbRelChildren.clear();
+                        co_await _doGet(fbMp, pa, kRelOnly, &fbRelBody);
+                        _parseRelationships(fbRelBody, &unusedParents, &fbRelChildren);
+                        if (!fbRelChildren.isEmpty()) {
+                            qDebug() << "AmazonCatalogApi: children fallback to" << fbMp
+                                     << "for parent" << pa
+                                     << "found" << fbRelChildren.size() << "child(ren)";
+                            break;
+                        }
+                    }
+                }
+            }
+            for (const QString &c : fbRelChildren)
+                if (!c.isEmpty() && !finalChildAsins.contains(c)) finalChildAsins.append(c);
+        }
+        if (!finalChildAsins.isEmpty())
+            qDebug() << "AmazonCatalogApi: total" << finalChildAsins.size()
+                     << "unique child(ren) across" << parentsToQuery.size() << "parent ASIN(s)";
     }
 
     // Deduplicate while preserving order
@@ -2042,6 +2110,11 @@ AmazonCatalogApi::fetchVariationFamily(const QString& asin,
             co_await _fetchAsinItem(child.asin, kUkMarket, &ukItem);
             if (!ukItem.color.isEmpty())
                 child.color = ukItem.color;
+            if (child.allImageUrls.isEmpty() && !ukItem.allImageUrls.isEmpty()) {
+                child.allImageUrls = std::move(ukItem.allImageUrls);
+                if (child.mainImageUrl.isEmpty())
+                    child.mainImageUrl = ukItem.mainImageUrl;
+            }
         }
     }
 
@@ -2062,6 +2135,30 @@ AmazonCatalogApi::fetchVariationFamily(const QString& asin,
             family.children.first().allImageUrls = std::move(parentItem.allImageUrls);
             if (family.children.first().mainImageUrl.isEmpty())
                 family.children.first().mainImageUrl = parentItem.mainImageUrl;
+        }
+
+        // If still no images, try other marketplaces — some products only expose
+        // images on specific storefronts (e.g. FR or US but not DE/UK).
+        if (family.children.first().allImageUrls.isEmpty()) {
+            static const QStringList kImageFallbackMarkets = {
+                QStringLiteral("A13V1IB3VIYZZH"), // FR
+                QStringLiteral("A1PA6795UKMFR9"), // DE
+                QStringLiteral("A1F83G8C2ARO7P"), // UK
+                QStringLiteral("ATVPDKIKX0DER"),  // US
+            };
+            for (const QString &fbMp : kImageFallbackMarkets) {
+                if (fbMp == marketplaceId) continue;
+                AsinItem fbItem;
+                co_await _fetchAsinItem(family.parentAsin, fbMp, &fbItem);
+                if (!fbItem.allImageUrls.isEmpty()) {
+                    qDebug() << "AmazonCatalogApi: found" << fbItem.allImageUrls.size()
+                             << "image(s) via fallback marketplace" << fbMp;
+                    family.children.first().allImageUrls = std::move(fbItem.allImageUrls);
+                    if (family.children.first().mainImageUrl.isEmpty())
+                        family.children.first().mainImageUrl = fbItem.mainImageUrl;
+                    break;
+                }
+            }
         }
     }
 
@@ -3244,6 +3341,8 @@ QCoro::Task<void> AmazonCatalogApi::_fetchListingAttributesFull(
                              : arr.first().toObject().value(QStringLiteral("value")).toString();
     };
 
+    item->isParent = (firstValue(QStringLiteral("parentage_level")) == QStringLiteral("parent"));
+
     item->brand  = firstValue(QStringLiteral("brand"));
     item->gender = firstValue(QStringLiteral("target_gender"));
     item->age    = firstValue(QStringLiteral("age_range_description"));
@@ -3256,9 +3355,11 @@ QCoro::Task<void> AmazonCatalogApi::_fetchListingAttributesFull(
     if (item->sizeValue.isEmpty())
         item->sizeValue = firstValue(QStringLiteral("size_name"));
 
+
     qDebug() << "AmazonCatalogApi::_fetchListingAttributesFull: SKU" << sku
-             << "→ brand=" << item->brand << "exists in" << item->existsInMarketplaces.size()
-             << "marketplace(s)";
+             << "→ brand=" << item->brand << "color=" << item->color
+             << "size=" << item->sizeValue
+             << "exists in" << item->existsInMarketplaces.size() << "marketplace(s)";
     co_return;
 }
 

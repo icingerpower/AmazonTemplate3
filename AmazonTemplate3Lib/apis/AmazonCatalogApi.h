@@ -58,6 +58,7 @@ public:
         QDate   createdDate; // summaries[0].createdDate (ISO 8601 date part)
         int     inventory = 0; // quantity from merchant listings report
         QSet<QString> existsInMarketplaces; // marketplaceIds where this SKU is listed
+        bool          isParent = false;     // true for variation parents (no color/size)
     };
 
     explicit AmazonCatalogApi(const QString& lwaClientId,
@@ -88,6 +89,8 @@ public:
 
     // Returns the seller ID configured for the given marketplace's region.
     QString sellerIdForMarketplace(const QString& marketplaceId) const;
+    // Maps a marketplace ID to its LWA region name ("EU", "NA", "JP").
+    static QString lwaRegionForMarketplace(const QString& marketplaceId);
 
     // Lightweight existence check: returns true in *out if the ASIN is listed
     // in the given marketplace (one GET, no relationship traversal).
@@ -299,9 +302,6 @@ private:
     // Uses an output parameter (instead of co_return QString) to avoid GCC 13
     // coroutine ICE on non-trivially-destructible Task<T> return types.
     QCoro::Task<void> _getAccessToken(QString lwaRegion, QString* out);
-
-    // Maps marketplace ID to LWA region name ("EU", "NA", "JP")
-    static QString lwaRegionForMarketplace(const QString& marketplaceId);
 
     // Single HTTP GET to the catalog endpoint (includes LWA token + SigV4).
     // Writes the raw JSON body (empty on error) into *out.

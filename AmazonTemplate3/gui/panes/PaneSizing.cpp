@@ -441,8 +441,21 @@ static QStringList readSkusFromXlsx(const QString &path)
 // For per-color A+ slots (elementId starts with "image_color_"), scan the product
 // directory for matching reference photos and inject their absolute paths into the
 // prompt.  This prevents the AI from defaulting to the wrong-color main image.
-static void injectColorImageHints(QList<ImageSlotSpec> &imageSpecs, const QDir &productDir)
+static void injectColorImageHints(QList<ImageSlotSpec> &imageSpecs,
+                                  const QDir &productDir,
+                                  const QStringList &excludedColorIds = {})
 {
+    // Pre-build the set of file prefixes that belong to excluded colors so we
+    // can reject files whose name is a longer match for an excluded colorId.
+    // Example: active "blush-pink" must not pull in "blush-pink-dusty-image-01.jpg".
+    QStringList excludedPrefixes;
+    for (const QString &ecId : excludedColorIds) {
+        if (!ecId.isEmpty()) {
+            excludedPrefixes << ecId + QLatin1Char('-');
+            excludedPrefixes << ecId + QLatin1Char('_');
+        }
+    }
+
     static const QString kPrefix = QStringLiteral("image_color_");
     for (ImageSlotSpec &spec : imageSpecs) {
         if (!spec.elementId.startsWith(kPrefix)) continue;
@@ -450,8 +463,14 @@ static void injectColorImageHints(QList<ImageSlotSpec> &imageSpecs, const QDir &
 
         QStringList refPaths;
         for (const QString &f : productDir.entryList(QDir::Files)) {
-            if (f.startsWith(colorId + QLatin1Char('-'))
-                || f.startsWith(colorId + QLatin1Char('_')))
+            if (!f.startsWith(colorId + QLatin1Char('-'))
+                && !f.startsWith(colorId + QLatin1Char('_')))
+                continue;
+            bool belongsToExcluded = false;
+            for (const QString &ep : excludedPrefixes) {
+                if (f.startsWith(ep)) { belongsToExcluded = true; break; }
+            }
+            if (!belongsToExcluded)
                 refPaths.append(productDir.absoluteFilePath(f));
         }
         refPaths.sort();
@@ -1660,6 +1679,49 @@ static QString colorToFileSegment(const QString &color)
     return result.isEmpty() ? QStringLiteral("unknown") : result;
 }
 
+// Injects explicit per-color reference images into the image_group slot.
+// This prevents the AI from exploring the product directory and picking up
+// excluded color images that may still be on disk from a previous session.
+static void injectGroupShotColorHints(QList<ImageSlotSpec> &specs,
+                                      const QStringList &activeColors,
+                                      const QStringList &excludedColorIds,
+                                      const QDir &productDir)
+{
+    for (ImageSlotSpec &spec : specs) {
+        if (spec.elementId != QStringLiteral("image_group")) continue;
+
+        QStringList lines;
+        for (const QString &color : activeColors) {
+            const QString cid = colorToFileSegment(color);
+            for (const QString &f : productDir.entryList(QDir::Files)) {
+                if (!f.startsWith(cid + QLatin1Char('-'))
+                    && !f.startsWith(cid + QLatin1Char('_')))
+                    continue;
+                // Reject files that belong to an excluded color
+                bool excluded = false;
+                for (const QString &ecId : excludedColorIds) {
+                    if (f.startsWith(ecId + QLatin1Char('-'))
+                        || f.startsWith(ecId + QLatin1Char('_')))
+                    { excluded = true; break; }
+                }
+                if (!excluded) {
+                    lines << QStringLiteral("%1: %2")
+                             .arg(color, productDir.absoluteFilePath(f));
+                    break;
+                }
+            }
+        }
+        if (lines.isEmpty()) continue;
+
+        const QString hint = QCoreApplication::translate("PaneSizing",
+            "Reference photos for each color variant you must depict "
+            "(use ONLY these %1 colors — do NOT include any other color variant):\n%2")
+            .arg(lines.size()).arg(lines.join(QLatin1Char('\n')));
+        spec.desktopPrompt += QStringLiteral("\n\n") + hint;
+        spec.mobilePrompt  += QStringLiteral("\n\n") + hint;
+    }
+}
+
 void PaneSizing::_downloadVariantImages(const QList<QPair<QString, QStringList>> &colorImages)
 {
     if (!m_productWorkingDir.exists() || colorImages.isEmpty())
@@ -1677,8 +1739,14 @@ void PaneSizing::_downloadVariantImages(const QList<QPair<QString, QStringList>>
     const QString dir = m_productWorkingDir.absolutePath();
 
     for (const auto &[color, urls] : colorImages) {
+        const bool excluded = !color.isEmpty() && m_aplusExcludedColors.contains(color);
+
         auto *colorItem = new QTreeWidgetItem(ui->treeWidgetColorVariants);
         colorItem->setText(0, color.isEmpty() ? tr("(default)") : color);
+        if (excluded) {
+            colorItem->setText(0, tr("%1 (excluded)").arg(color));
+            colorItem->setForeground(0, palette().color(QPalette::Disabled, QPalette::Text));
+        }
 
         const QString prefix = multiColor
             ? colorToFileSegment(color) + QLatin1Char('-')
@@ -1701,7 +1769,7 @@ void PaneSizing::_downloadVariantImages(const QList<QPair<QString, QStringList>>
                 firstForColor = false;
             }
 
-            if (!QFileInfo::exists(localPath)) {
+            if (!excluded && !QFileInfo::exists(localPath)) {
                 QNetworkRequest req{QUrl(url)};
                 QNetworkReply *reply = m_imageNam->get(req);
                 const QString savedPath = localPath;
@@ -3328,7 +3396,12 @@ void PaneSizing::onAplusGenerateAll()
     QList<ImageSlotSpec> slotSpecs = workflow->buildSlots(
         m_aplusContent.get(), colors, focusColor,
         description, mainImageHint, stepInstrs);
-    injectColorImageHints(slotSpecs, m_productWorkingDir);
+    {
+        QStringList exIds;
+        for (const QString &c : m_aplusExcludedColors) exIds << colorToFileSegment(c);
+        injectColorImageHints(slotSpecs, m_productWorkingDir, exIds);
+        injectGroupShotColorHints(slotSpecs, colors, exIds, m_productWorkingDir);
+    }
 
     // Ensure all destination element directories exist for the planned slots.
     for (const ImageSlotSpec &spec : slotSpecs)
@@ -4724,7 +4797,12 @@ void PaneSizing::onAplusGenerateImage(const QString &elementId)
         QList<ImageSlotSpec> slotSpecs = workflow->buildSlots(
             m_aplusContent.get(), colors, focusColor,
             description, mainImageHint, stepInstrs);
-        injectColorImageHints(slotSpecs, m_productWorkingDir);
+        {
+            QStringList exIds;
+            for (const QString &c : m_aplusExcludedColors) exIds << colorToFileSegment(c);
+            injectColorImageHints(slotSpecs, m_productWorkingDir, exIds);
+            injectGroupShotColorHints(slotSpecs, colors, exIds, m_productWorkingDir);
+        }
 
         for (const auto &spec : slotSpecs) {
             if (spec.elementId == elementId) {
@@ -5075,7 +5153,12 @@ void PaneSizing::onAplusGenerateSelected()
         QList<ImageSlotSpec> slotList = workflow->buildSlots(
             m_aplusContent.get(), colors, focusColor,
             description, mainImageHint, _stepInstructions());
-        injectColorImageHints(slotList, m_productWorkingDir);
+        {
+            QStringList exIds;
+            for (const QString &c : m_aplusExcludedColors) exIds << colorToFileSegment(c);
+            injectColorImageHints(slotList, m_productWorkingDir, exIds);
+            injectGroupShotColorHints(slotList, colors, exIds, m_productWorkingDir);
+        }
         for (const ImageSlotSpec &spec : slotList)
             slotByElemId.insert(spec.elementId, spec);
     }
@@ -6474,65 +6557,102 @@ QCoro::Task<void> PaneSizing::_uploadVariantImage(int imageIndex)
     prog->show();
     QPointer<QProgressDialog> progPtr(prog);
 
-    bool cancelled = false;
-    co_await _resolveSkus(treeItems, marketplaceIds.first(), &cancelled);
-    if (cancelled) { if (progPtr) progPtr->close(); co_return; }
+    // Group checked marketplaces by region so we resolve SKUs independently per region.
+    // Using EU SKUs against the JP seller ID (or vice-versa) always fails with HTTP 400
+    // "Invalid sellerId" — resolving per-region avoids cross-region SKU mismatches.
+    QMap<QString, QStringList> regionMarketplaces;
+    for (const QString &mpId : marketplaceIds)
+        regionMarketplaces[AmazonCatalogApi::lwaRegionForMarketplace(mpId)] << mpId;
 
-    QList<AsinSku> uploadItems;
-    for (const auto &item : treeItems)
-        if (!item.sku.isEmpty()) uploadItems << item;
+    const QString primaryRegion =
+        AmazonCatalogApi::lwaRegionForMarketplace(marketplaceIds.first());
 
-    if (uploadItems.isEmpty()) {
-        if (progPtr) progPtr->close();
-        QMessageBox::warning(this, tr("Upload"), tr("No SKUs resolved. Upload cancelled."));
-        co_return;
-    }
-
-    if (progPtr) progPtr->setLabelText(tr("Detecting product type…"));
     QString productType;
-    co_await m_api->fetchListingProductType(
-        marketplaceIds.first(), uploadItems.first().sku, &productType);
-
-    if (productType.isEmpty()) {
-        if (progPtr) progPtr->close();
-        bool ok = false;
-        const QString entered = QInputDialog::getText(
-            this, tr("Product Type"),
-            tr("Could not auto-detect product type.\nEnter the Amazon product type (e.g. DRESS, SHOES):"),
-            QLineEdit::Normal, {}, &ok);
-        if (!ok || entered.trimmed().isEmpty()) co_return;
-        productType = entered.trimmed().toUpper();
-        auto *prog2 = new QProgressDialog(QString{}, QString{}, 0, uploadItems.size(), this);
-        prog2->setAttribute(Qt::WA_DeleteOnClose);
-        prog2->setWindowTitle(tr("Upload variant image"));
-        prog2->setWindowModality(Qt::WindowModal);
-        prog2->setMinimumDuration(0);
-        prog2->show();
-        progPtr = prog2;
-    } else {
-        if (progPtr) { progPtr->setRange(0, uploadItems.size()); progPtr->setValue(0); }
-    }
-
     int successCount = 0;
-    const int totalAttempts = marketplaceIds.size() * uploadItems.size();
+    int skippedRegions = 0;
     QStringList errors;
-    int step = 0;
 
-    for (const QString &mpId : marketplaceIds) {
-        for (const auto &item : uploadItems) {
-            if (progPtr) {
-                progPtr->setLabelText(
-                    tr("Uploading %1 / %2 (%3)…").arg(step + 1).arg(uploadItems.size()).arg(mpId));
-                progPtr->setValue(step);
+    for (auto it = regionMarketplaces.cbegin(); it != regionMarketplaces.cend(); ++it) {
+        const QString &region    = it.key();
+        const QStringList &rMps  = it.value();
+        const QString refMp      = rMps.first();
+
+        // Build a fresh AsinSku list for this region (start with ASINs only, no SKUs).
+        QList<AsinSku> regionItems;
+        for (const AsinSku &item : treeItems)
+            regionItems << AsinSku{item.asin, QString{}};
+
+        if (region == primaryRegion) {
+            // Primary region: full resolution including settings.ini + Reports API + manual dialog.
+            bool cancelled = false;
+            if (progPtr) progPtr->setLabelText(tr("Resolving SKUs…"));
+            co_await _resolveSkus(regionItems, refMp, &cancelled);
+            if (cancelled) { if (progPtr) progPtr->close(); co_return; }
+        } else {
+            // Secondary region: Reports API only — no settings.ini cross-contamination,
+            // no manual dialog. If the product doesn't exist in this region, all SKUs
+            // stay empty and we skip silently.
+            if (progPtr) progPtr->setLabelText(
+                tr("Checking %1 listings…").arg(region));
+            QHash<QString, QString> reportMap;
+            co_await _fetchAllSkusCached(refMp, &reportMap);
+            for (auto &item : regionItems)
+                item.sku = reportMap.value(item.asin);
+        }
+
+        QList<AsinSku> uploadItems;
+        for (const auto &item : regionItems)
+            if (!item.sku.isEmpty()) uploadItems << item;
+
+        if (uploadItems.isEmpty()) {
+            ++skippedRegions;
+            continue;
+        }
+
+        // Detect product type once (from first region that has SKUs).
+        if (productType.isEmpty()) {
+            if (progPtr) progPtr->setLabelText(tr("Detecting product type…"));
+            co_await m_api->fetchListingProductType(refMp, uploadItems.first().sku, &productType);
+            if (productType.isEmpty()) {
+                if (progPtr) progPtr->close();
+                bool ok = false;
+                const QString entered = QInputDialog::getText(
+                    this, tr("Product Type"),
+                    tr("Could not auto-detect product type.\nEnter the Amazon product type:"),
+                    QLineEdit::Normal, {}, &ok);
+                if (!ok || entered.trimmed().isEmpty()) co_return;
+                productType = entered.trimmed().toUpper();
+                auto *prog2 = new QProgressDialog(
+                    QString{}, QString{}, 0, uploadItems.size(), this);
+                prog2->setAttribute(Qt::WA_DeleteOnClose);
+                prog2->setWindowTitle(tr("Upload variant image"));
+                prog2->setWindowModality(Qt::WindowModal);
+                prog2->setMinimumDuration(0);
+                prog2->show();
+                progPtr = prog2;
             }
-            bool ok = false;
-            co_await m_api->patchListingImage(mpId, item.sku, productType,
-                                              jpegData, imageIndex, &ok);
-            if (ok) ++successCount;
-            else errors << QStringLiteral("%1 / %2 (%3): %4")
-                               .arg(mpId, item.sku, item.asin, m_api->lastError());
-            m_api->clearLastError();
-            ++step;
+        }
+
+        if (progPtr) progPtr->setRange(0, uploadItems.size());
+
+        int step = 0;
+        for (const QString &mpId : rMps) {
+            for (const auto &item : uploadItems) {
+                if (progPtr) {
+                    progPtr->setLabelText(
+                        tr("Uploading %1 / %2 (%3)…")
+                            .arg(step + 1).arg(uploadItems.size()).arg(mpId));
+                    progPtr->setValue(step);
+                }
+                bool ok = false;
+                co_await m_api->patchListingImage(
+                    mpId, item.sku, productType, jpegData, imageIndex, &ok);
+                if (ok) ++successCount;
+                else errors << QStringLiteral("%1 / %2 (%3): %4")
+                                   .arg(mpId, item.sku, item.asin, m_api->lastError());
+                m_api->clearLastError();
+                ++step;
+            }
         }
     }
 
@@ -6545,8 +6665,8 @@ QCoro::Task<void> PaneSizing::_uploadVariantImage(int imageIndex)
             tr("Image uploaded to %1 listing(s).").arg(successCount));
     } else {
         QMessageBox::warning(this, tr("Upload"),
-            tr("Uploaded to %1 of %2 listing(s).\n\nErrors:\n%3")
-                .arg(successCount).arg(totalAttempts).arg(errors.join('\n')));
+            tr("Uploaded to %1 listing(s).\n\nErrors:\n%2")
+                .arg(successCount).arg(errors.join('\n')));
     }
     co_return;
 }
@@ -6810,6 +6930,18 @@ QCoro::Task<void> PaneSizing::_loadBrokenChildData(bool forceRefresh)
     bool usedCache = false;
     if (!forceRefresh && m_productWorkingDir.exists())
         usedCache = m_brokenChildTable->loadFromDir(m_productWorkingDir);
+
+    // Invalidate the cache if it has a different number of children than the
+    // current tree model — e.g. the variation family gained or lost a member
+    // since the last run (including when a new parent ASIN was resolved that
+    // brought in extra children).
+    if (usedCache) {
+        int treeChildCount = 0;
+        for (int fi = 0; fi < m_treeModel->rowCount(); ++fi)
+            treeChildCount += m_treeModel->rowCount(m_treeModel->index(fi, 0));
+        if (m_brokenChildTable->rowCount() != treeChildCount)
+            usedCache = false;
+    }
 
     if (!usedCache) {
         // Fresh load: collect child entries from the tree model.
