@@ -41,6 +41,8 @@ public:
     // Move a row up or down in the model; returns true if the move was applied.
     bool moveRowUp(int row);
     bool moveRowDown(int row);
+    bool moveRowToTop(int row);
+    bool moveRowToBottom(int row);
 
     // QAbstractTableModel
     int           rowCount(const QModelIndex &parent = {}) const override;

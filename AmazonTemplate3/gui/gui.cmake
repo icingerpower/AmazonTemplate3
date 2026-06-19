@@ -12,6 +12,9 @@ SET(GUI_FILES
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneWarnings.cpp
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneWarnings.h
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneWarnings.ui
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneStore.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneStore.h
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneStore.ui
     ${CMAKE_CURRENT_LIST_DIR}/panes/SizeRangeWidget.h
     ${CMAKE_CURRENT_LIST_DIR}/panes/SizeRangeWidget.cpp
     ${CMAKE_CURRENT_LIST_DIR}/panes/MiddleTruncateDelegate.h
@@ -41,4 +44,8 @@ SET(GUI_FILES
     ${CMAKE_CURRENT_LIST_DIR}/DialogSelectValue.h
     ${CMAKE_CURRENT_LIST_DIR}/DialogEditPrompts.cpp
     ${CMAKE_CURRENT_LIST_DIR}/DialogEditPrompts.h
+    ${CMAKE_CURRENT_LIST_DIR}/DialogClassificationTypes.h
+    ${CMAKE_CURRENT_LIST_DIR}/DialogClassificationTypes.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/DialogGenStorefrontImage.h
+    ${CMAKE_CURRENT_LIST_DIR}/DialogGenStorefrontImage.cpp
 )

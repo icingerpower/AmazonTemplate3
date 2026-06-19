@@ -1322,7 +1322,7 @@ AmazonCatalogApi::fetchListingBrandAndTheme(QString marketplaceId,
 // POST_FLAT_FILE_LISTINGS_DATA was sunset March 31 2025; JSON_LISTINGS_FEED is the replacement.
 //
 // Three-step flow (Amazon Feeds API 2021-06-30):
-//   1. POST /feeds/2021-06-30/feedDocuments  → presigned S3 URL + feedDocumentId
+//   1. POST /feeds/2021-06-30/documents       → presigned S3 URL + feedDocumentId
 //   2. PUT  {presigned S3 URL}                → upload the JSON bytes
 //   3. POST /feeds/2021-06-30/feeds           → submit feedId for processing
 //   4. GET  /feeds/2021-06-30/feeds/{feedId}  → poll until DONE / FATAL / CANCELLED
@@ -1449,7 +1449,7 @@ AmazonCatalogApi::uploadVariationFeed(QStringList marketplaceIds,
         QUrl url;
         url.setScheme(QStringLiteral("https"));
         url.setHost(endpointHost);
-        url.setPath(QStringLiteral("/feeds/2021-06-30/feedDocuments"));
+        url.setPath(QStringLiteral("/feeds/2021-06-30/documents"));
 
         QNetworkRequest req(url);
         req.setRawHeader("x-amz-access-token", token.toUtf8());
@@ -1525,8 +1525,10 @@ AmazonCatalogApi::uploadVariationFeed(QStringList marketplaceIds,
     // -------------------------------------------------------------------
     {
         QNetworkRequest s3Req((QUrl(uploadUrl)));
+        // Must match exactly the contentType declared in createFeedDocument —
+        // the presigned URL has this value baked into its signature.
         s3Req.setHeader(QNetworkRequest::ContentTypeHeader,
-                        QStringLiteral("application/json"));
+                        QStringLiteral("application/json; charset=UTF-8"));
 
         qDebug() << "AmazonCatalogApi::uploadVariationFeed: PUT to S3 url=" << uploadUrl
                  << " bytes=" << feedBytes.size();

@@ -57,6 +57,24 @@ bool TableStoreAsin::moveRowDown(int row)
     return true;
 }
 
+bool TableStoreAsin::moveRowToTop(int row)
+{
+    if (row <= 0 || row >= m_rows.size()) return false;
+    beginMoveRows({}, row, row, {}, 0);
+    m_rows.move(row, 0);
+    endMoveRows();
+    return true;
+}
+
+bool TableStoreAsin::moveRowToBottom(int row)
+{
+    if (row < 0 || row >= m_rows.size() - 1) return false;
+    beginMoveRows({}, row, row, {}, m_rows.size());
+    m_rows.move(row, m_rows.size() - 1);
+    endMoveRows();
+    return true;
+}
+
 int TableStoreAsin::rowCount(const QModelIndex &parent) const
 {
     return parent.isValid() ? 0 : m_rows.size();

@@ -13,6 +13,8 @@
 
 #include "apis/AmazonCatalogApi.h"
 #include "AmazonMarketplace.h"
+#include "AbstractCli.h"
+#include "../DialogGenStorefrontImage.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class PaneStore; }
@@ -31,6 +33,7 @@ public:
     ~PaneStore();
 
     void setWorkingDir(const QDir &workingDir);
+    void setAvailableClis(const QList<AbstractCli *> &clis);
 
 private:
     Ui::PaneStore          *ui;
@@ -40,13 +43,16 @@ private:
     QStandardItemModel     *m_countriesModel = nullptr;
     TableStoreAsin         *m_storeModel     = nullptr;
 
+    QList<AbstractCli *>    m_availableClis;
+
     QHash<QString, AmazonCatalogApi::StoreItem> m_asinToItem;
     QHash<QString, QPixmap>                     m_asinToPixmap;
     QList<AmazonCatalogApi::StoreItem>          m_items;
 
     // User-defined display order: list of representative ASINs in the order the user arranged.
     // New products (not in this list) appear first; known ones appear in order.
-    QStringList m_savedOrder;
+    QStringList             m_savedOrder;
+    QList<QStringList>      m_customPaths; // manually added tree node paths, persisted
 
     QCoro::Task<void> m_retrieveTask;
     QCoro::Task<void> m_imageTask;
@@ -67,11 +73,29 @@ private:
     void _onCountrySelectionChanged();
     void _updateTableForCurrentSelection();
     void _onMerge();
+    void _onMoveProducts();
+    void _onRemoveProducts();
+    void _onAddCategory();
+    void _onRemoveCategory();
     void _onCopyAsins();
+
+    bool            _isCurrentNodeCustom() const;
+    void            _loadCustomPaths();
+    void            _saveCustomPaths();
+    void _onMoveToTop();
     void _onMoveUp();
     void _onMoveDown();
+    void _onMoveToBottom();
     void _loadOrder();
     void _saveOrder();
+
+    QStringList _currentNodePath() const;
+
+    void _onGenStorefrontImage();
+    void _loadStorefrontVersions();           // refreshes listVersionStrip + image labels
+    void _onStorefrontImageGenerated(const QString &desktopPath, const QString &mobilePath);
+    void _showStorefrontImage(const QString &absPath);
+    void _deleteSelectedVersion();
 
     QCoro::Task<void> _onRetrieve();
     QCoro::Task<void> _loadImages(QStringList asins);

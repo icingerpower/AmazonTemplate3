@@ -5,10 +5,12 @@
 #include "TableStoreAsin.h"
 #include "TreeBrandCategories.h"
 #include "AmazonMarketplace.h"
+#include "AbstractCli.h"
 
 #include <climits>
 
 #include <QClipboard>
+#include <QComboBox>
 #include <QMessageBox>
 #include <QRadioButton>
 #include <QRegularExpression>
@@ -25,6 +27,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
+#include <QListWidget>
+#include <QListWidgetItem>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -37,7 +41,9 @@
 #include <QStandardItem>
 #include <QStandardItemModel>
 #include <QTextEdit>
+#include <QInputDialog>
 #include <QTimer>
+#include <QTreeView>
 #include <QVBoxLayout>
 
 #include <QCoro/QCoroNetworkReply>
@@ -87,9 +93,33 @@ PaneStore::PaneStore(QWidget *parent)
         m_retrieveTask = _onRetrieve();
     });
     connect(ui->buttonMerge, &QPushButton::clicked, this, &PaneStore::_onMerge);
-    connect(ui->pushButton,      &QPushButton::clicked, this, &PaneStore::_onCopyAsins);
-    connect(ui->buttonMoveUp,    &QPushButton::clicked, this, &PaneStore::_onMoveUp);
-    connect(ui->buttonMoveDown,  &QPushButton::clicked, this, &PaneStore::_onMoveDown);
+    connect(ui->buttonCopyAsins,      &QPushButton::clicked, this, &PaneStore::_onCopyAsins);
+    connect(ui->buttonMoveToTop,  &QPushButton::clicked, this, &PaneStore::_onMoveToTop);
+    connect(ui->buttonMoveUp,     &QPushButton::clicked, this, &PaneStore::_onMoveUp);
+    connect(ui->buttonMoveDown,   &QPushButton::clicked, this, &PaneStore::_onMoveDown);
+    connect(ui->buttonMoveToBottom, &QPushButton::clicked, this, &PaneStore::_onMoveToBottom);
+
+    connect(ui->buttonGenStorefrontImage, &QPushButton::clicked,
+            this, &PaneStore::_onGenStorefrontImage);
+    connect(ui->buttonMoveProducts, &QPushButton::clicked,
+            this, &PaneStore::_onMoveProducts);
+    connect(ui->buttonRemoveProducts, &QPushButton::clicked,
+            this, &PaneStore::_onRemoveProducts);
+    connect(ui->buttonAddCategory, &QPushButton::clicked,
+            this, &PaneStore::_onAddCategory);
+    connect(ui->buttonRemoveCategory, &QPushButton::clicked,
+            this, &PaneStore::_onRemoveCategory);
+    connect(ui->listVersionStrip, &QListWidget::currentRowChanged, this, [this](int row) {
+        ui->buttonDeleteVersion->setEnabled(row >= 0);
+        if (row >= 0) {
+            const QString path =
+                ui->listVersionStrip->item(row)->data(Qt::UserRole).toString();
+            _showStorefrontImage(path);
+        }
+    });
+    connect(ui->buttonDeleteVersion, &QPushButton::clicked, this, [this]() {
+        _deleteSelectedVersion();
+    });
 
     // Enable Up/Down only when a table row is selected
     connect(ui->tableViewAsins->selectionModel(),
@@ -97,14 +127,21 @@ PaneStore::PaneStore(QWidget *parent)
             this, [this]() {
                 const QModelIndexList sel =
                     ui->tableViewAsins->selectionModel()->selectedRows();
+                ui->buttonMoveToTop->setEnabled(!sel.isEmpty());
                 ui->buttonMoveUp->setEnabled(!sel.isEmpty());
                 ui->buttonMoveDown->setEnabled(!sel.isEmpty());
+                ui->buttonMoveToBottom->setEnabled(!sel.isEmpty());
+                ui->buttonMoveProducts->setEnabled(!sel.isEmpty());
+                ui->buttonRemoveProducts->setEnabled(!sel.isEmpty());
             });
 
     connect(ui->treeViewBrandCategory->selectionModel(),
             &QItemSelectionModel::currentChanged,
             this, [this](const QModelIndex &, const QModelIndex &) {
                 _onTreeSelectionChanged();
+                ui->buttonAddCategory->setEnabled(
+                    ui->treeViewBrandCategory->currentIndex().isValid());
+                ui->buttonRemoveCategory->setEnabled(_isCurrentNodeCustom());
             });
     connect(ui->treeViewBrandCategory->selectionModel(),
             &QItemSelectionModel::selectionChanged,
@@ -131,7 +168,39 @@ void PaneStore::setWorkingDir(const QDir &workingDir)
 {
     m_workingDir = workingDir;
     m_workingDir.mkpath(QStringLiteral("stores"));
+    _loadCustomPaths();
     _loadFromDisk(_marketplaceId());
+    _loadStorefrontVersions();
+}
+
+void PaneStore::setAvailableClis(const QList<AbstractCli *> &clis)
+{
+    m_availableClis = clis;
+
+    ui->comboBoxGenCli->blockSignals(true);
+    ui->comboBoxGenCli->clear();
+    for (AbstractCli *cli : clis) {
+        if (cli->canGenImages())
+            ui->comboBoxGenCli->addItem(cli->getName(), QVariant::fromValue(cli));
+    }
+
+    int defaultIndex = 0;
+    // (no filtering needed since we only added canGenImages ones)
+
+    const QString saved = QSettings().value(QStringLiteral("store/selectedCli")).toString();
+    int restoredIndex = -1;
+    for (int i = 0; i < ui->comboBoxGenCli->count(); ++i) {
+        if (ui->comboBoxGenCli->itemText(i) == saved) { restoredIndex = i; break; }
+    }
+    ui->comboBoxGenCli->setCurrentIndex(restoredIndex >= 0 ? restoredIndex : defaultIndex);
+    ui->comboBoxGenCli->blockSignals(false);
+
+    connect(ui->comboBoxGenCli, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int index) {
+        if (index < 0 || index >= ui->comboBoxGenCli->count()) return;
+        QSettings().setValue(QStringLiteral("store/selectedCli"),
+                             ui->comboBoxGenCli->itemText(index));
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -348,8 +417,19 @@ void PaneStore::_applyItems(const QList<AmazonCatalogApi::StoreItem> &items)
         }
     }
 
-    m_treeModel->setItems(items);
+    m_treeModel->setItems(items, m_customPaths);
     m_storeModel->clear();
+}
+
+QStringList PaneStore::_currentNodePath() const
+{
+    QStringList path;
+    QModelIndex idx = ui->treeViewBrandCategory->currentIndex();
+    while (idx.isValid()) {
+        path.prepend(m_treeModel->nodeNameForIndex(idx));
+        idx = idx.parent();
+    }
+    return path;
 }
 
 void PaneStore::_onTreeSelectionChanged()
@@ -370,6 +450,7 @@ void PaneStore::_onTreeSelectionChanged()
         ui->listViewCountries->setCurrentIndex(m_countriesModel->index(0, 0));
 
     _updateTableForCurrentSelection();
+    _loadStorefrontVersions();
 }
 
 void PaneStore::_onCountrySelectionChanged()
@@ -491,7 +572,7 @@ void PaneStore::_onMerge()
     m_asinToItem.clear();
     for (const AmazonCatalogApi::StoreItem &item : m_items)
         m_asinToItem.insert(item.asin, item);
-    m_treeModel->setItems(m_items);
+    m_treeModel->setItems(m_items, m_customPaths);
     m_storeModel->clear();
     _saveToDisk(_marketplaceId(), m_items);
 
@@ -525,11 +606,373 @@ void PaneStore::_onMerge()
     ui->buttonMerge->setEnabled(false);
 }
 
+void PaneStore::_onMoveProducts()
+{
+    // Collect selected representative ASINs from the table.
+    const QModelIndexList tableSel =
+        ui->tableViewAsins->selectionModel()->selectedRows();
+    if (tableSel.isEmpty()) return;
+
+    QStringList repAsins;
+    for (const QModelIndex &idx : tableSel)
+        repAsins << m_storeModel->data(
+            m_storeModel->index(idx.row(), TableStoreAsin::ColAsin)).toString();
+
+    // Expand each rep ASIN to its full color group within the current visible ASIN list.
+    const QModelIndex treeIdx    = ui->treeViewBrandCategory->currentIndex();
+    const QStringList visibleAsins = m_treeModel->asinsForIndex(treeIdx);
+
+    QHash<QString, QStringList> colorGroups;
+    for (const QString &asin : visibleAsins) {
+        const AmazonCatalogApi::StoreItem &it = m_asinToItem.value(asin);
+        const QString key = it.color.isEmpty() ? asin : it.color;
+        colorGroups[key].append(asin);
+    }
+
+    QSet<QString> asinsToMove;
+    for (const QString &repAsin : std::as_const(repAsins)) {
+        const AmazonCatalogApi::StoreItem &it = m_asinToItem.value(repAsin);
+        const QString key = it.color.isEmpty() ? repAsin : it.color;
+        const QStringList &group = colorGroups.value(key);
+        if (group.isEmpty())
+            asinsToMove.insert(repAsin);
+        else
+            for (const QString &a : group) asinsToMove.insert(a);
+    }
+
+    // Build dialog.
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Move %n product(s) to…", "", repAsins.size()));
+    dlg.resize(400, 500);
+    auto *layout = new QVBoxLayout(&dlg);
+    layout->addWidget(new QLabel(tr("Select the destination node (exactly one):"), &dlg));
+
+    auto *destTree = new QTreeView(&dlg);
+    destTree->setModel(m_treeModel);
+    destTree->setSelectionMode(QAbstractItemView::SingleSelection);
+    destTree->setRootIsDecorated(true);
+    destTree->setAlternatingRowColors(true);
+    destTree->expandAll();
+    layout->addWidget(destTree, 1);
+
+    auto *warningLabel = new QLabel(&dlg);
+    warningLabel->setStyleSheet(QStringLiteral("color: red;"));
+    warningLabel->hide();
+    layout->addWidget(warningLabel);
+
+    auto *btns = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    layout->addWidget(btns);
+    connect(btns, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    connect(btns, &QDialogButtonBox::accepted, &dlg, [&]() {
+        if (destTree->selectionModel()->selectedIndexes().isEmpty()) {
+            warningLabel->setText(tr("Please select a destination node first."));
+            warningLabel->show();
+            return;
+        }
+        dlg.accept();
+    });
+
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const QModelIndexList destSel = destTree->selectionModel()->selectedIndexes();
+    if (destSel.isEmpty()) return;
+    const QModelIndex destIdx   = destSel.first();
+    const int         destDepth = TreeBrandCategories::depthOfIndex(destIdx);
+
+    // Build the name path from root to the selected node.
+    auto namePath = [&](QModelIndex idx) -> QStringList {
+        QStringList parts;
+        while (idx.isValid()) {
+            parts.prepend(m_treeModel->nodeNameForIndex(idx));
+            idx = idx.parent();
+        }
+        return parts;
+    };
+    const QStringList destPath = namePath(destIdx);
+
+    // Normalize display placeholders back to raw empty strings.
+    static const QHash<QString, QString> kPlaceholders = {
+        {tr("(unknown brand)"),    {}},
+        {tr("(unknown category)"), {}},
+        {tr("(unknown gender)"),   {}},
+        {tr("(unknown age)"),      {}},
+    };
+    auto normalize = [&](const QString &s) -> QString {
+        return kPlaceholders.value(s, s);
+    };
+
+    // Apply: update only the fields that the destination depth covers.
+    for (AmazonCatalogApi::StoreItem &item : m_items) {
+        if (!asinsToMove.contains(item.asin)) continue;
+        if (destDepth >= 0 && destPath.size() > 0) item.brand    = normalize(destPath[0]);
+        if (destDepth >= 1 && destPath.size() > 1) item.category = normalize(destPath[1]);
+        if (destDepth >= 2 && destPath.size() > 2) item.gender   = normalize(destPath[2]);
+        if (destDepth >= 3 && destPath.size() > 3) item.age      = normalize(destPath[3]);
+    }
+
+    // Rebuild.
+    m_asinToItem.clear();
+    for (const AmazonCatalogApi::StoreItem &item : m_items)
+        m_asinToItem.insert(item.asin, item);
+    m_treeModel->setItems(m_items, m_customPaths);
+    m_storeModel->clear();
+    _saveToDisk(_marketplaceId(), m_items);
+
+    // Re-select the destination node in the rebuilt tree.
+    std::function<QModelIndex(QModelIndex, const QStringList &, int)> findNode =
+        [&](QModelIndex parent, const QStringList &path, int lvl) -> QModelIndex {
+        if (lvl == static_cast<int>(path.size())) return parent;
+        for (int i = 0; i < m_treeModel->rowCount(parent); ++i) {
+            const QModelIndex child = m_treeModel->index(i, 0, parent);
+            if (m_treeModel->nodeNameForIndex(child) == path[lvl])
+                return findNode(child, path, lvl + 1);
+        }
+        return {};
+    };
+    const QModelIndex newDest = findNode({}, destPath, 0);
+    if (newDest.isValid())
+        ui->treeViewBrandCategory->setCurrentIndex(newDest);
+}
+
+void PaneStore::_onRemoveProducts()
+{
+    const QModelIndexList tableSel =
+        ui->tableViewAsins->selectionModel()->selectedRows();
+    if (tableSel.isEmpty()) return;
+
+    QStringList repAsins;
+    for (const QModelIndex &idx : tableSel)
+        repAsins << m_storeModel->data(
+            m_storeModel->index(idx.row(), TableStoreAsin::ColAsin)).toString();
+
+    // Expand each rep ASIN to its full color group within the current visible ASIN list.
+    const QStringList visibleAsins =
+        m_treeModel->asinsForIndex(ui->treeViewBrandCategory->currentIndex());
+
+    QHash<QString, QStringList> colorGroups;
+    for (const QString &asin : visibleAsins) {
+        const AmazonCatalogApi::StoreItem &it = m_asinToItem.value(asin);
+        const QString key = it.color.isEmpty() ? asin : it.color;
+        colorGroups[key].append(asin);
+    }
+
+    QSet<QString> asinsToRemove;
+    for (const QString &repAsin : std::as_const(repAsins)) {
+        const AmazonCatalogApi::StoreItem &it = m_asinToItem.value(repAsin);
+        const QString key = it.color.isEmpty() ? repAsin : it.color;
+        const QStringList &group = colorGroups.value(key);
+        if (group.isEmpty())
+            asinsToRemove.insert(repAsin);
+        else
+            for (const QString &a : group) asinsToRemove.insert(a);
+    }
+
+    const auto res = QMessageBox::question(
+        this, tr("Remove products"),
+        tr("Remove %n product(s) (%2 ASIN(s)) from the store list?\n"
+           "This only removes the local entry — the listing on Amazon is not affected.",
+           "", repAsins.size()).arg(asinsToRemove.size()),
+        QMessageBox::Yes | QMessageBox::Cancel);
+    if (res != QMessageBox::Yes) return;
+
+    m_items.removeIf([&](const AmazonCatalogApi::StoreItem &item) {
+        return asinsToRemove.contains(item.asin);
+    });
+
+    m_asinToItem.clear();
+    for (const AmazonCatalogApi::StoreItem &item : m_items)
+        m_asinToItem.insert(item.asin, item);
+    m_treeModel->setItems(m_items, m_customPaths);
+    m_storeModel->clear();
+    _saveToDisk(_marketplaceId(), m_items);
+}
+
+// ---------------------------------------------------------------------------
+// Custom path helpers
+// ---------------------------------------------------------------------------
+
+void PaneStore::_loadCustomPaths()
+{
+    m_customPaths.clear();
+    QFile f(m_workingDir.filePath(QStringLiteral("stores/custom_paths.json")));
+    if (!f.open(QIODevice::ReadOnly)) return;
+    const QJsonArray arr = QJsonDocument::fromJson(f.readAll()).array();
+    for (const QJsonValue &v : arr) {
+        QStringList path;
+        for (const QJsonValue &s : v.toArray())
+            path << s.toString();
+        if (!path.isEmpty()) m_customPaths.append(path);
+    }
+}
+
+void PaneStore::_saveCustomPaths()
+{
+    QJsonArray arr;
+    for (const QStringList &path : std::as_const(m_customPaths)) {
+        QJsonArray pa;
+        for (const QString &s : path) pa.append(s);
+        arr.append(pa);
+    }
+    QSaveFile sf(m_workingDir.filePath(QStringLiteral("stores/custom_paths.json")));
+    if (sf.open(QIODevice::WriteOnly)) {
+        sf.write(QJsonDocument(arr).toJson(QJsonDocument::Compact));
+        sf.commit();
+    }
+}
+
+bool PaneStore::_isCurrentNodeCustom() const
+{
+    const QModelIndex idx = ui->treeViewBrandCategory->currentIndex();
+    if (!idx.isValid()) return false;
+    QStringList path;
+    QModelIndex cur = idx;
+    while (cur.isValid()) {
+        path.prepend(m_treeModel->nodeNameForIndex(cur));
+        cur = cur.parent();
+    }
+    return m_customPaths.contains(path);
+}
+
+// ---------------------------------------------------------------------------
+// Add / Remove category
+// ---------------------------------------------------------------------------
+
+void PaneStore::_onAddCategory()
+{
+    const QModelIndex current = ui->treeViewBrandCategory->currentIndex();
+    if (!current.isValid()) return;
+
+    // New node is a sibling of the selected node (same parent).
+    auto namePath = [&](QModelIndex idx) -> QStringList {
+        QStringList parts;
+        while (idx.isValid()) {
+            parts.prepend(m_treeModel->nodeNameForIndex(idx));
+            idx = idx.parent();
+        }
+        return parts;
+    };
+
+    const QStringList selectedPath = namePath(current);
+    // Parent path = all but the last element.
+    const QStringList parentPath =
+        selectedPath.mid(0, selectedPath.size() - 1);
+
+    bool ok = false;
+    const QString name = QInputDialog::getText(
+        this, tr("Add category"),
+        tr("New node name (sibling of \"%1\"):").arg(selectedPath.last()),
+        QLineEdit::Normal, {}, &ok);
+    if (!ok || name.trimmed().isEmpty()) return;
+
+    QStringList newPath = parentPath;
+    newPath << name.trimmed();
+
+    if (m_customPaths.contains(newPath)) {
+        QMessageBox::information(this, tr("Add category"),
+                                 tr("A node with this name already exists at this level."));
+        return;
+    }
+
+    m_customPaths.append(newPath);
+    _saveCustomPaths();
+    m_treeModel->setItems(m_items, m_customPaths);
+
+    // Select the new node.
+    std::function<QModelIndex(QModelIndex, const QStringList &, int)> findNode =
+        [&](QModelIndex parent, const QStringList &path, int lvl) -> QModelIndex {
+        if (lvl == static_cast<int>(path.size())) return parent;
+        for (int i = 0; i < m_treeModel->rowCount(parent); ++i) {
+            const QModelIndex child = m_treeModel->index(i, 0, parent);
+            if (m_treeModel->nodeNameForIndex(child) == path[lvl])
+                return findNode(child, path, lvl + 1);
+        }
+        return {};
+    };
+    const QModelIndex newNode = findNode({}, newPath, 0);
+    if (newNode.isValid()) {
+        ui->treeViewBrandCategory->expand(newNode.parent());
+        ui->treeViewBrandCategory->setCurrentIndex(newNode);
+    }
+}
+
+void PaneStore::_onRemoveCategory()
+{
+    if (!_isCurrentNodeCustom()) return;
+
+    const QModelIndex current = ui->treeViewBrandCategory->currentIndex();
+    auto namePath = [&](QModelIndex idx) -> QStringList {
+        QStringList parts;
+        while (idx.isValid()) {
+            parts.prepend(m_treeModel->nodeNameForIndex(idx));
+            idx = idx.parent();
+        }
+        return parts;
+    };
+    const QStringList path = namePath(current);
+    const int depth = TreeBrandCategories::depthOfIndex(current);
+
+    const QStringList asinsInNode = m_treeModel->asinsForIndex(current);
+
+    QString msg = asinsInNode.isEmpty()
+        ? tr("Remove custom category \"%1\"?").arg(path.last())
+        : tr("Remove custom category \"%1\"?\n"
+             "%2 product(s) currently in this node will be reassigned to \"(unknown)\".")
+          .arg(path.last()).arg(asinsInNode.size());
+
+    if (QMessageBox::question(this, tr("Remove category"), msg,
+                              QMessageBox::Yes | QMessageBox::Cancel) != QMessageBox::Yes)
+        return;
+
+    // Reassign items: clear the field corresponding to this depth.
+    if (!asinsInNode.isEmpty()) {
+        const QSet<QString> asinSet(asinsInNode.begin(), asinsInNode.end());
+        for (AmazonCatalogApi::StoreItem &item : m_items) {
+            if (!asinSet.contains(item.asin)) continue;
+            switch (depth) {
+            case 0: item.brand    = {}; break;
+            case 1: item.category = {}; break;
+            case 2: item.gender   = {}; break;
+            case 3: item.age      = {}; break;
+            }
+        }
+        m_asinToItem.clear();
+        for (const AmazonCatalogApi::StoreItem &item : m_items)
+            m_asinToItem.insert(item.asin, item);
+        _saveToDisk(_marketplaceId(), m_items);
+    }
+
+    // Remove the path and any child custom paths under it.
+    m_customPaths.removeIf([&](const QStringList &p) {
+        if (p.size() < path.size()) return false;
+        return p.mid(0, path.size()) == path;
+    });
+    _saveCustomPaths();
+    m_treeModel->setItems(m_items, m_customPaths);
+    m_storeModel->clear();
+}
+
 void PaneStore::_onCopyAsins()
 {
     const QModelIndex treeIdx = ui->treeViewBrandCategory->currentIndex();
     const QStringList asins   = m_treeModel->asinsForIndex(treeIdx);
     QGuiApplication::clipboard()->setText(asins.join(QLatin1Char(',')));
+}
+
+void PaneStore::_onMoveToTop()
+{
+    const QModelIndexList sel = ui->tableViewAsins->selectionModel()->selectedRows();
+    if (sel.isEmpty()) return;
+    const int row = sel.first().row();
+    if (!m_storeModel->moveRowToTop(row)) return;
+
+    m_savedOrder.clear();
+    for (int i = 0; i < m_storeModel->rowCount(); ++i)
+        m_savedOrder.append(m_storeModel->data(m_storeModel->index(i, TableStoreAsin::ColAsin)).toString());
+    _saveOrder();
+
+    ui->tableViewAsins->selectionModel()->setCurrentIndex(
+        m_storeModel->index(0, 0), QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
 }
 
 void PaneStore::_onMoveUp()
@@ -564,6 +1007,23 @@ void PaneStore::_onMoveDown()
 
     ui->tableViewAsins->selectionModel()->setCurrentIndex(
         m_storeModel->index(row + 1, 0), QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+}
+
+void PaneStore::_onMoveToBottom()
+{
+    const QModelIndexList sel = ui->tableViewAsins->selectionModel()->selectedRows();
+    if (sel.isEmpty()) return;
+    const int row = sel.first().row();
+    if (!m_storeModel->moveRowToBottom(row)) return;
+
+    m_savedOrder.clear();
+    for (int i = 0; i < m_storeModel->rowCount(); ++i)
+        m_savedOrder.append(m_storeModel->data(m_storeModel->index(i, TableStoreAsin::ColAsin)).toString());
+    _saveOrder();
+
+    ui->tableViewAsins->selectionModel()->setCurrentIndex(
+        m_storeModel->index(m_storeModel->rowCount() - 1, 0),
+        QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
 }
 
 // ---------------------------------------------------------------------------
@@ -655,6 +1115,7 @@ QCoro::Task<void> PaneStore::_onRetrieve()
     QList<AmazonCatalogApi::StoreItem> items;
     items.reserve(total);
     int emptyBrandCount = 0;
+    int parentCount = 0;
 
     for (int i = 0; i < asins.size(); ++i) {
         const QString &asin = asins.at(i);
@@ -678,15 +1139,23 @@ QCoro::Task<void> PaneStore::_onRetrieve()
                           .arg(i + 1).arg(total).arg(item.sku, item.title, item.brand));
         }
 
-        items.append(item);
-
         if (progressBarPtr) progressBarPtr->setValue(i + 1);
         if (statusLabelPtr)
             statusLabelPtr->setText(tr("[%1/%2] %3").arg(i + 1).arg(total).arg(item.sku));
         if ((i + 1) % 20 == 0 || (i + 1) == total)
-            appendLog(tr("[%1/%2] %3 — brand=%4 category=%5 gender=%6")
+            appendLog(tr("[%1/%2] %3 — brand=%4 category=%5 gender=%6 color=%7 parent=%8")
                       .arg(i + 1).arg(total)
-                      .arg(item.sku, item.brand, item.category, item.gender));
+                      .arg(item.sku, item.brand, item.category, item.gender, item.color)
+                      .arg(item.isParent ? QStringLiteral("yes") : QStringLiteral("no")));
+        if (item.isParent) {
+            ++parentCount;
+            continue; // variation parents have no color/size — skip them
+        }
+        if (item.color.isEmpty())
+            appendLog(tr("  ⚠ [%1/%2] %3 (ASIN %4) — color empty, title: %5")
+                      .arg(i + 1).arg(total).arg(item.sku, item.asin, item.title));
+
+        items.append(item);
 
         if (i + 1 < total) {
             QTimer pause; pause.setSingleShot(true); pause.start(200);
@@ -694,11 +1163,17 @@ QCoro::Task<void> PaneStore::_onRetrieve()
         }
     }
 
+    appendLog(tr("Skipped %1 variation parent(s), kept %2 child listing(s).")
+              .arg(parentCount).arg(total - parentCount));
     if (emptyBrandCount > 0)
         appendLog(tr("⚠ %1/%2 item(s) had empty brand — possible API error or rate limit.")
                   .arg(emptyBrandCount).arg(total));
 
     _applyItems(items);
+    // Invalidate stale disk thumbnails so _loadImages always re-downloads fresh images
+    // after a retrieve (avoids serving a wrong cached thumb for a newly-fetched ASIN).
+    for (const auto &item : std::as_const(items))
+        m_asinToPixmap.remove(item.asin);
     _saveToDisk(marketplaceId, items);
     appendLog(tr("Saved %1 item(s) to stores/%2.json.").arg(items.size()).arg(marketplaceId));
 
@@ -870,4 +1345,202 @@ QCoro::Task<void> PaneStore::_loadImages(QStringList asins)
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Storefront image generation
+// ---------------------------------------------------------------------------
+
+void PaneStore::_onGenStorefrontImage()
+{
+    // Collect representative ASINs: selected rows, else all visible rows (up to 8).
+    QStringList asins;
+    const QModelIndexList sel = ui->tableViewAsins->selectionModel()->selectedRows();
+    if (!sel.isEmpty()) {
+        for (const QModelIndex &idx : sel)
+            asins << m_storeModel->data(
+                m_storeModel->index(idx.row(), TableStoreAsin::ColAsin)).toString();
+    } else {
+        const int n = qMin(m_storeModel->rowCount(), 8);
+        for (int i = 0; i < n; ++i)
+            asins << m_storeModel->data(
+                m_storeModel->index(i, TableStoreAsin::ColAsin)).toString();
+    }
+
+    if (asins.size() < 3) {
+        QMessageBox::warning(this, tr("Gen image"),
+                             tr("Select at least 3 products."));
+        return;
+    }
+    if (asins.size() > 8) {
+        QMessageBox::warning(this, tr("Gen image"),
+                             tr("Select at most 8 products."));
+        return;
+    }
+
+    QList<AmazonCatalogApi::StoreItem> items;
+    items.reserve(asins.size());
+    for (const QString &asin : std::as_const(asins))
+        items.append(m_asinToItem.value(asin));
+
+    AbstractCli *cli = ui->comboBoxGenCli->currentData().value<AbstractCli *>();
+    if (!cli) {
+        QMessageBox::warning(this, tr("Gen image"),
+                             tr("No CLI with image generation support is available."));
+        return;
+    }
+
+    auto *dlg = new DialogGenStorefrontImage(m_workingDir, items, m_asinToPixmap,
+                                              cli, _currentNodePath(), this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    connect(dlg, &DialogGenStorefrontImage::imageGenerated,
+            this, &PaneStore::_onStorefrontImageGenerated);
+    dlg->show();
+}
+
+void PaneStore::_onStorefrontImageGenerated(const QString &desktopPath,
+                                            const QString &mobilePath)
+{
+    Q_UNUSED(desktopPath);
+    Q_UNUSED(mobilePath);
+    _loadStorefrontVersions();
+}
+
+void PaneStore::_loadStorefrontVersions()
+{
+    ui->listVersionStrip->clear();
+    ui->labelImage->setText(tr("(no image)"));
+    ui->labelImage->setPixmap(QPixmap());
+
+    if (m_workingDir.path().isEmpty()) return;
+
+    const QString jsonPath =
+        m_workingDir.filePath(QStringLiteral("stores/storefront/versions.json"));
+    QFile f(jsonPath);
+    if (!f.open(QIODevice::ReadOnly)) return;
+    const QJsonArray rawArr = QJsonDocument::fromJson(f.readAll()).array();
+    f.close();
+
+    QList<QJsonObject> versions;
+    versions.reserve(rawArr.size());
+    for (const QJsonValue &v : rawArr)
+        versions.append(v.toObject());
+    std::sort(versions.begin(), versions.end(),
+              [](const QJsonObject &a, const QJsonObject &b) {
+                  return a.value(QStringLiteral("ts")).toVariant().toLongLong()
+                       > b.value(QStringLiteral("ts")).toVariant().toLongLong();
+              });
+
+    const QDir sfDir(m_workingDir.filePath(QStringLiteral("stores/storefront")));
+    const QStringList currentPath = _currentNodePath();
+
+    // One strip item per image file — "Both" versions produce two items.
+    auto addItem = [&](const QJsonObject &obj, const QString &fname, const QString &label) {
+        const qint64 ts = obj.value(QStringLiteral("ts")).toVariant().toLongLong();
+        const QString dateStr =
+            QDateTime::fromSecsSinceEpoch(ts).toString(QStringLiteral("MM-dd HH:mm"));
+        auto *li = new QListWidgetItem(ui->listVersionStrip);
+        li->setText(QStringLiteral("%1\n%2").arg(dateStr, label));
+        li->setData(Qt::UserRole,     sfDir.filePath(fname));  // abs path for display
+        li->setData(Qt::UserRole + 1, static_cast<qlonglong>(ts)); // ts for delete
+        QPixmap px(sfDir.filePath(fname));
+        if (!px.isNull())
+            li->setIcon(QIcon(px.scaled(100, 60, Qt::KeepAspectRatio,
+                                        Qt::SmoothTransformation)));
+    };
+
+    // An image belongs here if its stored nodePath is a prefix of (or equal to) the
+    // current selection — so images generated for "female" also show for "female > Adult".
+    // Images with no nodePath (generated before this feature) are shown everywhere.
+    auto nodePathVisible = [](const QStringList &stored, const QStringList &current) {
+        if (stored.isEmpty()) return true;
+        if (current.size() < stored.size()) return false;
+        for (int i = 0; i < stored.size(); ++i)
+            if (current[i] != stored[i]) return false;
+        return true;
+    };
+
+    for (const QJsonObject &obj : std::as_const(versions)) {
+        QStringList nodePath;
+        for (const QJsonValue &v : obj.value(QStringLiteral("nodePath")).toArray())
+            nodePath.append(v.toString());
+        if (!nodePathVisible(nodePath, currentPath)) continue;
+        const QString desktop = obj.value(QStringLiteral("desktop")).toString();
+        const QString mobile  = obj.value(QStringLiteral("mobile")).toString();
+        if (!desktop.isEmpty()) addItem(obj, desktop, tr("Desktop"));
+        if (!mobile.isEmpty())  addItem(obj, mobile,  tr("Mobile"));
+    }
+
+    if (ui->listVersionStrip->count() > 0) {
+        ui->listVersionStrip->setCurrentRow(0);
+    }
+}
+
+void PaneStore::_showStorefrontImage(const QString &absPath)
+{
+    if (absPath.isEmpty()) {
+        ui->labelImage->setPixmap(QPixmap());
+        ui->labelImage->setText(tr("(no image)"));
+        return;
+    }
+    QPixmap px(absPath);
+    if (px.isNull()) {
+        ui->labelImage->setPixmap(QPixmap());
+        ui->labelImage->setText(tr("(no image)"));
+        return;
+    }
+    const QSize target = ui->labelImage->size();
+    ui->labelImage->setPixmap(px.scaled(target.isEmpty() ? px.size() : target,
+                                        Qt::KeepAspectRatio, Qt::SmoothTransformation));
+}
+
+void PaneStore::_deleteSelectedVersion()
+{
+    const int row = ui->listVersionStrip->currentRow();
+    if (row < 0) return;
+
+    const qint64 victimTs =
+        ui->listVersionStrip->item(row)->data(Qt::UserRole + 1).toLongLong();
+    if (victimTs == 0) return;
+
+    const QString jsonPath =
+        m_workingDir.filePath(QStringLiteral("stores/storefront/versions.json"));
+    QFile f(jsonPath);
+    if (!f.open(QIODevice::ReadOnly)) return;
+    const QJsonArray rawArr = QJsonDocument::fromJson(f.readAll()).array();
+    f.close();
+
+    // Find victim entry by ts.
+    QJsonObject victim;
+    for (const QJsonValue &v : rawArr) {
+        const QJsonObject o = v.toObject();
+        if (o.value(QStringLiteral("ts")).toVariant().toLongLong() == victimTs) {
+            victim = o;
+            break;
+        }
+    }
+    if (victim.isEmpty()) return;
+
+    const QDir sfDir(m_workingDir.filePath(QStringLiteral("stores/storefront")));
+    for (const char *key : {"desktop", "mobile"}) {
+        const QString fname = victim.value(QLatin1String(key)).toString();
+        if (!fname.isEmpty())
+            QFile::remove(sfDir.filePath(fname));
+    }
+
+    QJsonArray newArr;
+    for (const QJsonValue &v : rawArr) {
+        const QJsonObject o = v.toObject();
+        if (o.value(QStringLiteral("ts")).toVariant().toLongLong() == victimTs)
+            continue;
+        newArr.append(o);
+    }
+
+    QSaveFile sf(jsonPath);
+    if (sf.open(QIODevice::WriteOnly)) {
+        sf.write(QJsonDocument(newArr).toJson(QJsonDocument::Compact));
+        sf.commit();
+    }
+
+    _loadStorefrontVersions();
 }
