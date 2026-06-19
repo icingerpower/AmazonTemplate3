@@ -116,6 +116,12 @@ private:
     QCoro::Task<void> _fetchAllListingsAsinToSku(QString marketplaceId,
                                                   QHash<QString, QString>* out);
 
+    // Fallback using FBA Inventory API (paginated GET /fba/inventory/v1/summaries).
+    // Includes items with 0 stock. Only adds new ASINs to *out (never overwrites).
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> _fetchFbaInventoryApiAsinToSku(QString marketplaceId,
+                                                      QHash<QString, QString>* out);
+
     QNetworkAccessManager* _nam();
 
     // Credentials

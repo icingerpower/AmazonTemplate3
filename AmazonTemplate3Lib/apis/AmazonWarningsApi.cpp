@@ -15,6 +15,7 @@
 #include <QNetworkReply>
 #include <QUrl>
 #include <QUrlQuery>
+#include <QRegularExpression>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -888,17 +889,32 @@ QCoro::Task<void> AmazonWarningsApi::_fetchAllListingsAsinToSku(QString marketpl
             co_return;
         }
 
+        static const QRegularExpression asinRegex(QStringLiteral("^[A-Z0-9]{10}$"));
+        bool loggedFirstSkip = false;
         int added = 0;
         for (int i = 1; i < lines.size(); ++i) {
             const QStringList cols = lines.at(i).split(QLatin1Char('\t'));
             if (cols.size() <= qMax(skuCol, asinCol)) continue;
-            // When using product-id column, skip non-ASIN rows (EAN/UPC/ISBN)
-            if (ptypeCol >= 0 && cols.size() > ptypeCol) {
-                const QString ptype = cols.at(ptypeCol).trimmed();
-                if (ptype != QStringLiteral("ASIN") && ptype != QStringLiteral("1")) continue;
-            }
             const QString sku  = cols.at(skuCol).trimmed();
             const QString asin = cols.at(asinCol).trimmed();
+            // When using product-id column, skip non-ASIN rows (EAN/UPC/ISBN).
+            // Some FR exports leave product-id-type empty even for ASIN rows, so
+            // accept an empty type when the value itself looks like an ASIN.
+            if (ptypeCol >= 0 && cols.size() > ptypeCol) {
+                const QString ptype = cols.at(ptypeCol).trimmed();
+                const bool isAsinRow =
+                    ptype == QStringLiteral("1") ||
+                    ptype == QStringLiteral("ASIN") ||
+                    (ptype.isEmpty() && asinRegex.match(asin).hasMatch());
+                if (!isAsinRow) {
+                    if (!loggedFirstSkip) {
+                        qDebug() << "AmazonWarningsApi: _fetchAllListingsAsinToSku skipping row, "
+                                    "product-id-type=" << ptype << "asin=" << asin;
+                        loggedFirstSkip = true;
+                    }
+                    continue;
+                }
+            }
             if (!sku.isEmpty() && !asin.isEmpty() && !out->contains(asin)) {
                 qDebug() << "AmazonWarningsApi: _fetchAllListingsAsinToSku insert asin=" << asin << "sku=" << sku;
                 out->insert(asin, sku);
@@ -911,6 +927,95 @@ QCoro::Task<void> AmazonWarningsApi::_fetchAllListingsAsinToSku(QString marketpl
         emit logMessage(QStringLiteral("Step 1b complete: %1 additional ASIN(s) found in all-listings report.")
                         .arg(added));
     }
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
+// _fetchFbaInventoryApiAsinToSku — fallback via the paginated FBA Inventory API
+// (GET /fba/inventory/v1/summaries). Unlike the FBA unsuppressed report, this
+// endpoint includes items with 0 stock (sold-out FBA listings). Only new ASINs
+// are added to *out — existing entries are never overwritten.
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonWarningsApi::_fetchFbaInventoryApiAsinToSku(QString marketplaceId,
+                                                                     QHash<QString, QString>* out)
+{
+    const QString endpoint = endpointForMarketplace(marketplaceId);
+    const QString lwaReg   = lwaRegionForMarketplace(marketplaceId);
+
+    QString nextToken;
+    int pageCount = 0;
+    int added = 0;
+    static const int kMaxPages = 100;
+
+    do {
+        QString token;
+        co_await _getAccessToken(lwaReg, &token);
+        if (token.isEmpty()) co_return;
+
+        QUrl url;
+        url.setScheme(QStringLiteral("https"));
+        url.setHost(endpoint);
+        url.setPath(QStringLiteral("/fba/inventory/v1/summaries"));
+
+        QUrlQuery q;
+        q.addQueryItem(QStringLiteral("granularityType"), QStringLiteral("Marketplace"));
+        q.addQueryItem(QStringLiteral("granularityId"),   marketplaceId);
+        q.addQueryItem(QStringLiteral("marketplaceIds"),  marketplaceId);
+        if (!nextToken.isEmpty())
+            q.addQueryItem(QStringLiteral("nextToken"), nextToken);
+        url.setQuery(q);
+
+        QNetworkRequest req(url);
+        req.setRawHeader("x-amz-access-token", token.toUtf8());
+        req.setRawHeader("accept", "application/json");
+
+        qDebug() << "AmazonWarningsApi: _fetchFbaInventoryApiAsinToSku page" << (pageCount + 1)
+                 << url.toString();
+        QNetworkReply* reply = _nam()->get(req);
+        co_await qCoro(reply).waitForFinished();
+
+        const QByteArray data = reply->readAll();
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        reply->deleteLater();
+
+        if (status != 200) {
+            qWarning() << "AmazonWarningsApi: _fetchFbaInventoryApiAsinToSku HTTP" << status
+                       << QString::fromUtf8(data.left(300));
+            emit logMessage(QStringLiteral("  ⚠ FBA Inventory API failed: HTTP %1").arg(status));
+            break;
+        }
+
+        const QJsonObject root = QJsonDocument::fromJson(data).object();
+        const QJsonArray summaries = root.value(QStringLiteral("payload")).toObject()
+                                         .value(QStringLiteral("inventorySummaries")).toArray();
+        for (const QJsonValue& v : summaries) {
+            const QJsonObject obj = v.toObject();
+            const QString asin    = obj.value(QStringLiteral("asin")).toString();
+            const QString sku     = obj.value(QStringLiteral("sellerSku")).toString();
+            if (!asin.isEmpty() && !sku.isEmpty() && !out->contains(asin)) {
+                qDebug() << "AmazonWarningsApi: _fetchFbaInventoryApiAsinToSku insert asin="
+                         << asin << "sku=" << sku;
+                out->insert(asin, sku);
+                ++added;
+            }
+        }
+
+        nextToken = root.value(QStringLiteral("pagination")).toObject()
+                        .value(QStringLiteral("nextToken")).toString();
+        ++pageCount;
+
+        qDebug() << "AmazonWarningsApi: _fetchFbaInventoryApiAsinToSku page" << pageCount
+                 << "got" << summaries.size() << "items, added so far" << added
+                 << "total map" << out->size()
+                 << (nextToken.isEmpty() ? "(last page)" : "(more pages)");
+
+    } while (!nextToken.isEmpty() && pageCount < kMaxPages);
+
+    qDebug() << "AmazonWarningsApi: _fetchFbaInventoryApiAsinToSku complete, pages=" << pageCount
+             << "added=" << added << "total=" << out->size();
+    emit logMessage(QStringLiteral("Step 1c complete: %1 additional ASIN(s) found via FBA Inventory API.")
+                    .arg(added));
     co_return;
 }
 
@@ -952,6 +1057,28 @@ QCoro::Task<void> AmazonWarningsApi::enrichPastedRows(QString marketplaceId,
         if (anyMissing) {
             emit logMessage(QStringLiteral("Some pasted ASINs not found in FBA report — fetching all-listings report…"));
             co_await _fetchAllListingsAsinToSku(marketplaceId, &asinToSku);
+            // Also try FBA Inventory API for sold-out FBA items missed by the report.
+            bool stillMissing = false;
+            for (const WarningRow &row : *rows) {
+                if (!asinToSku.contains(row.asin)) { stillMissing = true; break; }
+            }
+            if (stillMissing) {
+                emit logMessage(QStringLiteral("Some ASINs still missing — trying FBA Inventory API…"));
+                co_await _fetchFbaInventoryApiAsinToSku(marketplaceId, &asinToSku);
+            }
+        }
+
+        // Summary: report any pasted ASINs that are still unresolved after all fallbacks.
+        QStringList unresolved;
+        for (const WarningRow &row : *rows) {
+            if (!asinToSku.contains(row.asin) && !unresolved.contains(row.asin))
+                unresolved.append(row.asin);
+        }
+        if (!unresolved.isEmpty()) {
+            emit logMessage(QStringLiteral("⚠ %1 pasted ASIN(s) still have no SKU after all fallbacks: %2")
+                                .arg(unresolved.size())
+                                .arg(unresolved.join(QStringLiteral(", "))));
+            qDebug() << "AmazonWarningsApi: enrichPastedRows unresolved ASINs=" << unresolved;
         }
     }
 

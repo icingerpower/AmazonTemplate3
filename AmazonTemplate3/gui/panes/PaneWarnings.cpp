@@ -86,7 +86,9 @@ static bool isBlacklisted(const QString &attributeId)
 
 // Parse warnings pasted from Amazon Seller Central's Account Health page.
 // Anchors on "ASIN: <10-char>" lines; maps the violation type to an attributeId.
-static QList<WarningRow> parsePastedWarnings(const QString &text)
+// asinCount (optional): set to the total number of ASIN lines found in the paste
+// (may exceed result.size() when other violation types like "Image Removed" are present).
+static QList<WarningRow> parsePastedWarnings(const QString &text, int *asinCount = nullptr)
 {
     static const QHash<QString, QString> kViolationAttr = {
         {QStringLiteral("Bullet Point Removed"),        QStringLiteral("bullet_point")},
@@ -112,10 +114,12 @@ static QList<WarningRow> parsePastedWarnings(const QString &text)
     }
 
     QList<WarningRow> result;
+    int totalAsins = 0;
 
     for (int i = start; i < lines.size(); ++i) {
         const auto m = kAsinRe.match(lines.at(i));
         if (!m.hasMatch()) continue;
+        ++totalAsins;
 
         const QString asin = m.captured(1);
 
@@ -143,7 +147,7 @@ static QList<WarningRow> parsePastedWarnings(const QString &text)
             }
         }
 
-        if (attributeId.isEmpty()) continue; // unknown violation, skip
+        if (attributeId.isEmpty()) continue; // unknown violation type, skip
 
         WarningRow row;
         row.asin         = asin;
@@ -153,6 +157,7 @@ static QList<WarningRow> parsePastedWarnings(const QString &text)
         result.append(row);
     }
 
+    if (asinCount) *asinCount = totalAsins;
     return result;
 }
 
@@ -716,7 +721,8 @@ QCoro::Task<void> PaneWarnings::_onPasteWarnings()
     if (pasteText.trimmed().isEmpty()) co_return;
 
     // 2. Parse
-    QList<WarningRow> rows = parsePastedWarnings(pasteText);
+    int totalAsinLines = 0;
+    QList<WarningRow> rows = parsePastedWarnings(pasteText, &totalAsinLines);
     if (rows.isEmpty()) {
         QMessageBox::information(this, tr("No warnings found"),
             tr("Could not recognize any warnings in the pasted text.\n\n"
@@ -803,10 +809,41 @@ QCoro::Task<void> PaneWarnings::_onPasteWarnings()
     progressDlg->show();
     setEnabled(false);
 
-    appendLog(tr("Parsed %1 warning(s) from paste.").arg(rows.size()));
+    appendLog(tr("Parsed %1 warning(s) from paste (%2 ASIN line(s) found).")
+              .arg(rows.size()).arg(totalAsinLines));
+    if (totalAsinLines > rows.size())
+        appendLog(tr("  Note: %1 ASIN(s) had unrecognised violation types and were skipped.")
+                  .arg(totalAsinLines - rows.size()));
+    appendLog(tr("  Tip: Amazon Account Health uses lazy loading — if fewer entries than expected,")
+              + tr(" scroll to the bottom of the page before copying to load all warnings."));
 
     // 5. Enrich rows with SKU + listing data via API
     co_await api->enrichPastedRows(marketplaceId, &rows);
+
+    // 5b. Supplement missing SKUs from PaneSizing on-disk caches (covers sold-out
+    //     FBA items that have dropped off all live reports but whose SKU was
+    //     previously saved by PaneSizing's report/FBA-fallback pipeline).
+    {
+        bool anyMissing = std::any_of(rows.constBegin(), rows.constEnd(),
+                                      [](const WarningRow &r){ return r.sku.isEmpty(); });
+        if (anyMissing) {
+            const QHash<QString, QString> skuCache = _loadSkuCache(marketplaceId);
+            if (!skuCache.isEmpty()) {
+                int filled = 0;
+                for (WarningRow &row : rows) {
+                    if (!row.sku.isEmpty()) continue;
+                    const QString sku = skuCache.value(row.asin);
+                    if (!sku.isEmpty()) {
+                        row.sku = sku;
+                        ++filled;
+                        appendLog(tr("  SKU from cache: %1 → %2").arg(row.asin, sku));
+                    }
+                }
+                if (filled > 0)
+                    appendLog(tr("Resolved %1 additional SKU(s) from PaneSizing cache.").arg(filled));
+            }
+        }
+    }
 
     disconnect(api, &AmazonWarningsApi::logMessage,      progressDlg, nullptr);
     disconnect(api, &AmazonWarningsApi::progressChanged, progressDlg, nullptr);
@@ -1053,6 +1090,71 @@ void PaneWarnings::_saveAiCache() const
     QFile f(path);
     if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
         f.write(QJsonDocument(obj).toJson());
+}
+
+// ---------------------------------------------------------------------------
+// _loadSkuCache — supplementary ASIN→SKU map from PaneSizing's on-disk caches.
+// Reads two sources in the working directory:
+//   1. sizing/sku_cache_*.json  (global report-based caches, ALL marketplaces —
+//      EU seller accounts share SKUs across all EU marketplaces)
+//   2. sizing/{folder}/settings.ini  (per-product FBA-fallback SKUs)
+// The target marketplaceId's cache is loaded first so its entries take priority.
+// ---------------------------------------------------------------------------
+QHash<QString, QString> PaneWarnings::_loadSkuCache(const QString &marketplaceId) const
+{
+    QHash<QString, QString> cache;
+    if (!m_workingDir.exists()) return cache;
+
+    const QDir sizingDir(m_workingDir.filePath(QStringLiteral("sizing")));
+
+    // 1a. Load the target marketplace's cache first (highest priority).
+    const QString targetCachePath = sizingDir.filePath(
+        QStringLiteral("sku_cache_%1.json").arg(marketplaceId));
+    auto loadJsonCache = [&](const QString &path) {
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly)) return;
+        const QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
+        for (auto it = root.begin(); it != root.end(); ++it)
+            if (!it.value().toString().isEmpty() && !cache.contains(it.key()))
+                cache.insert(it.key(), it.value().toString());
+    };
+    loadJsonCache(targetCachePath);
+    const int fromTarget = cache.size();
+    if (fromTarget > 0)
+        qDebug() << "PaneWarnings: loaded" << fromTarget
+                 << "SKUs from PaneSizing cache for" << marketplaceId;
+
+    // 1b. Load all OTHER marketplace caches — EU accounts share SKUs across markets.
+    for (const QFileInfo &fi : sizingDir.entryInfoList(
+             {QStringLiteral("sku_cache_*.json")}, QDir::Files)) {
+        if (fi.filePath() == targetCachePath) continue; // already loaded
+        loadJsonCache(fi.filePath());
+    }
+    if (cache.size() > fromTarget)
+        qDebug() << "PaneWarnings: loaded" << (cache.size() - fromTarget)
+                 << "additional SKUs from other marketplace caches";
+
+    int extraFromSettings = 0;
+    for (const QFileInfo &fi : sizingDir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+        const QString settingsPath = fi.filePath() + QStringLiteral("/settings.ini");
+        if (!QFileInfo::exists(settingsPath)) continue;
+        QSettings s(settingsPath, QSettings::IniFormat);
+        const QString prefix = QStringLiteral("sizing/skus/");
+        for (const QString &key : s.allKeys()) {
+            if (!key.startsWith(prefix)) continue;
+            const QString asin = key.mid(prefix.length());
+            const QString sku  = s.value(key).toString();
+            if (!asin.isEmpty() && !sku.isEmpty() && !cache.contains(asin)) {
+                cache.insert(asin, sku);
+                ++extraFromSettings;
+            }
+        }
+    }
+    if (extraFromSettings > 0)
+        qDebug() << "PaneWarnings: loaded" << extraFromSettings
+                 << "additional SKUs from per-product settings.ini files";
+
+    return cache;
 }
 
 // ---------------------------------------------------------------------------

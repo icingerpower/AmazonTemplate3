@@ -1363,69 +1363,56 @@ AmazonCatalogApi::uploadVariationFeed(QStringList marketplaceIds,
     // -------------------------------------------------------------------
     // Build the JSON_LISTINGS_FEED body
     // -------------------------------------------------------------------
-    // Format: { header, messages[] } where each message is a PATCH operation.
-    // Each entry × each marketplace produces a separate attribute patch block
-    // so Amazon can apply per-marketplace parentage data.
+    // One message per (entry, marketplace) — Amazon rejects messages that contain
+    // values for multiple marketplace_ids ("Request contains multiple marketplaces
+    // across attribute variants").
 
     QJsonArray messages;
     int messageId = 1;
     for (const VariationFeedEntry &e : entries) {
-        QJsonArray patches;
-
-        // 1. parentage_level
-        QJsonArray parentageLevelValues;
         for (const QString &mpId : marketplaceIds) {
-            parentageLevelValues.append(QJsonObject{
-                {QStringLiteral("value"),          e.isParent ? QStringLiteral("parent") : QStringLiteral("child")},
-                {QStringLiteral("marketplace_id"), mpId},
-            });
-        }
-        patches.append(QJsonObject{
-            {QStringLiteral("op"),    QStringLiteral("replace")},
-            {QStringLiteral("path"),  QStringLiteral("/attributes/parentage_level")},
-            {QStringLiteral("value"), parentageLevelValues},
-        });
+            QJsonArray patches;
 
-        // 2. child_parent_sku_relationship (children only)
-        if (!e.isParent && !e.parentSku.isEmpty()) {
-            QJsonArray relValues;
-            for (const QString &mpId : marketplaceIds) {
-                relValues.append(QJsonObject{
-                    {QStringLiteral("child_relationship_type"), QStringLiteral("variation")},
-                    {QStringLiteral("parent_sku"),              e.parentSku},
-                    {QStringLiteral("marketplace_id"),          mpId},
-                });
-            }
             patches.append(QJsonObject{
-                {QStringLiteral("op"),    QStringLiteral("replace")},
-                {QStringLiteral("path"),  QStringLiteral("/attributes/child_parent_sku_relationship")},
-                {QStringLiteral("value"), relValues},
-            });
-        }
-
-        // 3. variation_theme (parent and children)
-        if (!variationTheme.isEmpty()) {
-            QJsonArray themeValues;
-            for (const QString &mpId : marketplaceIds) {
-                themeValues.append(QJsonObject{
-                    {QStringLiteral("name"),           variationTheme},
+                {QStringLiteral("op"),   QStringLiteral("replace")},
+                {QStringLiteral("path"), QStringLiteral("/attributes/parentage_level")},
+                {QStringLiteral("value"), QJsonArray{QJsonObject{
+                    {QStringLiteral("value"),          e.isParent ? QStringLiteral("parent") : QStringLiteral("child")},
                     {QStringLiteral("marketplace_id"), mpId},
+                }}},
+            });
+
+            if (!e.isParent && !e.parentSku.isEmpty()) {
+                patches.append(QJsonObject{
+                    {QStringLiteral("op"),   QStringLiteral("replace")},
+                    {QStringLiteral("path"), QStringLiteral("/attributes/child_parent_sku_relationship")},
+                    {QStringLiteral("value"), QJsonArray{QJsonObject{
+                        {QStringLiteral("child_relationship_type"), QStringLiteral("variation")},
+                        {QStringLiteral("parent_sku"),              e.parentSku},
+                        {QStringLiteral("marketplace_id"),          mpId},
+                    }}},
                 });
             }
-            patches.append(QJsonObject{
-                {QStringLiteral("op"),    QStringLiteral("replace")},
-                {QStringLiteral("path"),  QStringLiteral("/attributes/variation_theme")},
-                {QStringLiteral("value"), themeValues},
+
+            if (!variationTheme.isEmpty()) {
+                patches.append(QJsonObject{
+                    {QStringLiteral("op"),   QStringLiteral("replace")},
+                    {QStringLiteral("path"), QStringLiteral("/attributes/variation_theme")},
+                    {QStringLiteral("value"), QJsonArray{QJsonObject{
+                        {QStringLiteral("name"),           variationTheme},
+                        {QStringLiteral("marketplace_id"), mpId},
+                    }}},
+                });
+            }
+
+            messages.append(QJsonObject{
+                {QStringLiteral("messageId"),     messageId++},
+                {QStringLiteral("sku"),           e.sku},
+                {QStringLiteral("operationType"), QStringLiteral("PATCH")},
+                {QStringLiteral("productType"),   productType},
+                {QStringLiteral("patches"),       patches},
             });
         }
-
-        messages.append(QJsonObject{
-            {QStringLiteral("messageId"),     messageId++},
-            {QStringLiteral("sku"),           e.sku},
-            {QStringLiteral("operationType"), QStringLiteral("PATCH")},
-            {QStringLiteral("productType"),   productType},
-            {QStringLiteral("patches"),       patches},
-        });
     }
 
     const QJsonObject feedBody{
@@ -1665,17 +1652,74 @@ AmazonCatalogApi::uploadVariationFeed(QStringList marketplaceIds,
         }
     }
 
-    if (processingStatus == QStringLiteral("DONE")) {
-        *resultOut = QStringLiteral("DONE | feedId: %1 | resultFeedDocumentId: %2")
-                         .arg(feedId, resultFeedDocumentId);
-    } else if (processingStatus == QStringLiteral("FATAL")
-               || processingStatus == QStringLiteral("CANCELLED")) {
-        *resultOut = QStringLiteral("%1 | feedId: %2 | body: %3")
-                         .arg(processingStatus, feedId, lastBody.left(400));
-    } else {
-        *resultOut = QStringLiteral("TIMEOUT (status=%1) | feedId: %2")
-                         .arg(processingStatus, feedId);
+    if (processingStatus != QStringLiteral("DONE")) {
+        if (processingStatus == QStringLiteral("FATAL") || processingStatus == QStringLiteral("CANCELLED"))
+            *resultOut = QStringLiteral("%1 | feedId: %2 | body: %3").arg(processingStatus, feedId, lastBody.left(400));
+        else
+            *resultOut = QStringLiteral("TIMEOUT (status=%1) | feedId: %2").arg(processingStatus, feedId);
+        co_return;
     }
+
+    // DONE — fetch and summarise the result document so per-message errors are visible.
+    if (resultFeedDocumentId.isEmpty()) {
+        *resultOut = QStringLiteral("DONE | feedId: %1 | (no result document)").arg(feedId);
+        co_return;
+    }
+
+    QString resultSummary;
+    {
+        // GET /feeds/2021-06-30/documents/{feedDocumentId} → presigned download URL
+        QString pollToken;
+        co_await _getAccessToken(lwaRegion, &pollToken);
+
+        QUrl url;
+        url.setScheme(QStringLiteral("https"));
+        url.setHost(endpointHost);
+        url.setPath(QStringLiteral("/feeds/2021-06-30/documents/%1").arg(resultFeedDocumentId));
+
+        QNetworkRequest req(url);
+        req.setRawHeader("x-amz-access-token", pollToken.toUtf8());
+        req.setRawHeader("accept", "application/json");
+
+        QNetworkReply* reply = _nam()->get(req);
+        co_await qCoro(reply).waitForFinished();
+        const QByteArray docData = reply->readAll();
+        reply->deleteLater();
+
+        const QString downloadUrl = QJsonDocument::fromJson(docData).object()
+                                        .value(QStringLiteral("url")).toString();
+
+        if (!downloadUrl.isEmpty()) {
+            QNetworkReply* dlReply = _nam()->get(QNetworkRequest(QUrl(downloadUrl)));
+            co_await qCoro(dlReply).waitForFinished();
+            const QByteArray resultJson = dlReply->readAll();
+            dlReply->deleteLater();
+
+            const QJsonObject root = QJsonDocument::fromJson(resultJson).object();
+            const QJsonObject summary = root.value(QStringLiteral("summary")).toObject();
+            const int accepted = summary.value(QStringLiteral("messagesAccepted")).toInt();
+            const int invalid  = summary.value(QStringLiteral("messagesInvalid")).toInt();
+            const int errors   = summary.value(QStringLiteral("errors")).toInt();
+
+            resultSummary = QStringLiteral("accepted=%1 invalid=%2 errors=%3")
+                                .arg(accepted).arg(invalid).arg(errors);
+
+            // Log first few issues for visibility
+            const QJsonArray issues = root.value(QStringLiteral("issues")).toArray();
+            for (int i = 0; i < qMin(5, (int)issues.size()); ++i) {
+                const QJsonObject iss = issues.at(i).toObject();
+                qWarning() << "Feed issue:" << iss.value(QStringLiteral("sku")).toString()
+                           << iss.value(QStringLiteral("code")).toString()
+                           << iss.value(QStringLiteral("message")).toString();
+                resultSummary += QStringLiteral(" | [%1] %2: %3")
+                    .arg(iss.value(QStringLiteral("sku")).toString(),
+                         iss.value(QStringLiteral("code")).toString(),
+                         iss.value(QStringLiteral("message")).toString());
+            }
+        }
+    }
+
+    *resultOut = QStringLiteral("DONE | feedId: %1 | %2").arg(feedId, resultSummary);
     co_return;
 }
 

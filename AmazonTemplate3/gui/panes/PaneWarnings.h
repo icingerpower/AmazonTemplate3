@@ -76,6 +76,7 @@ private:
 
     void _loadAiCache(const QString &cc);
     void _saveAiCache() const;
+    QHash<QString, QString> _loadSkuCache(const QString &marketplaceId) const;
 
     QCoro::Task<void> _onLoadWarnings();
     QCoro::Task<void> _onAskAi();
