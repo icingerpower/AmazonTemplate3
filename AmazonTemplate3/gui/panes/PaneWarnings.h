@@ -11,6 +11,7 @@
 
 #include "AbstractCli.h"
 #include "AttributeFlagsTable.h"
+#include "ClassificationTypeMap.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class PaneWarnings; }
@@ -47,6 +48,9 @@ private:
     AttributeFlagsTable     *m_flagsTable = nullptr;
     WarningsValueDelegate   *m_valueDelegate = nullptr;
     QHash<QString, QStringList> m_validValues; // attrId (lower) → enum list
+    ClassificationTypeMap   m_classificationMap; // classificationId → productType (persisted)
+    QHash<QString, QString> m_aiValueCache;      // "asin:attributeId" → aiValue (CC-scoped)
+    QString                 m_aiCacheCc;         // which CC is currently loaded in m_aiValueCache
 
     QPointer<QDialog>  m_progressDlg; // active progress dialog — hidden/shown with this pane
 
@@ -69,6 +73,9 @@ private:
     QNetworkAccessManager *_imageNam();
     QString _selectedMarketplaceId() const;
     void _downloadMainImage(const QString &url, const QString &asin, const QString &mktSubdir);
+
+    void _loadAiCache(const QString &cc);
+    void _saveAiCache() const;
 
     QCoro::Task<void> _onLoadWarnings();
     QCoro::Task<void> _onAskAi();

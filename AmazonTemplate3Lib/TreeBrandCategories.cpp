@@ -7,7 +7,8 @@ TreeBrandCategories::TreeBrandCategories(QObject *parent)
 
 TreeBrandCategories::~TreeBrandCategories() = default;
 
-void TreeBrandCategories::setItems(const QList<AmazonCatalogApi::StoreItem> &items)
+void TreeBrandCategories::setItems(const QList<AmazonCatalogApi::StoreItem> &items,
+                                    const QList<QStringList> &customPaths)
 {
     beginResetModel();
     qDeleteAll(m_root.children);
@@ -32,6 +33,13 @@ void TreeBrandCategories::setItems(const QList<AmazonCatalogApi::StoreItem> &ite
         genderNode->asins.append(item.asin);   genderNode->colorKeys.insert(colorKey);
         categoryNode->asins.append(item.asin); categoryNode->colorKeys.insert(colorKey);
         brandNode->asins.append(item.asin);    brandNode->colorKeys.insert(colorKey);
+    }
+
+    // Ensure custom paths exist even if no items currently reside there.
+    for (const QStringList &path : customPaths) {
+        TreeNode *node = &m_root;
+        for (const QString &name : path)
+            node = _findOrCreate(node, name);
     }
 
     endResetModel();

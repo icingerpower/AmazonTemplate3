@@ -681,9 +681,11 @@ QCoro::Task<void> AmazonAplusApi::validateContentDocumentAsinRelations(
 
 QCoro::Task<void> AmazonAplusApi::submitForApproval(QString contentReferenceKey,
                                                      QString marketplaceId,
-                                                     bool *success)
+                                                     bool *success,
+                                                     QStringList *blockedKeywords)
 {
     *success = false;
+    if (blockedKeywords) blockedKeywords->clear();
 
     const QString endpoint = endpointForMarketplace(marketplaceId);
 
@@ -724,6 +726,24 @@ QCoro::Task<void> AmazonAplusApi::submitForApproval(QString contentReferenceKey,
              << "response:" << QString::fromUtf8(data.left(300));
 
     if (status != 200 && status != 201) {
+        // Extract blocked keywords from full response before truncating for display.
+        if (blockedKeywords) {
+            QJsonParseError pe;
+            const QJsonDocument doc = QJsonDocument::fromJson(data, &pe);
+            if (pe.error == QJsonParseError::NoError && doc.isObject()) {
+                static const QString kPrefix =
+                    QStringLiteral("These keywords violate our community guidelines: ");
+                for (const QJsonValue &v : doc.object()
+                                               .value(QStringLiteral("errors")).toArray()) {
+                    QString msg = v.toObject()
+                                   .value(QStringLiteral("message")).toString();
+                    if (!msg.startsWith(kPrefix)) continue;
+                    msg = msg.mid(kPrefix.size());
+                    if (msg.endsWith(QLatin1Char('.'))) msg.chop(1);
+                    if (!msg.trimmed().isEmpty()) blockedKeywords->append(msg.trimmed());
+                }
+            }
+        }
         m_lastError = QStringLiteral("submitForApproval HTTP %1: %2")
                           .arg(status).arg(QString::fromUtf8(data.left(400)));
         writeAplusDiagnostic(QStringLiteral("approval"),

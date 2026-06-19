@@ -11,8 +11,9 @@ QString ClothingMenCategory::displayName() const
 QList<MeasurementField> ClothingMenCategory::measurementFields() const
 {
     return {
-        {QStringLiteral("chest"),      QObject::tr("Chest (cm)"),      2.0, {}},
-        {QStringLiteral("your_height"), QObject::tr("Your height (cm)"), 2.0, {}},
+        {QStringLiteral("chest"),        QObject::tr("Chest (cm)"),        2.0, {}},
+        {QStringLiteral("your_height"),  QObject::tr("Your height (cm)"),  2.0, {}},
+        {QStringLiteral("clothe_height"), QObject::tr("Clothe height (cm)"), 2.0, {}, true},
     };
 }
 

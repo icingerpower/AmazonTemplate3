@@ -311,6 +311,15 @@ public:
                     "Goal: convey quality, craftsmanship and premium feel. "
                     "No text overlays, no watermarks. "
                     "Save as desktop.png in the current directory.");
+                case 3: return QCoreApplication::translate("APlusWorkflow",
+                    "Generate a professional Amazon A+ desktop lifestyle image (970x600 px, landscape) "
+                    "that sells the aspiration of wearing this %1 garment rather than simply documenting it. "
+                    "Show one model in an environment that matches the garment's occasion and elevates desire: "
+                    "choose a setting that reflects the product's mood — outdoor market, rooftop, "
+                    "hotel lobby, art gallery, garden event or similar — without clichés. "
+                    "The garment is the undisputed hero: well-lit, clearly visible, no competing visuals. "
+                    "Cinematic framing, aspirational atmosphere, premium quality. "
+                    "No text overlays, no watermarks. Save as desktop.png in the current directory.");
                 }
             }
         }
@@ -378,6 +387,13 @@ public:
                     "%2 "
                     "Convey quality and craftsmanship, no text overlays. "
                     "Save as mobile.png in the current directory.");
+                case 3: return QCoreApplication::translate("APlusWorkflow",
+                    "Generate a professional Amazon A+ mobile lifestyle image (600x600 px, square) "
+                    "that captures the aspiration of wearing this %1 garment. "
+                    "One model in a setting that elevates the product: outdoor, urban, hotel, "
+                    "gallery or similar — chosen to match the garment's occasion and mood. "
+                    "The garment is the clear hero, editorial framing, aspirational atmosphere. "
+                    "No text overlays. Save as mobile.png in the current directory.");
                 }
             }
         }
@@ -467,13 +483,13 @@ public:
             result << spec;
         }
 
-        // 3. Aspirational / Cinematic — only for single-color shoe products
-        if (orderedColors.size() == 1 && isShoeCategory()) {
+        // 3. Aspirational / Cinematic — for any single-color product
+        if (orderedColors.size() == 1) {
             ImageSlotSpec spec;
             spec.elementId   = QStringLiteral("image_aspirational");
             spec.displayName = QCoreApplication::translate("APlusWorkflow", "Aspirational Scene");
 
-            const QString color = orderedColors.first();
+            const QString color    = orderedColors.first();
             const QString aspInstr = stepInstructions.value(3);
 
             spec.desktopPrompt = buildPreamble(productDesc, mainImageHint, aspInstr)

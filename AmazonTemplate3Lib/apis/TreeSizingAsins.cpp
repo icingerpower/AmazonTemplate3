@@ -340,43 +340,39 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
                                    family.children.first().title,
                                    shoeWidths);
 
-            // Emit images grouped by unique color. Color variants each have
-            // their own photos; size-only variants share photos, so dedup
-            // by color naturally collapses them to one entry.
+            // Emit images grouped by unique color. Dedup by color name only
+            // (lowercased). Image-URL-based dedup is unreliable: Amazon frequently
+            // returns the parent product's images for all children regardless of
+            // color, making distinct colors like "Bronze Rose" and "Silver Gray"
+            // appear identical. We take the first child's image list for each color
+            // as the reference; if a child has no images we still emit the color
+            // so buildSlots() picks the right path (group shot vs aspirational).
             QList<QPair<QString, QStringList>> colorImages;
             QSet<QString> seenColors;
-            QSet<QString> seenMainUrls;
-            QSet<QString> seenImageFingerprints;
-            for (const auto& c : family.children) {
-                if (c.allImageUrls.isEmpty()) continue;
-                const QString colorKey = c.color.toLower();
-                const QString mainUrl  = c.mainImageUrl;
-                if (seenColors.contains(colorKey)) continue;
-                if (!mainUrl.isEmpty() && seenMainUrls.contains(mainUrl)) continue;
-                // Dedup same physical variant appearing under different language
-                // color names (e.g. "Yellow" from US probe vs "Jaune" from FR probe).
-                QStringList sortedUrls = c.allImageUrls;
-                std::sort(sortedUrls.begin(), sortedUrls.end());
-                const QString fingerprint = sortedUrls.join(QLatin1Char('\n'));
-                if (!fingerprint.isEmpty() && seenImageFingerprints.contains(fingerprint)) continue;
-                seenColors.insert(colorKey);
-                if (!mainUrl.isEmpty()) seenMainUrls.insert(mainUrl);
-                if (!fingerprint.isEmpty()) seenImageFingerprints.insert(fingerprint);
-                colorImages.append({c.color, c.allImageUrls});
-            }
-            // Second pass: include any color that was entirely skipped because none
-            // of its children had image URLs (e.g. out-of-stock in the probed
-            // marketplace). The color still needs a slot in the workflow so that
-            // buildSlots() sees the correct color count and picks the right path
-            // (group shot vs single-color aspirational). The AI will generate the
-            // image without a reference photo.
+
+            QStringList logLines;
+            logLines << tr("Color detection for %1:").arg(family.parentAsin);
+
             for (const auto& c : family.children) {
                 if (c.color.isEmpty()) continue;
                 const QString colorKey = c.color.toLower();
                 if (seenColors.contains(colorKey)) continue;
                 seenColors.insert(colorKey);
-                colorImages.append({c.color, {}});
+                colorImages.append({c.color, c.allImageUrls});
+                logLines << tr("  ADD   \"%1\" — images: %2")
+                            .arg(c.color)
+                            .arg(c.allImageUrls.size());
             }
+
+            logLines << tr("  → %1 distinct color(s): %2")
+                        .arg(colorImages.size())
+                        .arg([&]{
+                            QStringList names;
+                            for (const auto& p : colorImages) names << p.first;
+                            return names.join(QStringLiteral(", "));
+                        }());
+            emit colorLog(logLines.join(QLatin1Char('\n')));
+
             if (!colorImages.isEmpty())
                 emit variantImagesFetched(colorImages);
 
@@ -657,7 +653,7 @@ QVariant TreeSizingAsins::data(const QModelIndex& index, int role) const
         if (fi < 0 || fi >= m_families.size()) return {};
         const ParentItem& p = m_families.at(fi);
 
-        if (role == Qt::DisplayRole) {
+        if (role == Qt::DisplayRole || role == Qt::EditRole) {
             switch (col) {
             case SKU:  return p.sku;
             case ASIN: return p.asin;
@@ -675,7 +671,7 @@ QVariant TreeSizingAsins::data(const QModelIndex& index, int role) const
     if (ci < 0 || ci >= p.children.size()) return {};
     const ChildItem& c = p.children.at(ci);
 
-    if (role == Qt::DisplayRole) {
+    if (role == Qt::DisplayRole || role == Qt::EditRole) {
         switch (col) {
         case SKU:   return c.sku;
         case ASIN:  return c.asin;
@@ -728,10 +724,13 @@ Qt::ItemFlags TreeSizingAsins::flags(const QModelIndex& index) const
     if (!index.isValid())
         return Qt::NoItemFlags;
     Qt::ItemFlags f = Qt::ItemIsEnabled | Qt::ItemIsSelectable;
-    // SizeTable column is displayed as a checkbox only on child rows
-    // (parent rows don't expose the checkbox).
     if (index.column() == SizeTable && index.internalId() != kTopLevelId) {
         f |= Qt::ItemIsUserCheckable;
+    }
+    // SKU and ASIN columns are editable so the user can double-click to select
+    // and copy the value; setData() ignores these edits intentionally.
+    if (index.column() == SKU || index.column() == ASIN) {
+        f |= Qt::ItemIsEditable;
     }
     return f;
 }

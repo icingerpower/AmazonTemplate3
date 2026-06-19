@@ -16,6 +16,9 @@ struct WarningRow {
     QString aiValue;      // editable — filled by user or CLI later
     QString mainImageUrl; // not displayed, used for downloading the product image
     QStringList bulletPoints; // all current bullet values (for bullet_point violations only)
+    QString productType;  // Amazon product type (e.g. "SWIMWEAR") — captured at load time
+    QString classificationId;          // browseClassification.classificationId (when productType unavailable)
+    QString classificationDisplayName; // browseClassification.displayName (human-readable category)
 };
 
 class TableProductWarnings : public QAbstractTableModel

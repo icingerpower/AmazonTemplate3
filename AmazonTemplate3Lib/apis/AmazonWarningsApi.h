@@ -51,6 +51,15 @@ public:
                                                QString sku,
                                                QString* productType);
 
+    // Fallback: fetch productType from the Catalog Items API.
+    // Works even for inactive/out-of-stock listings where the Listings API
+    // omits productType from summaries. GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> fetchProductTypeFromCatalog(QString marketplaceId,
+                                                   QString asin,
+                                                   QString* productType,
+                                                   QString* classificationId = nullptr,
+                                                   QString* classificationDisplayName = nullptr);
+
     // Fetch the valid enum values for a given attributeId via the Product Type Definitions
     // API + JSON Schema. *out is empty if not found or the attribute accepts free text.
     // Schema is cached per (productType:marketplaceId) for the session.
@@ -101,6 +110,11 @@ private:
     // Extracted step 1 of fetchViolations: run FBA report → ASIN→SKU map.
     // *out is empty on error (error already logged via logMessage signal).
     QCoro::Task<void> _fetchFbaAsinToSku(QString marketplaceId, QHash<QString, QString>* out);
+
+    // Fallback for enrichPastedRows: enumerate ALL listings (including inactive/sold-out)
+    // via GET_MERCHANT_LISTINGS_ALL_DATA report. Adds only new ASINs to *out (never overwrites).
+    QCoro::Task<void> _fetchAllListingsAsinToSku(QString marketplaceId,
+                                                  QHash<QString, QString>* out);
 
     QNetworkAccessManager* _nam();
 

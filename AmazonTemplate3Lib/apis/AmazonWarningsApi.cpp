@@ -548,17 +548,19 @@ QCoro::Task<void> AmazonWarningsApi::fetchViolations(QString marketplaceId,
 
         const QJsonObject root = QJsonDocument::fromJson(data).object();
 
-        // --- Extract title + mainImage from summaries[] matching marketplaceId ---
+        // --- Extract title + mainImage + productType from summaries[] matching marketplaceId ---
         QString itemTitle;
         QString mainImageUrl;
+        QString itemProdType;
         {
             const QJsonArray summaries = root.value(QStringLiteral("summaries")).toArray();
             for (const QJsonValue& sv : summaries) {
                 const QJsonObject sobj = sv.toObject();
                 if (sobj.value(QStringLiteral("marketplaceId")).toString() == marketplaceId) {
-                    itemTitle    = sobj.value(QStringLiteral("itemName")).toString();
-                    mainImageUrl = sobj.value(QStringLiteral("mainImage")).toObject()
-                                       .value(QStringLiteral("link")).toString();
+                    itemTitle       = sobj.value(QStringLiteral("itemName")).toString();
+                    mainImageUrl    = sobj.value(QStringLiteral("mainImage")).toObject()
+                                         .value(QStringLiteral("link")).toString();
+                    itemProdType = sobj.value(QStringLiteral("productType")).toString();
                     break;
                 }
             }
@@ -610,6 +612,7 @@ QCoro::Task<void> AmazonWarningsApi::fetchViolations(QString marketplaceId,
                 row.value        = issueMessage;
                 row.aiValue      = QString();
                 row.mainImageUrl = mainImageUrl;
+                row.productType  = itemProdType;
                 out->append(row);
                 ++violationCount;
             } else {
@@ -626,6 +629,7 @@ QCoro::Task<void> AmazonWarningsApi::fetchViolations(QString marketplaceId,
                     row.value        = resolveValue(attributeId);
                     row.aiValue      = QString();
                     row.mainImageUrl = mainImageUrl;
+                    row.productType  = itemProdType;
 
                     // For bullet_point violations, capture ALL current bullets so the
                     // AI prompt can present the full list for context.
@@ -659,6 +663,257 @@ QCoro::Task<void> AmazonWarningsApi::fetchViolations(QString marketplaceId,
     co_return;
 }
 
+// _fetchAllListingsAsinToSku — Fallback step: enumerate ALL merchant listings
+// (including inactive/sold-out) via GET_MERCHANT_LISTINGS_ALL_DATA report.
+// Only adds entries for ASINs not already in *out (FBA data takes priority).
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonWarningsApi::_fetchAllListingsAsinToSku(QString marketplaceId,
+                                                                 QHash<QString, QString>* out)
+{
+    const QString endpoint = endpointForMarketplace(marketplaceId);
+    const QString lwaReg   = lwaRegionForMarketplace(marketplaceId);
+
+    qDebug() << "AmazonWarningsApi: _fetchAllListingsAsinToSku START marketplace=" << marketplaceId
+             << "endpoint=" << endpoint << "lwaReg=" << lwaReg;
+    emit logMessage(QStringLiteral("Step 1b: Requesting all-listings report (inactive/MFN products)…"));
+
+    // 1a — create report
+    QString reportId;
+    {
+        QString token;
+        co_await _getAccessToken(lwaReg, &token);
+        qDebug() << "AmazonWarningsApi: _fetchAllListingsAsinToSku token isEmpty=" << token.isEmpty();
+        if (token.isEmpty()) co_return;
+
+        QUrl url;
+        url.setScheme(QStringLiteral("https"));
+        url.setHost(endpoint);
+        url.setPath(QStringLiteral("/reports/2021-06-30/reports"));
+
+        QJsonObject body;
+        body[QStringLiteral("reportType")]     = QStringLiteral("GET_MERCHANT_LISTINGS_ALL_DATA");
+        body[QStringLiteral("marketplaceIds")] = QJsonArray{ marketplaceId };
+
+        QNetworkRequest req(url);
+        req.setRawHeader("x-amz-access-token", token.toUtf8());
+        req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+        QNetworkReply* reply = _nam()->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+        co_await qCoro(reply).waitForFinished();
+
+        const QByteArray data = reply->readAll();
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        reply->deleteLater();
+
+        qDebug() << "AmazonWarningsApi: _fetchAllListingsAsinToSku report creation HTTP=" << status
+                 << "body=" << data.left(300);
+
+        if (status != 202) {
+            emit logMessage(QStringLiteral("  ⚠ All-listings report creation failed: HTTP %1 — %2")
+                            .arg(status).arg(QString::fromUtf8(data.left(300))));
+            co_return;
+        }
+
+        reportId = QJsonDocument::fromJson(data).object()
+                       .value(QStringLiteral("reportId")).toString();
+        qDebug() << "AmazonWarningsApi: _fetchAllListingsAsinToSku reportId=" << reportId;
+        if (reportId.isEmpty()) {
+            emit logMessage(QStringLiteral("  ⚠ All-listings report: no reportId"));
+            co_return;
+        }
+        emit logMessage(QStringLiteral("  Report created, waiting for it to complete…"));
+    }
+
+    // 1b — poll until DONE
+    QString reportDocumentId;
+    {
+        constexpr int kMaxPolls = 36;
+        constexpr int kPollMs   = 5000;
+
+        for (int poll = 0; poll < kMaxPolls; ++poll) {
+            QTimer pollTimer;
+            pollTimer.setSingleShot(true);
+            pollTimer.start(kPollMs);
+            co_await qCoro(&pollTimer).waitForTimeout();
+
+            QString token;
+            co_await _getAccessToken(lwaReg, &token);
+            if (token.isEmpty()) co_return;
+
+            QUrl pollUrl;
+            pollUrl.setScheme(QStringLiteral("https"));
+            pollUrl.setHost(endpoint);
+            pollUrl.setPath(QStringLiteral("/reports/2021-06-30/reports/") + reportId);
+
+            QNetworkRequest pollReq(pollUrl);
+            pollReq.setRawHeader("x-amz-access-token", token.toUtf8());
+            pollReq.setRawHeader("accept", "application/json");
+
+            QNetworkReply* pollReply = _nam()->get(pollReq);
+            co_await qCoro(pollReply).waitForFinished();
+
+            const QByteArray pollData = pollReply->readAll();
+            const int pollStatus = pollReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            pollReply->deleteLater();
+
+            qDebug() << "AmazonWarningsApi: _fetchAllListingsAsinToSku poll" << poll + 1
+                     << "HTTP=" << pollStatus;
+            if (pollStatus != 200) continue;
+
+            const QJsonObject pollObj    = QJsonDocument::fromJson(pollData).object();
+            const QString     procStatus = pollObj.value(QStringLiteral("processingStatus")).toString();
+            qDebug() << "AmazonWarningsApi: _fetchAllListingsAsinToSku procStatus=" << procStatus;
+            emit logMessage(QStringLiteral("  Poll %1: %2").arg(poll + 1).arg(procStatus));
+
+            if (procStatus == QStringLiteral("DONE")) {
+                reportDocumentId = pollObj.value(QStringLiteral("reportDocumentId")).toString();
+                qDebug() << "AmazonWarningsApi: _fetchAllListingsAsinToSku DONE reportDocumentId="
+                         << reportDocumentId << "pollData=" << pollData.left(300);
+                break;
+            }
+            if (procStatus == QStringLiteral("FATAL") || procStatus == QStringLiteral("CANCELLED")) {
+                emit logMessage(QStringLiteral("  ⚠ All-listings report failed: ") + procStatus);
+                co_return;
+            }
+        }
+
+        qDebug() << "AmazonWarningsApi: _fetchAllListingsAsinToSku after poll loop reportDocumentId=" << reportDocumentId;
+        if (reportDocumentId.isEmpty()) {
+            emit logMessage(QStringLiteral("  ⚠ All-listings report did not complete within 3 minutes"));
+            co_return;
+        }
+    }
+
+    // 1c — get download URL
+    QString downloadUrl;
+    QString compression;
+    {
+        QString token;
+        co_await _getAccessToken(lwaReg, &token);
+        if (token.isEmpty()) co_return;
+
+        QUrl docUrl;
+        docUrl.setScheme(QStringLiteral("https"));
+        docUrl.setHost(endpoint);
+        docUrl.setPath(QStringLiteral("/reports/2021-06-30/documents/") + reportDocumentId);
+
+        QNetworkRequest docReq(docUrl);
+        docReq.setRawHeader("x-amz-access-token", token.toUtf8());
+        docReq.setRawHeader("accept", "application/json");
+
+        QNetworkReply* docReply = _nam()->get(docReq);
+        co_await qCoro(docReply).waitForFinished();
+
+        const QByteArray docData = docReply->readAll();
+        const int docStatus = docReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        docReply->deleteLater();
+
+        if (docStatus != 200) {
+            emit logMessage(QStringLiteral("  ⚠ All-listings document fetch failed: HTTP %1").arg(docStatus));
+            co_return;
+        }
+
+        const QJsonObject docObj = QJsonDocument::fromJson(docData).object();
+        downloadUrl = docObj.value(QStringLiteral("url")).toString();
+        compression = docObj.value(QStringLiteral("compressionAlgorithm")).toString();
+
+        qDebug() << "AmazonWarningsApi: _fetchAllListingsAsinToSku docStatus=" << docStatus
+                 << "downloadUrl empty=" << downloadUrl.isEmpty()
+                 << "compression=" << compression
+                 << "docData=" << docData.left(200);
+
+        if (downloadUrl.isEmpty()) {
+            emit logMessage(QStringLiteral("  ⚠ All-listings document: no download URL"));
+            co_return;
+        }
+    }
+
+    // 1d — download and parse TSV
+    {
+        QNetworkReply* dlReply = _nam()->get(QNetworkRequest{QUrl(downloadUrl)});
+        co_await qCoro(dlReply).waitForFinished();
+
+        QByteArray tsvData = dlReply->readAll();
+        const int dlStatus = dlReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        dlReply->deleteLater();
+
+        qDebug() << "AmazonWarningsApi: _fetchAllListingsAsinToSku dlStatus=" << dlStatus
+                 << "tsvData.size()=" << tsvData.size()
+                 << "compression=" << compression;
+
+        if (dlStatus != 200) {
+            emit logMessage(QStringLiteral("  ⚠ All-listings report download failed: HTTP %1").arg(dlStatus));
+            co_return;
+        }
+
+        if (compression == QStringLiteral("GZIP")) {
+            const QByteArray dec = gunzip(tsvData);
+            qDebug() << "AmazonWarningsApi: _fetchAllListingsAsinToSku after gunzip, dec.size()=" << dec.size();
+            if (dec.isEmpty()) {
+                emit logMessage(QStringLiteral("  ⚠ All-listings report decompression failed"));
+                co_return;
+            }
+            tsvData = dec;
+        }
+
+        const QStringList lines = QString::fromUtf8(tsvData).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+        qDebug() << "AmazonWarningsApi: _fetchAllListingsAsinToSku lines.size()=" << lines.size()
+                 << "first300=" << QString::fromUtf8(tsvData).left(300);
+        if (lines.isEmpty()) {
+            emit logMessage(QStringLiteral("  ⚠ All-listings report TSV is empty"));
+            co_return;
+        }
+
+        // GET_MERCHANT_LISTINGS_ALL_DATA header columns vary by region:
+        //   EU/FR: "seller-sku" + "product-id" (with "product-id-type" filter)
+        //   UK/NA: "seller-sku" + "asin1"
+        const QStringList headers = lines.at(0).split(QLatin1Char('\t'));
+        const int skuCol   = headers.indexOf(QStringLiteral("seller-sku"));
+        int       asinCol  = headers.indexOf(QStringLiteral("asin1"));
+        int       ptypeCol = -1; // only needed when falling back to product-id
+        if (asinCol < 0) {
+            asinCol  = headers.indexOf(QStringLiteral("product-id"));
+            ptypeCol = headers.indexOf(QStringLiteral("product-id-type"));
+        }
+
+        qDebug() << "AmazonWarningsApi: _fetchAllListingsAsinToSku skuCol=" << skuCol
+                 << "asinCol=" << asinCol << "ptypeCol=" << ptypeCol
+                 << "totalLines=" << lines.size()
+                 << "headers=" << lines.at(0).left(300);
+
+        if (skuCol < 0 || asinCol < 0) {
+            emit logMessage(QStringLiteral("  ⚠ All-listings report: unexpected TSV format (no seller-sku or asin1/product-id). Headers: ")
+                            + lines.at(0).left(200));
+            co_return;
+        }
+
+        int added = 0;
+        for (int i = 1; i < lines.size(); ++i) {
+            const QStringList cols = lines.at(i).split(QLatin1Char('\t'));
+            if (cols.size() <= qMax(skuCol, asinCol)) continue;
+            // When using product-id column, skip non-ASIN rows (EAN/UPC/ISBN)
+            if (ptypeCol >= 0 && cols.size() > ptypeCol) {
+                const QString ptype = cols.at(ptypeCol).trimmed();
+                if (ptype != QStringLiteral("ASIN") && ptype != QStringLiteral("1")) continue;
+            }
+            const QString sku  = cols.at(skuCol).trimmed();
+            const QString asin = cols.at(asinCol).trimmed();
+            if (!sku.isEmpty() && !asin.isEmpty() && !out->contains(asin)) {
+                qDebug() << "AmazonWarningsApi: _fetchAllListingsAsinToSku insert asin=" << asin << "sku=" << sku;
+                out->insert(asin, sku);
+                ++added;
+            }
+        }
+
+        qDebug() << "AmazonWarningsApi: _fetchAllListingsAsinToSku complete, added=" << added
+                 << "total=" << out->size();
+        emit logMessage(QStringLiteral("Step 1b complete: %1 additional ASIN(s) found in all-listings report.")
+                        .arg(added));
+    }
+    co_return;
+}
+
 // ---------------------------------------------------------------------------
 // enrichPastedRows — Step 1: FBA report for SKU; Step 2: per-ASIN listing data.
 // ---------------------------------------------------------------------------
@@ -678,8 +933,30 @@ QCoro::Task<void> AmazonWarningsApi::enrichPastedRows(QString marketplaceId,
 
     QHash<QString, QString> asinToSku;
     co_await _fetchFbaAsinToSku(marketplaceId, &asinToSku);
+    qDebug() << "AmazonWarningsApi: enrichPastedRows FBA report done, asinToSku.size()=" << asinToSku.size();
+
+    // Check which pasted ASINs are missing from the FBA report
+    // (inactive / sold-out / MFN products). If any are missing, supplement
+    // with GET_MERCHANT_LISTINGS_ALL_DATA which covers all listing states.
+    {
+        bool anyMissing = false;
+        QStringList missingAsins;
+        for (const WarningRow &row : *rows) {
+            if (!asinToSku.contains(row.asin)) {
+                anyMissing = true;
+                if (!missingAsins.contains(row.asin)) missingAsins.append(row.asin);
+            }
+        }
+        qDebug() << "AmazonWarningsApi: enrichPastedRows anyMissing=" << anyMissing
+                 << "missingAsins=" << missingAsins;
+        if (anyMissing) {
+            emit logMessage(QStringLiteral("Some pasted ASINs not found in FBA report — fetching all-listings report…"));
+            co_await _fetchAllListingsAsinToSku(marketplaceId, &asinToSku);
+        }
+    }
+
     if (asinToSku.isEmpty()) {
-        emit logMessage(QStringLiteral("No FBA listings found for this marketplace."));
+        emit logMessage(QStringLiteral("No listings found for this marketplace."));
         emit progressChanged(1, 1);
         co_return;
     }
@@ -754,14 +1031,16 @@ QCoro::Task<void> AmazonWarningsApi::enrichPastedRows(QString marketplaceId,
 
                 QString itemTitle;
                 QString mainImageUrl;
+                QString itemProdType;
                 {
                     const QJsonArray summaries = root.value(QStringLiteral("summaries")).toArray();
                     for (const QJsonValue& sv : summaries) {
                         const QJsonObject sobj = sv.toObject();
                         if (sobj.value(QStringLiteral("marketplaceId")).toString() == marketplaceId) {
-                            itemTitle    = sobj.value(QStringLiteral("itemName")).toString();
-                            mainImageUrl = sobj.value(QStringLiteral("mainImage")).toObject()
-                                               .value(QStringLiteral("link")).toString();
+                            itemTitle       = sobj.value(QStringLiteral("itemName")).toString();
+                            mainImageUrl    = sobj.value(QStringLiteral("mainImage")).toObject()
+                                                 .value(QStringLiteral("link")).toString();
+                            itemProdType    = sobj.value(QStringLiteral("productType")).toString();
                             break;
                         }
                     }
@@ -797,6 +1076,7 @@ QCoro::Task<void> AmazonWarningsApi::enrichPastedRows(QString marketplaceId,
                     row.sku          = sku;
                     if (row.title.isEmpty()) row.title = itemTitle;
                     row.mainImageUrl = mainImageUrl;
+                    row.productType  = itemProdType;
                     row.value        = resolveValue(row.attributeId);
                     if (row.attributeId == QStringLiteral("bullet_point"))
                         row.bulletPoints = bulletPoints;
@@ -891,6 +1171,82 @@ QCoro::Task<void> AmazonWarningsApi::fetchListingProductType(QString marketplace
     qDebug() << "AmazonWarningsApi::fetchListingProductType: SKU" << sku
              << "→ productType =" << *productType;
     co_return;
+}
+
+// ---------------------------------------------------------------------------
+// fetchProductTypeFromCatalog — Catalog Items API fallback for inactive listings
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonWarningsApi::fetchProductTypeFromCatalog(QString marketplaceId,
+                                                                   QString asin,
+                                                                   QString* productType,
+                                                                   QString* classificationId,
+                                                                   QString* classificationDisplayName)
+{
+    productType->clear();
+    if (classificationId)          classificationId->clear();
+    if (classificationDisplayName) classificationDisplayName->clear();
+    if (asin.isEmpty()) co_return;
+
+    const QString endpoint = endpointForMarketplace(marketplaceId);
+    const QString lwaReg   = lwaRegionForMarketplace(marketplaceId);
+
+    QString token;
+    co_await _getAccessToken(lwaReg, &token);
+    if (token.isEmpty()) co_return;
+
+    QUrl url;
+    url.setScheme(QStringLiteral("https"));
+    url.setHost(endpoint);
+    url.setPath(QStringLiteral("/catalog/2022-04-01/items/") + asin);
+
+    QUrlQuery q;
+    q.addQueryItem(QStringLiteral("marketplaceIds"), marketplaceId);
+    q.addQueryItem(QStringLiteral("includedData"),   QStringLiteral("summaries"));
+    url.setQuery(q);
+
+    QNetworkRequest req(url);
+    req.setRawHeader("x-amz-access-token", token.toUtf8());
+    req.setRawHeader("accept", "application/json");
+
+    QNetworkReply* reply = _nam()->get(req);
+    co_await qCoro(reply).waitForFinished();
+
+    const QByteArray data   = reply->readAll();
+    const int        status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    reply->deleteLater();
+
+    if (status != 200 || data.isEmpty()) {
+        qWarning() << "AmazonWarningsApi::fetchProductTypeFromCatalog: HTTP" << status
+                   << "for ASIN" << asin;
+        co_return;
+    }
+
+    const QJsonObject root = QJsonDocument::fromJson(data).object();
+    const QJsonArray summaries = root.value(QStringLiteral("summaries")).toArray();
+    for (const QJsonValue &sv : summaries) {
+        const QJsonObject sobj = sv.toObject();
+        const QString pt = sobj.value(QStringLiteral("productType")).toString();
+        if (!pt.isEmpty()) {
+            *productType = pt;
+            qDebug() << "AmazonWarningsApi::fetchProductTypeFromCatalog: ASIN" << asin
+                     << "→ productType =" << pt;
+            co_return;
+        }
+        // Extract classification info as fallback identifier
+        if (classificationId && classificationId->isEmpty()) {
+            const QJsonObject bc = sobj.value(QStringLiteral("browseClassification")).toObject();
+            *classificationId = bc.value(QStringLiteral("classificationId")).toString();
+            if (classificationDisplayName)
+                *classificationDisplayName = bc.value(QStringLiteral("displayName")).toString();
+        }
+    }
+    // Log the full response so we can diagnose why productType is missing.
+    qWarning() << "AmazonWarningsApi::fetchProductTypeFromCatalog: no productType for ASIN"
+               << asin << "— HTTP" << status
+               << "— body:" << QString::fromUtf8(data.left(500));
+    emit logMessage(QStringLiteral("    ⚠ Catalog API response for %1: %2")
+                    .arg(asin, QString::fromUtf8(data.left(300))));
 }
 
 // ---------------------------------------------------------------------------
@@ -1124,18 +1480,36 @@ QCoro::Task<void> AmazonWarningsApi::patchListingAttribute(QString marketplaceId
         co_return;
     }
 
-    // Build patch payload: {"productType":pt, "patches":[{"op":"replace",
-    //   "path":"/attributes/<attributeId>",
-    //   "value":[{"value":<value>, "marketplace_id":<mp>}]}]}
-    const QJsonObject attrValue{
-        {QStringLiteral("value"),          value},
-        {QStringLiteral("marketplace_id"), marketplaceId}
-    };
+    // Build the attribute value array.
+    // bullet_point is multi-valued: the AI stores bullets newline-separated,
+    // and Amazon expects one array entry per bullet (each ≤ 700 chars).
+    // All other attributes are single-valued.
+    QJsonArray attrValues;
+    if (attributeId == QStringLiteral("bullet_point")) {
+        const QStringList bullets = value.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+        for (const QString &bullet : bullets) {
+            const QString trimmed = bullet.trimmed();
+            if (trimmed.isEmpty()) continue;
+            attrValues.append(QJsonObject{
+                {QStringLiteral("value"),          trimmed},
+                {QStringLiteral("marketplace_id"), marketplaceId}
+            });
+        }
+        if (attrValues.isEmpty()) {
+            m_lastError = QStringLiteral("No bullet points found in value for SKU %1").arg(sku);
+            co_return;
+        }
+    } else {
+        attrValues.append(QJsonObject{
+            {QStringLiteral("value"),          value},
+            {QStringLiteral("marketplace_id"), marketplaceId}
+        });
+    }
 
     const QJsonObject patch{
         {QStringLiteral("op"),    QStringLiteral("replace")},
         {QStringLiteral("path"),  QStringLiteral("/attributes/") + attributeId},
-        {QStringLiteral("value"), QJsonArray{attrValue}}
+        {QStringLiteral("value"), attrValues}
     };
 
     const QJsonObject bodyObj{
@@ -1182,6 +1556,21 @@ QCoro::Task<void> AmazonWarningsApi::patchListingAttribute(QString marketplaceId
              << "response:" << QString::fromUtf8(data.left(300));
 
     if (httpStatus == 200 || httpStatus == 202) {
+        // Amazon can return HTTP 200 with "status":"INVALID" when the value
+        // fails their validation (e.g. bullet_point > 700 chars). Check body.
+        const QJsonObject respObj     = QJsonDocument::fromJson(data).object();
+        const QString     listingStat = respObj.value(QStringLiteral("status")).toString();
+        if (listingStat == QStringLiteral("INVALID")) {
+            const QJsonArray issues = respObj.value(QStringLiteral("issues")).toArray();
+            QStringList msgs;
+            for (const QJsonValue &v : issues)
+                msgs.append(v.toObject().value(QStringLiteral("message")).toString());
+            m_lastError = QStringLiteral("Amazon INVALID for SKU %1 / attr %2: %3")
+                              .arg(sku, attributeId, msgs.join(QStringLiteral("; ")));
+            qWarning() << "AmazonWarningsApi: PATCH INVALID for" << sku << "/" << attributeId
+                       << "issues:" << msgs;
+            co_return; // *success remains false
+        }
         *success = true;
         co_return;
     }

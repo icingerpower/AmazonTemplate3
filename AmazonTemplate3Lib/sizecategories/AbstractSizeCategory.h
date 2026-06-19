@@ -15,6 +15,7 @@ struct MeasurementField {
     QString label;
     double  defaultStep = 2.0;
     QString derivedKey;
+    bool    noRange     = false;
 };
 
 struct CountryGroup {

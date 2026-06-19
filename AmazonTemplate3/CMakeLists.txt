@@ -17,8 +17,6 @@ set(PROJECT_SOURCES
         main.cpp
         SettingsTable.h
         SettingsTable.cpp
-        AmazonMarketplace.h
-        AmazonMarketplace.cpp
         "../../common/types/types.h"
         "../../common/types/types.cpp"
         ${GUI_FILES}

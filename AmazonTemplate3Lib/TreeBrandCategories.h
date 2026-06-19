@@ -17,7 +17,10 @@ public:
     explicit TreeBrandCategories(QObject *parent = nullptr);
     ~TreeBrandCategories() override;
 
-    void setItems(const QList<AmazonCatalogApi::StoreItem> &items);
+    // customPaths: extra paths to ensure exist in the tree even if no items reside there.
+    // Each entry is an ordered list of node names from root, e.g. {"Nike","Platform Heels"}.
+    void setItems(const QList<AmazonCatalogApi::StoreItem> &items,
+                  const QList<QStringList> &customPaths = {});
     void clear();
 
     // Returns all ASINs for the node at index (aggregated across children).

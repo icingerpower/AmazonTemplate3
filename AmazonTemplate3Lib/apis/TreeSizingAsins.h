@@ -59,6 +59,9 @@ public:
 
 signals:
     void loadError(const QString& message);
+    // Diagnostic messages emitted during color detection (one line per color candidate).
+    // Accumulate in the UI so the user can copy-paste the log on unexpected results.
+    void colorLog(const QString& message);
     // Emitted after the first variation family loads; carries the first child's
     // bullet points and material/fabric attributes for use in content generation.
     // shoeWidths: unique shoe_width values collected across ALL children (empty for non-shoe products).

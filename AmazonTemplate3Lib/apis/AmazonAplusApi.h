@@ -63,9 +63,12 @@ public:
                           QStringList *warnings);
 
     // Step 4: Submit for Amazon approval/publication.
+    // On 403, blockedKeywords (if non-null) is populated with phrases extracted from
+    // "These keywords violate our community guidelines: X" error messages.
     QCoro::Task<void> submitForApproval(QString contentReferenceKey,
                                          QString marketplaceId,
-                                         bool *success);
+                                         bool *success,
+                                         QStringList *blockedKeywords = nullptr);
 
     // Returns the SP-API regional endpoint host for a marketplace ID.
     static QString endpointForMarketplace(const QString &marketplaceId);

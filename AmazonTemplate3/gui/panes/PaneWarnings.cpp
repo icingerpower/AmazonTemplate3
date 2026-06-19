@@ -8,6 +8,9 @@
 #include "apis/AmazonCatalogApi.h"
 #include "apis/AmazonWarningsApi.h"
 #include "TreeProductWarnings.h"
+#include "gui/DialogClassificationTypes.h"
+
+#include <algorithm>
 
 #include <QDateTime>
 #include <QDesktopServices>
@@ -273,6 +276,7 @@ void PaneWarnings::setWorkingDir(const QDir &workingDir)
     delete m_flagsTable;
     m_flagsTable = new AttributeFlagsTable(m_workingDir.absolutePath(), this);
     m_model->setWorkingDir(m_workingDir.absolutePath());
+    m_classificationMap.load(m_workingDir.absolutePath());
     _loadSettings();
 }
 
@@ -1010,8 +1014,48 @@ static void doAskAiRows(AbstractCli *cli,
         });
 }
 
+// Returns false for known error / rate-limit messages that must never be stored
+// or displayed as AI-generated content.
+static bool isValidAiValue(const QString &value)
+{
+    const QString lower = value.toLower();
+    return !lower.contains(QStringLiteral("session limit"))
+        && !lower.contains(QStringLiteral("rate limit"))
+        && !lower.contains(QStringLiteral("you've hit your"));
+}
+
 } // namespace
 
+void PaneWarnings::_loadAiCache(const QString &cc)
+{
+    if (m_aiCacheCc == cc) return;
+    m_aiCacheCc = cc;
+    m_aiValueCache.clear();
+    if (cc.isEmpty()) return;
+    const QString path = m_workingDir.filePath(
+        QStringLiteral("warnings/%1/ai_value_cache.json").arg(cc.toLower()));
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return;
+    const QJsonObject obj = QJsonDocument::fromJson(f.readAll()).object();
+    for (auto it = obj.constBegin(); it != obj.constEnd(); ++it)
+        m_aiValueCache.insert(it.key(), it.value().toString());
+}
+
+void PaneWarnings::_saveAiCache() const
+{
+    if (m_aiCacheCc.isEmpty()) return;
+    const QString dirRel = QStringLiteral("warnings/%1").arg(m_aiCacheCc.toLower());
+    m_workingDir.mkpath(dirRel);
+    const QString path = m_workingDir.filePath(dirRel + QStringLiteral("/ai_value_cache.json"));
+    QJsonObject obj;
+    for (auto it = m_aiValueCache.constBegin(); it != m_aiValueCache.constEnd(); ++it)
+        obj.insert(it.key(), it.value());
+    QFile f(path);
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        f.write(QJsonDocument(obj).toJson());
+}
+
+// ---------------------------------------------------------------------------
 QCoro::Task<void> PaneWarnings::_onAskAi()
 {
     AbstractCli *cli = ui->comboBoxCli->currentData().value<AbstractCli *>();
@@ -1051,6 +1095,8 @@ QCoro::Task<void> PaneWarnings::_onAskAi()
     QSet<QString>  seenAttrIds;
     QString firstSku;              // used to fetch the productType
 
+    _loadAiCache(countryCode);
+
     for (int vi = 0; vi < m_model->violationCount(); ++vi) {
         const TreeProductWarnings::ViolationNode *vn = m_model->violationAt(vi);
         if (!vn) continue;
@@ -1076,6 +1122,20 @@ QCoro::Task<void> PaneWarnings::_onAskAi()
             }
         }
         if (!anyEmpty) continue;
+
+        // Restore from AI value cache — avoids re-calling AI for inactive listings
+        const QString cacheKey = wr.asin + QLatin1Char(':') + wr.attributeId;
+        if (m_aiValueCache.contains(cacheKey)) {
+            const QString cached = m_aiValueCache.value(cacheKey);
+            if (isBulletPointAttr(wr.attributeId)) {
+                const QStringList bullets = cached.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+                for (int i = 0; i < bullets.size() && i < 5; ++i)
+                    m_model->setAiValue(vi, i, bullets[i]);
+            } else {
+                m_model->setAiValue(vi, 0, cached);
+            }
+            continue; // skip AI call for this row
+        }
 
         candidates.append({vi, wr.asin, wr.sku, wr.attributeId, wr.title,
                            wr.value, wr.issueMessage, wr.bulletPoints});
@@ -1173,10 +1233,17 @@ QCoro::Task<void> PaneWarnings::_onAskAi()
         });
 
     // -------------------------------------------------------------------
-    // Step A — fetch productType (needed by Product Type Definitions API).
+    // Step A — resolve productType (needed by Product Type Definitions API).
+    // Prefer the value already stored in the row (captured at load time); only
+    // make an API call when it is absent (e.g. rows imported via paste without
+    // a successful enrichment).
     // -------------------------------------------------------------------
     QString productType;
-    if (!marketplaceId.isEmpty() && !firstSku.isEmpty()) {
+    {
+        const auto *firstVn = m_model->violationAt(0);
+        if (firstVn) productType = firstVn->row.productType;
+    }
+    if (productType.isEmpty() && !marketplaceId.isEmpty() && !firstSku.isEmpty()) {
         appendLog(tr("Fetching product type for SKU %1…").arg(firstSku));
         co_await api->fetchListingProductType(marketplaceId, firstSku, &productType);
     }
@@ -1359,7 +1426,7 @@ QCoro::Task<void> PaneWarnings::_onAskAi()
         }
 
         const QString answer = r.output.trimmed();
-        if (!answer.isEmpty() && answer != QStringLiteral("UNKNOWN")) {
+        if (!answer.isEmpty() && answer != QStringLiteral("UNKNOWN") && isValidAiValue(answer)) {
             if (isBulletPointAttr(row.attributeId)) {
                 const QStringList bullets = extractBullets(answer);
                 for (int i = 0; i < bullets.size() && i < 5; ++i)
@@ -1375,8 +1442,12 @@ QCoro::Task<void> PaneWarnings::_onAskAi()
 
             ui->tableViewWarnings->expandAll();
         } else {
-            appendLog(QStringLiteral("[%1/%2] %3 / %4 \xe2\x86\x92 UNKNOWN")
-                      .arg(step).arg(total).arg(row.asin, row.attributeId));
+            if (!answer.isEmpty() && answer != QStringLiteral("UNKNOWN"))
+                appendLog(QStringLiteral("[%1/%2] %3 / %4 \xe2\x86\x92 IGNORED (session/rate-limit message)")
+                          .arg(step).arg(total).arg(row.asin, row.attributeId));
+            else
+                appendLog(QStringLiteral("[%1/%2] %3 / %4 \xe2\x86\x92 UNKNOWN")
+                          .arg(step).arg(total).arg(row.asin, row.attributeId));
         }
         if (progressBarPtr) progressBarPtr->setValue(step);
         if (statusLabelPtr)
@@ -1411,6 +1482,10 @@ QCoro::Task<void> PaneWarnings::_onUpload()
         QString attributeId;
         QString value;
         QString marketplaceId; // defaults to the user-selected marketplace
+        QString productType;   // captured at load time; avoids re-fetching for inactive listings
+        QString classificationId;          // browseClassification.classificationId (when productType unavailable)
+        QString classificationDisplayName; // browseClassification.displayName
+        QString title;                     // product title (for the unknown-classification dialog)
     };
     QList<UploadItem> toUpload;
 
@@ -1428,7 +1503,9 @@ QCoro::Task<void> PaneWarnings::_onUpload()
             }
             if (!bullets.isEmpty()) {
                 toUpload.append({vi, wr.sku, wr.asin, wr.attributeId,
-                                 bullets.join(QLatin1Char('\n')), marketplaceId});
+                                 bullets.join(QLatin1Char('\n')), marketplaceId,
+                                 wr.productType, wr.classificationId,
+                                 wr.classificationDisplayName, wr.title});
             }
         } else {
             // Single AI child expected; upload first non-empty.
@@ -1436,7 +1513,9 @@ QCoro::Task<void> PaneWarnings::_onUpload()
                 if (child.isCurrentValue) continue;
                 if (!child.aiValue.isEmpty()) {
                     toUpload.append({vi, wr.sku, wr.asin, wr.attributeId,
-                                     child.aiValue, marketplaceId});
+                                     child.aiValue, marketplaceId, wr.productType,
+                                     wr.classificationId, wr.classificationDisplayName,
+                                     wr.title});
                     break;
                 }
             }
@@ -1484,6 +1563,10 @@ QCoro::Task<void> PaneWarnings::_onUpload()
                 sib.violIdx     = vi;
                 sib.sku         = wr.sku;
                 sib.asin        = wr.asin;
+                sib.productType = wr.productType.isEmpty() ? seed.productType : wr.productType;
+                sib.classificationId          = wr.classificationId;
+                sib.classificationDisplayName = wr.classificationDisplayName;
+                sib.title                     = wr.title;
                 // attributeId, value, marketplaceId all carry over from the seed.
 
                 const QString key = _dedupeKey(sib);
@@ -1597,7 +1680,27 @@ QCoro::Task<void> PaneWarnings::_onUpload()
     static const QRegularExpression kImagePath(
         QStringLiteral("(?i)^(?:[~/]|[A-Za-z]:\\\\).+\\.(?:jpe?g|png)$"));
 
-    for (const UploadItem &item : std::as_const(toUpload)) {
+    // Load AI value cache for this marketplace so we can write to it on SKIP
+    // and clear it on successful upload.
+    {
+        const AmazonMarketplace *selMp = AmazonMarketplace::forMarketplaceId(marketplaceId);
+        _loadAiCache(selMp ? selMp->countryCode() : QString{});
+    }
+
+    // Apply cached classification mappings to items that still lack productType
+    // (e.g. resolved during a previous session via the unknown-classification dialog).
+    for (UploadItem &item : toUpload) {
+        if (item.productType.isEmpty() && !item.classificationId.isEmpty())
+            item.productType = m_classificationMap.productType(item.classificationId);
+    }
+
+    // Collected during the loop: items skipped because no productType was found
+    // but which carry a classificationId. Resolved via a dialog after the loop.
+    QList<UnknownClassification> unknownClassifications;
+    QList<int> deferredItemIndices; // indices into toUpload for items skipped due to missing productType
+
+    for (int itemIdx = 0; itemIdx < toUpload.size(); ++itemIdx) {
+        UploadItem &item = toUpload[itemIdx];
         ++processed;
 
         // Resolve the marketplace's country code once for logging + cursor file path.
@@ -1609,15 +1712,57 @@ QCoro::Task<void> PaneWarnings::_onUpload()
                                     .arg(processed).arg(total)
                                     .arg(item.asin, item.attributeId, itemCc));
 
-        appendLog(tr("[%1/%2] %3 / %4 [%5] \xe2\x80\x94 fetching productType\xe2\x80\xa6")
-                  .arg(processed).arg(total)
-                  .arg(item.asin, item.attributeId, itemCc));
+        if (item.sku.isEmpty()) {
+            appendLog(tr("[%1/%2] SKIP %3 / %4 [%5]: SKU unknown — listing is inactive or not in FBA report")
+                      .arg(processed).arg(total)
+                      .arg(item.asin, item.attributeId, itemCc));
+            // Persist the AI value so next Ask AI reuses it without consuming tokens
+            if (!item.value.isEmpty() && isValidAiValue(item.value)) {
+                m_aiValueCache.insert(item.asin + QLatin1Char(':') + item.attributeId, item.value);
+                _saveAiCache();
+            }
+            if (progressBarPtr) progressBarPtr->setValue(processed);
+            continue;
+        }
 
-        QString productType;
-        co_await api->fetchListingProductType(item.marketplaceId, item.sku, &productType);
+        QString productType = item.productType;
         if (productType.isEmpty()) {
-            appendLog(tr("    SKIP %1 [%2]: could not determine product type")
-                      .arg(item.asin, itemCc));
+            appendLog(tr("[%1/%2] %3 / %4 [%5] \xe2\x80\x94 fetching productType\xe2\x80\xa6")
+                      .arg(processed).arg(total)
+                      .arg(item.asin, item.attributeId, itemCc));
+            co_await api->fetchListingProductType(item.marketplaceId, item.sku, &productType);
+            // Fallback: Catalog Items API works even for inactive/out-of-stock listings
+            // where the Listings API omits productType from summaries.
+            if (productType.isEmpty()) {
+                appendLog(tr("    Listings API returned no productType — trying Catalog API\xe2\x80\xa6"));
+                QString catalogClassId;
+                QString catalogDisplayName;
+                co_await api->fetchProductTypeFromCatalog(item.marketplaceId, item.asin, &productType,
+                                                          &catalogClassId, &catalogDisplayName);
+                // Propagate to the UploadItem so the post-loop dialog can use it.
+                if (item.classificationId.isEmpty()) {
+                    item.classificationId          = catalogClassId;
+                    item.classificationDisplayName = catalogDisplayName;
+                }
+                // Check local classification map as fallback.
+                if (productType.isEmpty() && !item.classificationId.isEmpty())
+                    productType = m_classificationMap.productType(item.classificationId);
+            }
+        } else {
+            appendLog(tr("[%1/%2] %3 / %4 [%5]")
+                      .arg(processed).arg(total)
+                      .arg(item.asin, item.attributeId, itemCc));
+        }
+        if (productType.isEmpty()) {
+            if (!item.classificationId.isEmpty()) {
+                // Will be handled by the post-loop dialog.
+                unknownClassifications.append(UnknownClassification{
+                    item.classificationId, item.classificationDisplayName,
+                    item.asin, item.title});
+                deferredItemIndices.append(itemIdx);
+            }
+            appendLog(tr("    SKIP %1 [%2]: could not determine product type (classificationId: %3)")
+                      .arg(item.asin, itemCc, item.classificationId));
             if (progressBarPtr) progressBarPtr->setValue(processed);
             continue;
         }
@@ -1667,6 +1812,10 @@ QCoro::Task<void> PaneWarnings::_onUpload()
         if (ok) {
             appendLog(tr("    OK %1 / %2 [%3] = \"%4\"")
                       .arg(item.asin, item.attributeId, itemCc, item.value));
+            // Clear from AI value cache — no longer needed once uploaded successfully
+            const QString ck = item.asin + QLatin1Char(':') + item.attributeId;
+            if (m_aiValueCache.remove(ck) > 0)
+                _saveAiCache();
             // Record the upload so this ASIN+fieldId is suppressed for 4 days.
             if (!itemCc.isEmpty()) {
                 const QString path = m_workingDir.filePath(
@@ -1686,6 +1835,115 @@ QCoro::Task<void> PaneWarnings::_onUpload()
         }
 
         if (progressBarPtr) progressBarPtr->setValue(processed);
+    }
+
+    // -------------------------------------------------------------------
+    // Post-loop: ask the user to assign product types to any unknown browse
+    // classifications encountered. The mapping is persisted and applied on the
+    // next upload run (SKIPped items are not re-uploaded in this session).
+    // -------------------------------------------------------------------
+    {
+        // Deduplicate unknowns by classificationId.
+        QSet<QString> seen;
+        QList<UnknownClassification> deduped;
+        for (const UnknownClassification &u : unknownClassifications) {
+            if (!seen.contains(u.classificationId)) {
+                seen.insert(u.classificationId);
+                deduped.append(u);
+            }
+        }
+        unknownClassifications = deduped;
+    }
+
+    if (!unknownClassifications.isEmpty()) {
+        // Collect known productTypes from the loaded violations this session.
+        QStringList knownTypes = m_classificationMap.knownProductTypes();
+        for (int vi = 0; vi < m_model->violationCount(); ++vi) {
+            const auto *vn = m_model->violationAt(vi);
+            if (!vn) continue;
+            const QString pt = vn->row.productType;
+            if (!pt.isEmpty() && !knownTypes.contains(pt)) knownTypes.append(pt);
+        }
+        std::sort(knownTypes.begin(), knownTypes.end());
+
+        appendLog(tr("Opening dialog for %1 unknown classification(s)…")
+                  .arg(unknownClassifications.size()));
+        if (statusLabelPtr)
+            statusLabelPtr->setText(tr("Unknown classifications — user input needed"));
+
+        auto *dlg = new DialogClassificationTypes(unknownClassifications, knownTypes, this);
+        if (dlg->exec() == QDialog::Accepted) {
+            const QHash<QString, QString> mappings = dlg->result();
+            for (auto it = mappings.constBegin(); it != mappings.constEnd(); ++it)
+                m_classificationMap.setProductType(it.key(), it.value());
+            m_classificationMap.save();
+            appendLog(tr("  Saved %1 classification mapping(s) \xe2\x80\x94 re-uploading deferred items\xe2\x80\xa6")
+                      .arg(mappings.size()));
+
+            for (int di = 0; di < deferredItemIndices.size(); ++di) {
+                const int idx = deferredItemIndices.at(di);
+                UploadItem &ditem = toUpload[idx];
+                const QString newPt = mappings.value(ditem.classificationId);
+                if (newPt.isEmpty()) continue;
+                ditem.productType = newPt;
+
+                const AmazonMarketplace *dMp = AmazonMarketplace::forMarketplaceId(ditem.marketplaceId);
+                const QString dCc = dMp ? dMp->countryCode() : QString{};
+                appendLog(tr("[retry] %1 / %2 [%3] \xe2\x80\x94 productType = %4, patching\xe2\x80\xa6")
+                          .arg(ditem.asin, ditem.attributeId, dCc, newPt));
+                if (statusLabelPtr)
+                    statusLabelPtr->setText(tr("Retrying %1 / %2 [%3]")
+                                            .arg(ditem.asin, ditem.attributeId, dCc));
+
+                const bool isImagePath = kImagePath.match(ditem.value).hasMatch()
+                                      || QFileInfo::exists(ditem.value);
+                bool ok = false;
+                if (isImagePath) {
+                    QFile imgFile(ditem.value);
+                    if (!imgFile.open(QIODevice::ReadOnly)) {
+                        appendLog(tr("    FAIL %1 [%2]: cannot open image file %3")
+                                  .arg(ditem.asin, dCc, ditem.value));
+                        continue;
+                    }
+                    QByteArray jpegData = imgFile.readAll();
+                    imgFile.close();
+                    if (ditem.value.endsWith(QStringLiteral(".png"), Qt::CaseInsensitive)) {
+                        QImage img;
+                        if (img.load(ditem.value)) {
+                            QBuffer buf;
+                            buf.open(QIODevice::WriteOnly);
+                            if (img.save(&buf, "JPEG", 90))
+                                jpegData = buf.data();
+                        }
+                    }
+                    co_await _catalogApi()->patchListingMainImage(
+                        ditem.marketplaceId, ditem.sku, newPt, jpegData, &ok);
+                } else {
+                    co_await api->patchListingAttribute(ditem.marketplaceId, ditem.sku, newPt,
+                                                        ditem.attributeId, ditem.value, &ok);
+                }
+                if (ok) {
+                    appendLog(tr("    OK %1 / %2 [%3] = \"%4\"")
+                              .arg(ditem.asin, ditem.attributeId, dCc, ditem.value));
+                    if (!dCc.isEmpty()) {
+                        const QString path = m_workingDir.filePath(
+                            QStringLiteral("warnings/%1/processed_asins.txt").arg(dCc.toLower()));
+                        QFile rf(path);
+                        if (rf.open(QIODevice::Append | QIODevice::Text)) {
+                            QTextStream out(&rf);
+                            out << ditem.asin << ',' << ditem.attributeId << ','
+                                << QDate::currentDate().toString(Qt::ISODate) << '\n';
+                        }
+                    }
+                } else {
+                    const QString errMsg = isImagePath ? _catalogApi()->lastError()
+                                                       : api->lastError();
+                    appendLog(tr("    FAIL %1 / %2 [%3]: %4")
+                              .arg(ditem.asin, ditem.attributeId, dCc, errMsg));
+                }
+            }
+        }
+        dlg->deleteLater();
     }
 
     if (statusLabelPtr) statusLabelPtr->setText(tr("Done."));

@@ -36,6 +36,8 @@ add_library(AmazonTemplate3Lib STATIC
   AmazonTemplate3Lib.h
   ${OPENAI_FILES}
   #${WORKING_DIR_FILES}
+  ../AmazonTemplate3/AmazonMarketplace.h
+  ../AmazonTemplate3/AmazonMarketplace.cpp
   apis/AmazonCatalogApi.h
   apis/AmazonCatalogApi.cpp
   apis/AmazonAplusApi.h
@@ -48,6 +50,12 @@ add_library(AmazonTemplate3Lib STATIC
   TableProductWarnings.cpp
   TreeProductWarnings.h
   TreeProductWarnings.cpp
+  TreeBrandCategories.h
+  TreeBrandCategories.cpp
+  TableStoreAsin.h
+  TableStoreAsin.cpp
+  ClassificationTypeMap.h
+  ClassificationTypeMap.cpp
   BrokenChildTable.h
   BrokenChildTable.cpp
   aplus/APlusContent.h
@@ -108,13 +116,16 @@ target_compile_definitions(AmazonTemplate3Lib PRIVATE AMAZONTEMPLATE3LIB_LIBRARY
 # Compatibility stub: newer QXlsx versions reference xlsxreadsax.h in
 # xlsxdocument.h but don't install it; the compat/ dir provides the stub.
 target_include_directories(AmazonTemplate3Lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
-    PUBLIC ${CMAKE_SOURCE_DIR}/compat)
+    PUBLIC ${CMAKE_SOURCE_DIR}/compat
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../AmazonTemplate3)
 
 # Library variant for unit tests (exposes protected hooks)
 add_library(AmazonTemplate3Lib_Tests STATIC
   AmazonTemplate3Lib.cpp
   AmazonTemplate3Lib.h
   ${OPENAI_FILES}
+  ../AmazonTemplate3/AmazonMarketplace.h
+  ../AmazonTemplate3/AmazonMarketplace.cpp
   apis/AmazonCatalogApi.h
   apis/AmazonCatalogApi.cpp
   apis/AmazonAplusApi.h
@@ -127,6 +138,12 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   TableProductWarnings.cpp
   TreeProductWarnings.h
   TreeProductWarnings.cpp
+  TreeBrandCategories.h
+  TreeBrandCategories.cpp
+  TableStoreAsin.h
+  TableStoreAsin.cpp
+  ClassificationTypeMap.h
+  ClassificationTypeMap.cpp
   BrokenChildTable.h
   BrokenChildTable.cpp
   aplus/APlusContent.h
@@ -178,4 +195,5 @@ target_compile_definitions(AmazonTemplate3Lib_Tests PUBLIC
 )
 
 target_include_directories(AmazonTemplate3Lib_Tests PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
-    PUBLIC ${CMAKE_SOURCE_DIR}/compat)
+    PUBLIC ${CMAKE_SOURCE_DIR}/compat
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../AmazonTemplate3)

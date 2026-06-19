@@ -3,6 +3,7 @@
 
 #include <QString>
 #include <QList>
+#include <QHash>
 
 class AmazonMarketplace
 {
@@ -26,6 +27,18 @@ public:
     QString endpoint()      const { return m_endpoint; }
     // AWS signing region (e.g. "eu-west-1")
     QString awsRegion()     const { return m_awsRegion; }
+
+    // Returns the "sales-channel" value used in Amazon order reports (e.g. "Amazon.de").
+    QString salesChannelName() const {
+        static const QHash<QString,QString> s_map = {
+            {"GB", QStringLiteral("Amazon.co.uk")},
+            {"US", QStringLiteral("Amazon.com")},
+            {"MX", QStringLiteral("Amazon.com.mx")},
+            {"JP", QStringLiteral("Amazon.co.jp")},
+        };
+        return s_map.value(m_countryCode,
+            QStringLiteral("Amazon.") + m_countryCode.toLower());
+    }
 
 private:
     AmazonMarketplace(QString marketplaceId, QString countryCode,
