@@ -17,6 +17,7 @@ QT_BEGIN_NAMESPACE
 namespace Ui { class PaneWarnings; }
 QT_END_NAMESPACE
 
+#include "TableUnresolvedAsins.h"
 #include "TreeProductWarnings.h"
 
 class AmazonWarningsApi;
@@ -46,6 +47,7 @@ private:
     QNetworkAccessManager   *m_imageNam = nullptr;
     TreeProductWarnings     *m_model   = nullptr;
     AttributeFlagsTable     *m_flagsTable = nullptr;
+    TableUnresolvedAsins    *m_unresolvedAsins = nullptr;
     WarningsValueDelegate   *m_valueDelegate = nullptr;
     QHash<QString, QStringList> m_validValues; // attrId (lower) → enum list
     ClassificationTypeMap   m_classificationMap; // classificationId → productType (persisted)
@@ -77,6 +79,7 @@ private:
     void _loadAiCache(const QString &cc);
     void _saveAiCache() const;
     QHash<QString, QString> _loadSkuCache(const QString &marketplaceId) const;
+    void _onEditUnresolvedAsins();
 
     QCoro::Task<void> _onLoadWarnings();
     QCoro::Task<void> _onAskAi();

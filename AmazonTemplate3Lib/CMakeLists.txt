@@ -58,6 +58,8 @@ add_library(AmazonTemplate3Lib STATIC
   ClassificationTypeMap.cpp
   BrokenChildTable.h
   BrokenChildTable.cpp
+  TableUnresolvedAsins.h
+  TableUnresolvedAsins.cpp
   aplus/APlusContent.h
   aplus/APlusContent.cpp
   aplus/APlusTreeModel.h
@@ -146,6 +148,8 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   ClassificationTypeMap.cpp
   BrokenChildTable.h
   BrokenChildTable.cpp
+  TableUnresolvedAsins.h
+  TableUnresolvedAsins.cpp
   aplus/APlusContent.h
   aplus/APlusContent.cpp
   aplus/APlusTreeModel.h

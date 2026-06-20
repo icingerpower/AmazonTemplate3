@@ -64,6 +64,16 @@
           </widget>
          </item>
          <item>
+          <widget class="QPushButton" name="buttonUnresolvedAsins">
+           <property name="toolTip">
+            <string>View and edit ASINs whose SKU could not be resolved automatically</string>
+           </property>
+           <property name="text">
+            <string>Unresolved ASINs</string>
+           </property>
+          </widget>
+         </item>
+         <item>
           <widget class="Line" name="line">
            <property name="orientation">
             <enum>Qt::Orientation::Vertical</enum>

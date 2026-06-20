@@ -282,6 +282,11 @@ void PaneWarnings::setWorkingDir(const QDir &workingDir)
     m_flagsTable = new AttributeFlagsTable(m_workingDir.absolutePath(), this);
     m_model->setWorkingDir(m_workingDir.absolutePath());
     m_classificationMap.load(m_workingDir.absolutePath());
+
+    delete m_unresolvedAsins;
+    m_unresolvedAsins = new TableUnresolvedAsins(this);
+    m_unresolvedAsins->load(m_workingDir);
+
     _loadSettings();
 }
 
@@ -842,6 +847,40 @@ QCoro::Task<void> PaneWarnings::_onPasteWarnings()
                 if (filled > 0)
                     appendLog(tr("Resolved %1 additional SKU(s) from PaneSizing cache.").arg(filled));
             }
+        }
+    }
+
+    // 5c. Last fallback: consult manually-entered SKUs from the unresolved ASINs table.
+    if (m_unresolvedAsins) {
+        const QHash<QString, QString> manualSkus = m_unresolvedAsins->buildSkuMap();
+        if (!manualSkus.isEmpty()) {
+            int filled = 0;
+            for (WarningRow &row : rows) {
+                if (!row.sku.isEmpty()) continue;
+                const QString sku = manualSkus.value(row.asin);
+                if (!sku.isEmpty()) {
+                    row.sku = sku;
+                    ++filled;
+                    appendLog(tr("  SKU from unresolved table: %1 → %2").arg(row.asin, sku));
+                }
+            }
+            if (filled > 0)
+                appendLog(tr("Resolved %1 SKU(s) from unresolved ASINs table.").arg(filled));
+        }
+    }
+
+    // Record ASINs that are still missing a SKU so the user can fill them in manually.
+    if (m_unresolvedAsins) {
+        int newEntries = 0;
+        for (const WarningRow &row : rows) {
+            if (!row.sku.isEmpty()) continue;
+            if (m_unresolvedAsins->addOrUpdate(row.asin, row.title))
+                ++newEntries;
+        }
+        if (newEntries > 0) {
+            m_unresolvedAsins->save();
+            appendLog(tr("Added %1 new ASIN(s) to the unresolved ASINs table — use 'Unresolved ASINs' to enter their SKUs.")
+                      .arg(newEntries));
         }
     }
 
@@ -2380,6 +2419,43 @@ QCoro::Task<void> PaneWarnings::_onLoadAskUpload()
     ui->buttonLoadAskUpload->setEnabled(true);
 }
 
+void PaneWarnings::_onEditUnresolvedAsins()
+{
+    if (!m_unresolvedAsins) return;
+
+    auto *dlg = new QDialog(this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setWindowTitle(tr("Unresolved ASINs — enter SKUs manually"));
+    dlg->resize(800, 500);
+
+    auto *layout = new QVBoxLayout(dlg);
+
+    auto *label = new QLabel(
+        tr("ASINs below could not be resolved automatically. "
+           "Double-click the SKU column to enter the value — it is saved immediately."),
+        dlg);
+    label->setWordWrap(true);
+    layout->addWidget(label);
+
+    auto *view = new QTableView(dlg);
+    view->setModel(m_unresolvedAsins);
+    view->setSelectionBehavior(QAbstractItemView::SelectRows);
+    view->setAlternatingRowColors(true);
+    view->horizontalHeader()->setStretchLastSection(true);
+    view->horizontalHeader()->setSectionResizeMode(TableUnresolvedAsins::ColAsin,  QHeaderView::ResizeToContents);
+    view->horizontalHeader()->setSectionResizeMode(TableUnresolvedAsins::ColSku,   QHeaderView::ResizeToContents);
+    view->horizontalHeader()->setSectionResizeMode(TableUnresolvedAsins::ColTitle, QHeaderView::Stretch);
+    view->verticalHeader()->hide();
+    layout->addWidget(view);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, dlg);
+    connect(buttons, &QDialogButtonBox::rejected, dlg, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    dlg->show();
+}
+
+// ---------------------------------------------------------------------------
 void PaneWarnings::_connectSlots()
 {
     connect(ui->buttonLoadWarnings, &QPushButton::clicked,
@@ -2387,6 +2463,9 @@ void PaneWarnings::_connectSlots()
 
     connect(ui->buttonPasteWarnings, &QPushButton::clicked,
             this, [this]() { m_pasteTask = _onPasteWarnings(); });
+
+    connect(ui->buttonUnresolvedAsins, &QPushButton::clicked,
+            this, &PaneWarnings::_onEditUnresolvedAsins);
 
     // Show cache stats immediately when a marketplace is selected — no load needed.
     connect(ui->listWidgetAmazon, &QListWidget::currentItemChanged,
