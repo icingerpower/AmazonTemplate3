@@ -94,7 +94,8 @@ static QList<WarningRow> parsePastedWarnings(const QString &text, int *asinCount
         {QStringLiteral("Bullet Point Removed"),        QStringLiteral("bullet_point")},
         {QStringLiteral("Product Description Removed"), QStringLiteral("product_description")},
     };
-    static const QRegularExpression kAsinRe(QStringLiteral("^ASIN:\\s*([A-Z0-9]{10})$"));
+    // EU: "ASIN: B0XXXXXXXXX"  US: "ASIN B0XXXXXXXXX"  (colon is optional)
+    static const QRegularExpression kAsinRe(QStringLiteral("^ASIN:?\\s+([A-Z0-9]{10})$"));
     static const QRegularExpression kDateRe(
         QStringLiteral("^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{1,2},\\s+\\d{4}$"));
 
@@ -104,10 +105,10 @@ static QList<WarningRow> parsePastedWarnings(const QString &text, int *asinCount
         if (!t.isEmpty()) lines.append(t);
     }
 
-    // Skip optional header block (up to and including "Next steps")
+    // Skip optional header block (up to and including "Next steps" / "Next Steps")
     int start = 0;
     for (int i = 0; i < lines.size(); ++i) {
-        if (lines.at(i) == QStringLiteral("Next steps")) {
+        if (lines.at(i).compare(QStringLiteral("Next steps"), Qt::CaseInsensitive) == 0) {
             start = i + 1;
             break;
         }
