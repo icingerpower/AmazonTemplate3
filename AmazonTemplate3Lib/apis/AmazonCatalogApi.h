@@ -165,7 +165,16 @@ public:
         QString asin;       // may be empty for parent rows with per-marketplace ASINs
         bool    isParent = false;
         QString parentSku;  // empty for parent rows
+        QString gtin;       // EAN/UPC/GTIN — preferred over asin for external_product_id
+        QString gtinType;   // "ean", "upc", "gtin14" — lowercase SP-API enum value
     };
+
+    // Fetches the best available GTIN (EAN preferred, then UPC, then GTIN14) for an
+    // ASIN via the Catalog Items API identifiers. Sets *gtin and *gtinType to empty
+    // strings if no non-ASIN identifier is found.
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> fetchAsinGtin(QString asin, QString marketplaceId,
+                                    QString* gtin, QString* gtinType);
 
     // Builds and uploads a JSON_LISTINGS_FEED variation relationship feed via the Feeds API.
     // Fetches nothing — all data is passed in. Polls until DONE (3 min max).

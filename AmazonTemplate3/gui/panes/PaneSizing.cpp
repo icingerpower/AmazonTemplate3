@@ -5072,11 +5072,23 @@ void PaneSizing::onAplusGenerateSelected()
         return;
     }
 
-    connect(selectAllBtn, &QPushButton::clicked, &dlg, [table]() {
+    connect(selectAllBtn, &QPushButton::clicked, &dlg, [table, selectAllBtn]() {
+        // Toggle: if everything is already checked, uncheck all; otherwise check all.
+        bool anyUnchecked = false;
         for (int r = 0; r < table->rowCount(); ++r) {
-            table->item(r, 1)->setCheckState(Qt::Checked);
-            table->item(r, 2)->setCheckState(Qt::Checked);
+            if (table->item(r, 1)->checkState() != Qt::Checked
+                    || table->item(r, 2)->checkState() != Qt::Checked) {
+                anyUnchecked = true;
+                break;
+            }
         }
+        const Qt::CheckState target = anyUnchecked ? Qt::Checked : Qt::Unchecked;
+        for (int r = 0; r < table->rowCount(); ++r) {
+            table->item(r, 1)->setCheckState(target);
+            table->item(r, 2)->setCheckState(target);
+        }
+        selectAllBtn->setText(target == Qt::Checked ? QObject::tr("Unselect all")
+                                                    : QObject::tr("Select all"));
     });
     connect(skipExistingBtn, &QPushButton::clicked, &dlg,
         [table, hasCurrentVersion]() {
@@ -7520,7 +7532,7 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                         parentAsin = m_brokenChildTable->rows().at(t.rowIdx).parentAsin;
                         if (!parentAsin.isEmpty()) break;
                     }
-                    feedEntries.append({feedParentSku, parentAsin, true, {}});
+                    feedEntries.append({feedParentSku, parentAsin, true, {}, {}, {}});
                 }
 
                 QSet<QString> addedChildSkus;
@@ -7530,7 +7542,20 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                     const QString childSku = asinToSku.value(row.asin);
                     if (childSku.isEmpty() || addedChildSkus.contains(childSku)) continue;
                     addedChildSkus.insert(childSku);
-                    feedEntries.append({childSku, row.asin, false, feedParentSku});
+                    feedEntries.append({childSku, row.asin, false, feedParentSku, {}, {}});
+                }
+
+                // Fetch GTIN (EAN/UPC) for each entry; fall back to ASIN (logged as warning).
+                appendLog(tr("Fetching GTINs for feed entries…"));
+                for (auto &entry : feedEntries) {
+                    if (entry.asin.isEmpty()) continue;
+                    co_await m_api->fetchAsinGtin(entry.asin, primaryMpId,
+                                                  &entry.gtin, &entry.gtinType);
+                    if (entry.gtin.isEmpty())
+                        appendLog(tr("  ⚠ No GTIN for ASIN %1 (SKU %2) — will use ASIN as fallback")
+                                      .arg(entry.asin, entry.sku));
+                    else
+                        appendLog(tr("  %1 → %2 %3").arg(entry.asin, entry.gtinType, entry.gtin));
                 }
 
                 QStringList brokenMpIds;

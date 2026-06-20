@@ -1363,56 +1363,71 @@ AmazonCatalogApi::uploadVariationFeed(QStringList marketplaceIds,
     // -------------------------------------------------------------------
     // Build the JSON_LISTINGS_FEED body
     // -------------------------------------------------------------------
-    // One message per (entry, marketplace) — Amazon rejects messages that contain
-    // values for multiple marketplace_ids ("Request contains multiple marketplaces
-    // across attribute variants").
+    // One message per SKU — a SKU may appear only once per feed (error 4002010
+    // "SKU provided is duplicated" otherwise). The feed's marketplaceIds header
+    // (set in createFeed, step 3) determines which marketplaces the updates apply
+    // to; no marketplace_id is needed inside the attribute values.
 
     QJsonArray messages;
     int messageId = 1;
     for (const VariationFeedEntry &e : entries) {
-        for (const QString &mpId : marketplaceIds) {
-            QJsonArray patches;
+        QJsonArray patches;
 
+        // external_product_id: use GTIN (EAN/UPC) if available, fall back to ASIN.
+        const bool hasGtin = !e.gtin.isEmpty() && !e.gtinType.isEmpty();
+        if (!hasGtin && !e.asin.isEmpty()) {
+            qWarning() << "uploadVariationFeed: no GTIN for SKU" << e.sku
+                       << "— falling back to ASIN" << e.asin;
+        }
+        const QString idValue = hasGtin ? e.gtin    : e.asin;
+        const QString idType  = hasGtin ? e.gtinType : QStringLiteral("asin");
+        if (!idValue.isEmpty()) {
             patches.append(QJsonObject{
                 {QStringLiteral("op"),   QStringLiteral("replace")},
-                {QStringLiteral("path"), QStringLiteral("/attributes/parentage_level")},
+                {QStringLiteral("path"), QStringLiteral("/attributes/externally_assigned_product_identifier")},
                 {QStringLiteral("value"), QJsonArray{QJsonObject{
-                    {QStringLiteral("value"),          e.isParent ? QStringLiteral("parent") : QStringLiteral("child")},
-                    {QStringLiteral("marketplace_id"), mpId},
+                    {QStringLiteral("type_of_product_id"), idType},
+                    {QStringLiteral("product_id"),         idValue},
                 }}},
             });
+        }
 
-            if (!e.isParent && !e.parentSku.isEmpty()) {
-                patches.append(QJsonObject{
-                    {QStringLiteral("op"),   QStringLiteral("replace")},
-                    {QStringLiteral("path"), QStringLiteral("/attributes/child_parent_sku_relationship")},
-                    {QStringLiteral("value"), QJsonArray{QJsonObject{
-                        {QStringLiteral("child_relationship_type"), QStringLiteral("variation")},
-                        {QStringLiteral("parent_sku"),              e.parentSku},
-                        {QStringLiteral("marketplace_id"),          mpId},
-                    }}},
-                });
-            }
+        patches.append(QJsonObject{
+            {QStringLiteral("op"),   QStringLiteral("replace")},
+            {QStringLiteral("path"), QStringLiteral("/attributes/parentage_level")},
+            {QStringLiteral("value"), QJsonArray{QJsonObject{
+                {QStringLiteral("value"), e.isParent ? QStringLiteral("parent") : QStringLiteral("child")},
+            }}},
+        });
 
-            if (!variationTheme.isEmpty()) {
-                patches.append(QJsonObject{
-                    {QStringLiteral("op"),   QStringLiteral("replace")},
-                    {QStringLiteral("path"), QStringLiteral("/attributes/variation_theme")},
-                    {QStringLiteral("value"), QJsonArray{QJsonObject{
-                        {QStringLiteral("name"),           variationTheme},
-                        {QStringLiteral("marketplace_id"), mpId},
-                    }}},
-                });
-            }
-
-            messages.append(QJsonObject{
-                {QStringLiteral("messageId"),     messageId++},
-                {QStringLiteral("sku"),           e.sku},
-                {QStringLiteral("operationType"), QStringLiteral("PATCH")},
-                {QStringLiteral("productType"),   productType},
-                {QStringLiteral("patches"),       patches},
+        if (!e.isParent && !e.parentSku.isEmpty()) {
+            patches.append(QJsonObject{
+                {QStringLiteral("op"),   QStringLiteral("replace")},
+                {QStringLiteral("path"), QStringLiteral("/attributes/child_parent_sku_relationship")},
+                {QStringLiteral("value"), QJsonArray{QJsonObject{
+                    {QStringLiteral("child_relationship_type"), QStringLiteral("variation")},
+                    {QStringLiteral("parent_sku"),              e.parentSku},
+                }}},
             });
         }
+
+        if (!variationTheme.isEmpty()) {
+            patches.append(QJsonObject{
+                {QStringLiteral("op"),   QStringLiteral("replace")},
+                {QStringLiteral("path"), QStringLiteral("/attributes/variation_theme")},
+                {QStringLiteral("value"), QJsonArray{QJsonObject{
+                    {QStringLiteral("name"), variationTheme},
+                }}},
+            });
+        }
+
+        messages.append(QJsonObject{
+            {QStringLiteral("messageId"),     messageId++},
+            {QStringLiteral("sku"),           e.sku},
+            {QStringLiteral("operationType"), QStringLiteral("PARTIAL_UPDATE")},
+            {QStringLiteral("productType"),   productType},
+            {QStringLiteral("patches"),       patches},
+        });
     }
 
     const QJsonObject feedBody{
@@ -1729,6 +1744,77 @@ AmazonCatalogApi::uploadVariationFeed(QStringList marketplaceIds,
 // way to get the parent SKU is to read the child listing's relationships.
 // ---------------------------------------------------------------------------
 
+// fetchAsinGtin — GET /catalog/2022-04-01/items/{asin}?includedData=identifiers
+// Picks EAN > UPC > GTIN14 from the identifiers array. Sets both out-params to
+// empty string if no non-ASIN identifier is found for this marketplace.
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonCatalogApi::fetchAsinGtin(QString asin, QString marketplaceId,
+                                                   QString* gtin, QString* gtinType)
+{
+    gtin->clear();
+    gtinType->clear();
+
+    QString token;
+    co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
+    if (token.isEmpty()) co_return;
+
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("marketplaceIds"), marketplaceId);
+    query.addQueryItem(QStringLiteral("includedData"),   QStringLiteral("identifiers"));
+
+    QUrl url;
+    url.setScheme(QStringLiteral("https"));
+    url.setHost(endpointForMarketplace(marketplaceId));
+    url.setPath(QStringLiteral("/catalog/2022-04-01/items/%1").arg(asin));
+    url.setQuery(query);
+
+    QNetworkRequest req(url);
+    req.setRawHeader("x-amz-access-token", token.toUtf8());
+    req.setRawHeader("accept", "application/json");
+
+    QNetworkReply* reply = _nam()->get(req);
+    co_await qCoro(reply).waitForFinished();
+    const QByteArray data = reply->readAll();
+    reply->deleteLater();
+
+    // Priority order for identifier types
+    static const QStringList kPriority{
+        QStringLiteral("EAN"), QStringLiteral("UPC"), QStringLiteral("GTIN14"),
+    };
+    static const QHash<QString, QString> kTypeMap{
+        {QStringLiteral("EAN"),    QStringLiteral("ean")},
+        {QStringLiteral("UPC"),    QStringLiteral("upc")},
+        {QStringLiteral("GTIN14"), QStringLiteral("gtin14")},
+    };
+
+    const QJsonArray identifierGroups =
+        QJsonDocument::fromJson(data).object()
+            .value(QStringLiteral("identifiers")).toArray();
+
+    for (const QJsonValue &gv : identifierGroups) {
+        const QJsonObject grp = gv.toObject();
+        if (grp.value(QStringLiteral("marketplaceId")).toString() != marketplaceId) continue;
+        const QJsonArray ids = grp.value(QStringLiteral("identifiers")).toArray();
+        for (const QString &wantedType : kPriority) {
+            for (const QJsonValue &iv : ids) {
+                const QJsonObject id = iv.toObject();
+                if (id.value(QStringLiteral("identifierType")).toString() == wantedType) {
+                    *gtin     = id.value(QStringLiteral("identifier")).toString();
+                    *gtinType = kTypeMap.value(wantedType);
+                    qDebug() << "fetchAsinGtin:" << asin << "→" << *gtinType << *gtin;
+                    co_return;
+                }
+            }
+        }
+        break; // found the marketplace group, no match
+    }
+
+    qWarning() << "fetchAsinGtin:" << asin << "no EAN/UPC/GTIN14 found in marketplace" << marketplaceId;
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
 QCoro::Task<void> AmazonCatalogApi::fetchParentSku(QString marketplaceId,
                                                     QString childSku,
                                                     QString* parentSkuOut,
