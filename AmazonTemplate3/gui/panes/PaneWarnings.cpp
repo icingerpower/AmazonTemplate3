@@ -2454,10 +2454,12 @@ void PaneWarnings::_onEditUnresolvedAsins()
     view->setModel(m_unresolvedAsins);
     view->setSelectionBehavior(QAbstractItemView::SelectRows);
     view->setAlternatingRowColors(true);
-    view->horizontalHeader()->setStretchLastSection(true);
-    view->horizontalHeader()->setSectionResizeMode(TableUnresolvedAsins::ColAsin,  QHeaderView::ResizeToContents);
-    view->horizontalHeader()->setSectionResizeMode(TableUnresolvedAsins::ColSku,   QHeaderView::ResizeToContents);
-    view->horizontalHeader()->setSectionResizeMode(TableUnresolvedAsins::ColTitle, QHeaderView::Stretch);
+    auto *hdr = view->horizontalHeader();
+    hdr->setSectionResizeMode(QHeaderView::Interactive);
+    hdr->setStretchLastSection(true); // Title column fills remaining space
+    view->resizeColumnToContents(TableUnresolvedAsins::ColAsin);
+    view->setColumnWidth(TableUnresolvedAsins::ColSku,
+                         qMax(120, view->columnWidth(TableUnresolvedAsins::ColSku)));
     view->verticalHeader()->hide();
     layout->addWidget(view);
 
