@@ -1745,8 +1745,9 @@ AmazonCatalogApi::uploadVariationFeed(QStringList marketplaceIds,
 // ---------------------------------------------------------------------------
 
 // fetchAsinGtin — GET /catalog/2022-04-01/items/{asin}?includedData=identifiers
-// Picks EAN > UPC > GTIN14 from the identifiers array. Sets both out-params to
-// empty string if no non-ASIN identifier is found for this marketplace.
+// Picks EAN > UPC > GTIN14. Tries all marketplaces in the primary region first
+// (single call), then falls back to the other region. Sets both out-params to
+// empty strings if no non-ASIN identifier is found anywhere.
 // ---------------------------------------------------------------------------
 
 QCoro::Task<void> AmazonCatalogApi::fetchAsinGtin(QString asin, QString marketplaceId,
@@ -1755,30 +1756,18 @@ QCoro::Task<void> AmazonCatalogApi::fetchAsinGtin(QString asin, QString marketpl
     gtin->clear();
     gtinType->clear();
 
-    QString token;
-    co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
-    if (token.isEmpty()) co_return;
-
-    QUrlQuery query;
-    query.addQueryItem(QStringLiteral("marketplaceIds"), marketplaceId);
-    query.addQueryItem(QStringLiteral("includedData"),   QStringLiteral("identifiers"));
-
-    QUrl url;
-    url.setScheme(QStringLiteral("https"));
-    url.setHost(endpointForMarketplace(marketplaceId));
-    url.setPath(QStringLiteral("/catalog/2022-04-01/items/%1").arg(asin));
-    url.setQuery(query);
-
-    QNetworkRequest req(url);
-    req.setRawHeader("x-amz-access-token", token.toUtf8());
-    req.setRawHeader("accept", "application/json");
-
-    QNetworkReply* reply = _nam()->get(req);
-    co_await qCoro(reply).waitForFinished();
-    const QByteArray data = reply->readAll();
-    reply->deleteLater();
-
-    // Priority order for identifier types
+    static const QStringList kEuMarkets{
+        QStringLiteral("A1F83G8C2ARO7P"), // UK
+        QStringLiteral("A1PA6795UKMFR9"), // DE
+        QStringLiteral("A13V1IB3VIYZZH"), // FR
+        QStringLiteral("A1RKKUPIHCS9HS"), // ES
+        QStringLiteral("APJ6JRA9NG5V4"),  // IT
+    };
+    static const QStringList kNaMarkets{
+        QStringLiteral("ATVPDKIKX0DER"),  // US
+        QStringLiteral("A2EUQ1WTGCTBG2"), // CA
+        QStringLiteral("A1AM78C64UM0Y8"), // MX
+    };
     static const QStringList kPriority{
         QStringLiteral("EAN"), QStringLiteral("UPC"), QStringLiteral("GTIN14"),
     };
@@ -1788,30 +1777,98 @@ QCoro::Task<void> AmazonCatalogApi::fetchAsinGtin(QString asin, QString marketpl
         {QStringLiteral("GTIN14"), QStringLiteral("gtin14")},
     };
 
-    const QJsonArray identifierGroups =
-        QJsonDocument::fromJson(data).object()
-            .value(QStringLiteral("identifiers")).toArray();
-
-    for (const QJsonValue &gv : identifierGroups) {
-        const QJsonObject grp = gv.toObject();
-        if (grp.value(QStringLiteral("marketplaceId")).toString() != marketplaceId) continue;
-        const QJsonArray ids = grp.value(QStringLiteral("identifiers")).toArray();
-        for (const QString &wantedType : kPriority) {
-            for (const QJsonValue &iv : ids) {
-                const QJsonObject id = iv.toObject();
-                if (id.value(QStringLiteral("identifierType")).toString() == wantedType) {
-                    *gtin     = id.value(QStringLiteral("identifier")).toString();
-                    *gtinType = kTypeMap.value(wantedType);
-                    qDebug() << "fetchAsinGtin:" << asin << "→" << *gtinType << *gtin;
-                    co_return;
+    // Scans all identifier groups in a response; returns true if a GTIN was found.
+    auto parseIdentifiers = [&](const QByteArray &data) -> bool {
+        const QJsonArray groups =
+            QJsonDocument::fromJson(data).object()
+                .value(QStringLiteral("identifiers")).toArray();
+        for (const QJsonValue &gv : groups) {
+            const QJsonObject grp = gv.toObject();
+            const QJsonArray ids = grp.value(QStringLiteral("identifiers")).toArray();
+            for (const QString &wantedType : kPriority) {
+                for (const QJsonValue &iv : ids) {
+                    const QJsonObject id = iv.toObject();
+                    if (id.value(QStringLiteral("identifierType")).toString() == wantedType) {
+                        *gtin     = id.value(QStringLiteral("identifier")).toString();
+                        *gtinType = kTypeMap.value(wantedType);
+                        const QString mpFound = grp.value(QStringLiteral("marketplaceId")).toString();
+                        qDebug() << "fetchAsinGtin:" << asin << "→" << *gtinType << *gtin
+                                 << "from marketplace" << mpFound;
+                        return true;
+                    }
                 }
             }
         }
-        break; // found the marketplace group, no match
+        return false;
+    };
+
+    const bool primaryIsNa = lwaRegionForMarketplace(marketplaceId) == QLatin1String("NA");
+    const QStringList& primaryMarkets  = primaryIsNa ? kNaMarkets : kEuMarkets;
+    const QStringList& fallbackMarkets = primaryIsNa ? kEuMarkets : kNaMarkets;
+    const QString primaryAnchor  = primaryIsNa
+        ? QStringLiteral("ATVPDKIKX0DER")  : QStringLiteral("A1PA6795UKMFR9");
+    const QString fallbackAnchor = primaryIsNa
+        ? QStringLiteral("A1PA6795UKMFR9") : QStringLiteral("ATVPDKIKX0DER");
+
+    // First try: all marketplaces in the primary region (one API call).
+    {
+        QString token;
+        co_await _getAccessToken(lwaRegionForMarketplace(primaryAnchor), &token);
+        if (!token.isEmpty()) {
+            QUrlQuery query;
+            for (const QString &mpId : primaryMarkets)
+                query.addQueryItem(QStringLiteral("marketplaceIds"), mpId);
+            query.addQueryItem(QStringLiteral("includedData"), QStringLiteral("identifiers"));
+
+            QUrl url;
+            url.setScheme(QStringLiteral("https"));
+            url.setHost(endpointForMarketplace(primaryAnchor));
+            url.setPath(QStringLiteral("/catalog/2022-04-01/items/%1").arg(asin));
+            url.setQuery(query);
+
+            QNetworkRequest req(url);
+            req.setRawHeader("x-amz-access-token", token.toUtf8());
+            req.setRawHeader("accept", "application/json");
+
+            QNetworkReply* reply = _nam()->get(req);
+            co_await qCoro(reply).waitForFinished();
+            const QByteArray data = reply->readAll();
+            reply->deleteLater();
+
+            if (parseIdentifiers(data)) co_return;
+        }
     }
 
-    qWarning() << "fetchAsinGtin:" << asin << "no EAN/UPC/GTIN14 found in marketplace" << marketplaceId;
-    co_return;
+    // Second try: the other region.
+    {
+        QString token;
+        co_await _getAccessToken(lwaRegionForMarketplace(fallbackAnchor), &token);
+        if (!token.isEmpty()) {
+            QUrlQuery query;
+            for (const QString &mpId : fallbackMarkets)
+                query.addQueryItem(QStringLiteral("marketplaceIds"), mpId);
+            query.addQueryItem(QStringLiteral("includedData"), QStringLiteral("identifiers"));
+
+            QUrl url;
+            url.setScheme(QStringLiteral("https"));
+            url.setHost(endpointForMarketplace(fallbackAnchor));
+            url.setPath(QStringLiteral("/catalog/2022-04-01/items/%1").arg(asin));
+            url.setQuery(query);
+
+            QNetworkRequest req(url);
+            req.setRawHeader("x-amz-access-token", token.toUtf8());
+            req.setRawHeader("accept", "application/json");
+
+            QNetworkReply* reply = _nam()->get(req);
+            co_await qCoro(reply).waitForFinished();
+            const QByteArray data = reply->readAll();
+            reply->deleteLater();
+
+            if (parseIdentifiers(data)) co_return;
+        }
+    }
+
+    qWarning() << "fetchAsinGtin:" << asin << "no EAN/UPC/GTIN14 found in any marketplace";
 }
 
 // ---------------------------------------------------------------------------
