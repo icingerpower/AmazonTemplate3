@@ -1613,6 +1613,19 @@ QCoro::Task<void> PaneWarnings::_onUpload()
         co_return;
     }
 
+    // Back-fill any SKUs that were entered in the unresolved ASINs table after
+    // the paste (or in a previous session). This updates the model so the view
+    // also reflects the resolved SKU immediately.
+    if (m_unresolvedAsins) {
+        const QHash<QString, QString> manualSkus = m_unresolvedAsins->buildSkuMap();
+        if (!manualSkus.isEmpty()) {
+            const int filled = m_model->refreshSkus(manualSkus);
+            if (filled > 0)
+                qDebug() << "PaneWarnings::_onUpload: back-filled" << filled
+                         << "SKU(s) from unresolved ASINs table";
+        }
+    }
+
     // Collect (violIdx, attributeId, value) tuples to upload. Each non-empty
     // AI child produces one upload item. For bullet_point violations, all 5
     // bullets are collected and joined with CELL_SEP / newline before sending.

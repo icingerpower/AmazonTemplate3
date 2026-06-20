@@ -117,6 +117,22 @@ void TreeProductWarnings::setAiValue(int violIdx, int aiChildIndex, const QStrin
     }
 }
 
+int TreeProductWarnings::refreshSkus(const QHash<QString, QString> &skuMap)
+{
+    int updated = 0;
+    for (int vi = 0; vi < m_violations.size(); ++vi) {
+        ViolationNode *vn = m_violations[vi];
+        if (!vn || !vn->row.sku.isEmpty()) continue;
+        const QString sku = skuMap.value(vn->row.asin);
+        if (sku.isEmpty()) continue;
+        vn->row.sku = sku;
+        const QModelIndex idx = createIndex(vi, ColSku, nullptr);
+        emit dataChanged(idx, idx, {Qt::DisplayRole});
+        ++updated;
+    }
+    return updated;
+}
+
 void TreeProductWarnings::setWorkingDir(const QString &path)
 {
     m_workingDir = path;

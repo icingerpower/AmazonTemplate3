@@ -52,6 +52,11 @@ public:
     // aiChildIndex: 0 for non-bullet single AI child, 0–4 for bullet children.
     void setAiValue(int violIdx, int aiChildIndex, const QString &value);
 
+    // For each violation whose SKU is currently empty, look it up in skuMap and
+    // fill it in. Emits dataChanged for every updated row.
+    // Returns the number of rows updated.
+    int refreshSkus(const QHash<QString, QString> &skuMap);
+
     // Loads the per-attribute "Ask AI" exclusion list from the working dir
     // and applies it to any rows already loaded.
     void setWorkingDir(const QString &path);
