@@ -126,9 +126,11 @@ QVariant TableUnresolvedAsins::data(const QModelIndex &idx, int role) const
         }
     }
 
-    // Highlight rows still missing a SKU
-    if (role == Qt::BackgroundRole && row.sku.isEmpty())
-        return QColor(255, 235, 200); // light orange
+    // Dark background + light text for rows still missing a SKU
+    if (row.sku.isEmpty()) {
+        if (role == Qt::BackgroundRole) return QColor(160, 60, 0);  // dark orange
+        if (role == Qt::ForegroundRole) return QColor(Qt::white);
+    }
 
     return {};
 }
@@ -147,20 +149,22 @@ QVariant TableUnresolvedAsins::headerData(int section, Qt::Orientation orientati
 Qt::ItemFlags TableUnresolvedAsins::flags(const QModelIndex &idx) const
 {
     if (!idx.isValid()) return Qt::NoItemFlags;
-    Qt::ItemFlags f = Qt::ItemIsEnabled | Qt::ItemIsSelectable;
-    if (idx.column() == ColSku)
-        f |= Qt::ItemIsEditable;
-    return f;
+    // All columns are editable so the delegate opens an editor on double-click
+    // (allowing the user to select and copy text). setData() only persists
+    // changes for the SKU column — ASIN and Title are effectively read-only.
+    return Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsEditable;
 }
 
 bool TableUnresolvedAsins::setData(const QModelIndex &idx, const QVariant &value, int role)
 {
     if (role != Qt::EditRole) return false;
-    if (!idx.isValid() || idx.column() != ColSku) return false;
+    if (!idx.isValid()) return false;
     if (idx.row() < 0 || idx.row() >= m_rows.size()) return false;
+    if (idx.column() != ColSku) return false; // ASIN and Title are copy-only
 
     m_rows[idx.row()].sku = value.toString().trimmed();
-    emit dataChanged(idx, idx, {Qt::DisplayRole, Qt::EditRole, Qt::BackgroundRole});
+    emit dataChanged(idx, idx, {Qt::DisplayRole, Qt::EditRole, Qt::BackgroundRole,
+                                Qt::ForegroundRole});
     save();
     return true;
 }
