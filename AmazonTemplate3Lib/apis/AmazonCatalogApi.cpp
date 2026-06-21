@@ -1317,6 +1317,220 @@ AmazonCatalogApi::fetchListingBrandAndTheme(QString marketplaceId,
     co_return;
 }
 
+// fetchListingAttributes — GET /listings/2021-08-01/items/{sellerId}/{sku}?includedData=attributes
+// Fetches all attributes for a single SKU on a single marketplace.
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonCatalogApi::fetchListingAttributes(
+    QString marketplaceId, QString sku, QJsonObject* attrs)
+{
+    *attrs = QJsonObject{};
+    const QString sellerId = sellerIdForMarketplace(marketplaceId);
+    if (sellerId.isEmpty()) co_return;
+
+    QString token;
+    co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
+    if (token.isEmpty()) co_return;
+
+    QUrl url;
+    url.setScheme(QStringLiteral("https"));
+    url.setHost(endpointForMarketplace(marketplaceId));
+    url.setPath(QStringLiteral("/listings/2021-08-01/items/%1/%2").arg(sellerId, sku));
+    QUrlQuery q;
+    q.addQueryItem(QStringLiteral("marketplaceIds"), marketplaceId);
+    q.addQueryItem(QStringLiteral("includedData"),   QStringLiteral("attributes"));
+    url.setQuery(q);
+
+    QNetworkRequest req(url);
+    req.setRawHeader("x-amz-access-token", token.toUtf8());
+    req.setRawHeader("accept", "application/json");
+
+    QNetworkReply* reply = _nam()->get(req);
+    co_await qCoro(reply).waitForFinished();
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QByteArray data = reply->readAll();
+    reply->deleteLater();
+
+    if (status != 200) {
+        qWarning() << "fetchListingAttributes:" << sku << "HTTP" << status << data.left(200);
+        co_return;
+    }
+    *attrs = QJsonDocument::fromJson(data).object()
+                 .value(QStringLiteral("attributes")).toObject();
+}
+
+// ---------------------------------------------------------------------------
+// fetchListingGtin — GET /listings/2021-08-01/items/{sellerId}/{sku}?includedData=attributes
+// Reads externally_assigned_product_identifier from the seller's own listing data.
+// Tries primary marketplace first, then other same-region markets, then the other region.
+// This is the most reliable source when the seller submitted EANs in their flat file.
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonCatalogApi::fetchListingGtin(QString marketplaceId, QString sku,
+                                                      QString* gtin, QString* gtinType,
+                                                      QString* diagLog)
+{
+    gtin->clear();
+    gtinType->clear();
+    if (diagLog) diagLog->clear();
+
+    static const QStringList kEuMarkets{
+        QStringLiteral("A1PA6795UKMFR9"), // DE
+        QStringLiteral("A1F83G8C2ARO7P"), // UK
+        QStringLiteral("A13V1IB3VIYZZH"), // FR
+        QStringLiteral("A1RKKUPIHCS9HS"), // ES
+        QStringLiteral("APJ6JRA9NG5V4"),  // IT
+    };
+    static const QStringList kNaMarkets{
+        QStringLiteral("ATVPDKIKX0DER"),  // US
+        QStringLiteral("A2EUQ1WTGCTBG2"), // CA
+    };
+    // EAN preferred, then bare GTIN (Amazon's own type name), then UPC, then GTIN14.
+    static const QStringList kPriority{
+        QStringLiteral("ean"), QStringLiteral("gtin"),
+        QStringLiteral("upc"), QStringLiteral("gtin14"),
+    };
+
+    static const QHash<QString, QString> kMpName{
+        {QStringLiteral("A1PA6795UKMFR9"), QStringLiteral("DE")},
+        {QStringLiteral("A1F83G8C2ARO7P"), QStringLiteral("UK")},
+        {QStringLiteral("A13V1IB3VIYZZH"), QStringLiteral("FR")},
+        {QStringLiteral("A1RKKUPIHCS9HS"), QStringLiteral("ES")},
+        {QStringLiteral("APJ6JRA9NG5V4"),  QStringLiteral("IT")},
+        {QStringLiteral("ATVPDKIKX0DER"),  QStringLiteral("US")},
+        {QStringLiteral("A2EUQ1WTGCTBG2"), QStringLiteral("CA")},
+    };
+
+    const bool primaryIsNa = lwaRegionForMarketplace(marketplaceId) == QLatin1String("NA");
+    QStringList marketsToTry;
+    marketsToTry << marketplaceId;
+    for (const QString &m : (primaryIsNa ? kNaMarkets : kEuMarkets))
+        if (m != marketplaceId) marketsToTry << m;
+    for (const QString &m : (primaryIsNa ? kEuMarkets : kNaMarkets))
+        marketsToTry << m;
+
+    QStringList diagLines;
+
+    for (const QString &mpId : marketsToTry) {
+        const QString mpName = kMpName.value(mpId, mpId);
+        const QString sellerId = sellerIdForMarketplace(mpId);
+        if (sellerId.isEmpty()) {
+            diagLines << mpName + QStringLiteral(":no-seller-id");
+            continue;
+        }
+
+        QString token;
+        co_await _getAccessToken(lwaRegionForMarketplace(mpId), &token);
+        if (token.isEmpty()) {
+            diagLines << mpName + QStringLiteral(":no-token");
+            continue;
+        }
+
+        QUrl url;
+        url.setScheme(QStringLiteral("https"));
+        url.setHost(endpointForMarketplace(mpId));
+        url.setPath(QStringLiteral("/listings/2021-08-01/items/%1/%2").arg(sellerId, sku));
+
+        QUrlQuery q;
+        q.addQueryItem(QStringLiteral("marketplaceIds"), mpId);
+        q.addQueryItem(QStringLiteral("includedData"),   QStringLiteral("attributes"));
+        url.setQuery(q);
+
+        QNetworkRequest req(url);
+        req.setRawHeader("x-amz-access-token", token.toUtf8());
+        req.setRawHeader("accept", "application/json");
+
+        QNetworkReply* reply = _nam()->get(req);
+        co_await qCoro(reply).waitForFinished();
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray data = reply->readAll();
+        reply->deleteLater();
+
+        if (httpStatus != 200 || data.isEmpty()) {
+            diagLines << mpName + QStringLiteral(":HTTP") + QString::number(httpStatus);
+            qDebug() << "fetchListingGtin:" << sku << "HTTP" << httpStatus << "for" << mpId;
+            continue;
+        }
+
+        const QJsonObject attrs = QJsonDocument::fromJson(data).object()
+                                      .value(QStringLiteral("attributes")).toObject();
+        const QJsonArray extIds = attrs.value(
+            QStringLiteral("externally_assigned_product_identifier")).toArray();
+
+        // Log all attribute keys available — helps diagnose if EAN is stored differently
+        const QStringList attrKeys = attrs.keys();
+        qDebug() << "fetchListingGtin:" << sku << mpId << "attributes keys:" << attrKeys;
+
+        if (extIds.isEmpty()) {
+            diagLines << mpName + QStringLiteral(":200-no-ext-id(attrs:") + attrKeys.join(QLatin1Char(',')) + QLatin1Char(')');
+            continue;
+        }
+
+        // Amazon listing attributes use several formats for structured sub-objects:
+        //   Flat1:  {"type_of_product_id":"ean","product_id":"...","marketplace_id":"..."}
+        //   Nested: {"value":{"type_of_product_id":"ean","product_id":"..."},"marketplace_id":"..."}
+        //   Flat2:  {"type":"gtin","value":"03666412035794","marketplace_id":"..."}   ← seen in practice
+        // Try all three. Log the first entry structure for diagnosis.
+        auto extractId = [](const QJsonObject &entry) -> QPair<QString,QString> {
+            QString typeId    = entry.value(QStringLiteral("type_of_product_id")).toString();
+            QString productId = entry.value(QStringLiteral("product_id")).toString();
+            if (typeId.isEmpty()) {
+                const QJsonObject nested = entry.value(QStringLiteral("value")).toObject();
+                if (!nested.isEmpty()) {
+                    typeId    = nested.value(QStringLiteral("type_of_product_id")).toString();
+                    productId = nested.value(QStringLiteral("product_id")).toString();
+                }
+            }
+            if (typeId.isEmpty()) {
+                // Flat2: "type" + "value" as plain strings
+                typeId    = entry.value(QStringLiteral("type")).toString();
+                productId = entry.value(QStringLiteral("value")).toString();
+            }
+            return {typeId, productId};
+        };
+
+        // Collect all types present for diagnosis
+        QStringList foundTypes;
+        for (const QJsonValue &v : extIds) {
+            const auto [t, p] = extractId(v.toObject());
+            foundTypes << (t.isEmpty() ? QStringLiteral("?") : t);
+        }
+        // Raw first entry (for diagLog, to expose unknown structure)
+        const QString rawFirst = extIds.isEmpty() ? QString{} : QString::fromUtf8(
+            QJsonDocument(extIds.first().toObject()).toJson(QJsonDocument::Compact));
+        qDebug() << "fetchListingGtin:" << sku << mpId << "first ext-id entry:" << rawFirst;
+
+        for (const QString &wantedType : kPriority) {
+            for (const QJsonValue &v : extIds) {
+                const auto [typeId, productId] = extractId(v.toObject());
+                if (typeId == wantedType && !productId.isEmpty()) {
+                    *gtin     = productId;
+                    *gtinType = wantedType;
+                    qDebug() << "fetchListingGtin:" << sku << "→" << *gtinType << *gtin
+                             << "from marketplace" << mpId;
+                    if (diagLog) *diagLog = mpName + QStringLiteral(":") + *gtinType;
+                    co_return;
+                }
+            }
+        }
+
+        // Include raw first entry only if types are all unknown (helps diagnose new formats)
+        const bool allUnknown = std::all_of(foundTypes.begin(), foundTypes.end(),
+                                            [](const QString &t){ return t == QLatin1String("?"); });
+        const QString suffix = (allUnknown && !rawFirst.isEmpty())
+            ? QStringLiteral(" raw=") + rawFirst : QString{};
+        diagLines << mpName + QStringLiteral(":200-types(") + foundTypes.join(QLatin1Char(','))
+                             + QLatin1Char(')') + suffix;
+        qDebug() << "fetchListingGtin:" << sku << "no EAN/UPC/GTIN14 in"
+                 << extIds.size() << "identifier(s) from" << mpId
+                 << "types:" << foundTypes;
+    }
+
+    if (diagLog) *diagLog = QStringLiteral("not found: ") + diagLines.join(QStringLiteral(" | "));
+    qWarning() << "fetchListingGtin:" << sku << "no EAN/UPC/GTIN14 in listing attributes (any marketplace):"
+               << diagLines.join(QStringLiteral(", "));
+}
+
 // ---------------------------------------------------------------------------
 // uploadVariationFeed — JSON_LISTINGS_FEED via the Feeds API.
 // POST_FLAT_FILE_LISTINGS_DATA was sunset March 31 2025; JSON_LISTINGS_FEED is the replacement.
@@ -1424,7 +1638,7 @@ AmazonCatalogApi::uploadVariationFeed(QStringList marketplaceIds,
         messages.append(QJsonObject{
             {QStringLiteral("messageId"),     messageId++},
             {QStringLiteral("sku"),           e.sku},
-            {QStringLiteral("operationType"), QStringLiteral("PARTIAL_UPDATE")},
+            {QStringLiteral("operationType"), QStringLiteral("PATCH")},
             {QStringLiteral("productType"),   productType},
             {QStringLiteral("patches"),       patches},
         });
@@ -1701,35 +1915,61 @@ AmazonCatalogApi::uploadVariationFeed(QStringList marketplaceIds,
         const QByteArray docData = reply->readAll();
         reply->deleteLater();
 
-        const QString downloadUrl = QJsonDocument::fromJson(docData).object()
-                                        .value(QStringLiteral("url")).toString();
+        const QJsonObject docMeta = QJsonDocument::fromJson(docData).object();
+        const QString downloadUrl = docMeta.value(QStringLiteral("url")).toString();
+        const QString compression = docMeta.value(QStringLiteral("compressionAlgorithm")).toString();
 
         if (!downloadUrl.isEmpty()) {
             QNetworkReply* dlReply = _nam()->get(QNetworkRequest(QUrl(downloadUrl)));
             co_await qCoro(dlReply).waitForFinished();
-            const QByteArray resultJson = dlReply->readAll();
+            const int dlStatus = dlReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            QByteArray resultJson = dlReply->readAll();
             dlReply->deleteLater();
 
-            const QJsonObject root = QJsonDocument::fromJson(resultJson).object();
-            const QJsonObject summary = root.value(QStringLiteral("summary")).toObject();
-            const int accepted = summary.value(QStringLiteral("messagesAccepted")).toInt();
-            const int invalid  = summary.value(QStringLiteral("messagesInvalid")).toInt();
-            const int errors   = summary.value(QStringLiteral("errors")).toInt();
+            qDebug() << "uploadVariationFeed: result document HTTP" << dlStatus
+                     << "size" << resultJson.size()
+                     << "compressionAlgorithm:" << (compression.isEmpty() ? "(none)" : compression)
+                     << "first bytes:" << resultJson.left(80);
 
-            resultSummary = QStringLiteral("accepted=%1 invalid=%2 errors=%3")
-                                .arg(accepted).arg(invalid).arg(errors);
+            // Decompress if Amazon stored the result document as GZIP
+            if (compression.compare(QStringLiteral("GZIP"), Qt::CaseInsensitive) == 0
+                    || (resultJson.size() >= 2
+                        && (uchar)resultJson[0] == 0x1F && (uchar)resultJson[1] == 0x8B)) {
+                const QByteArray decompressed = gunzip(resultJson);
+                if (decompressed.isEmpty()) {
+                    qWarning() << "uploadVariationFeed: gunzip failed on result document";
+                } else {
+                    resultJson = decompressed;
+                    qDebug() << "uploadVariationFeed: decompressed to" << resultJson.size() << "bytes";
+                }
+            }
 
-            // Log first few issues for visibility
-            const QJsonArray issues = root.value(QStringLiteral("issues")).toArray();
-            for (int i = 0; i < qMin(5, (int)issues.size()); ++i) {
-                const QJsonObject iss = issues.at(i).toObject();
-                qWarning() << "Feed issue:" << iss.value(QStringLiteral("sku")).toString()
-                           << iss.value(QStringLiteral("code")).toString()
-                           << iss.value(QStringLiteral("message")).toString();
-                resultSummary += QStringLiteral(" | [%1] %2: %3")
-                    .arg(iss.value(QStringLiteral("sku")).toString(),
-                         iss.value(QStringLiteral("code")).toString(),
-                         iss.value(QStringLiteral("message")).toString());
+            if (dlStatus != 200 || resultJson.isEmpty()) {
+                qWarning() << "uploadVariationFeed: result document download failed"
+                           << "HTTP" << dlStatus << resultJson.left(200);
+                resultSummary = QStringLiteral("result-download-failed(HTTP %1)").arg(dlStatus);
+            } else {
+                const QJsonObject root = QJsonDocument::fromJson(resultJson).object();
+                const QJsonObject summary = root.value(QStringLiteral("summary")).toObject();
+                const int accepted = summary.value(QStringLiteral("messagesAccepted")).toInt();
+                const int invalid  = summary.value(QStringLiteral("messagesInvalid")).toInt();
+                const int errors   = summary.value(QStringLiteral("errors")).toInt();
+
+                resultSummary = QStringLiteral("accepted=%1 invalid=%2 errors=%3")
+                                    .arg(accepted).arg(invalid).arg(errors);
+
+                // Log first few issues for visibility
+                const QJsonArray issues = root.value(QStringLiteral("issues")).toArray();
+                for (int i = 0; i < qMin(5, (int)issues.size()); ++i) {
+                    const QJsonObject iss = issues.at(i).toObject();
+                    qWarning() << "Feed issue:" << iss.value(QStringLiteral("sku")).toString()
+                               << iss.value(QStringLiteral("code")).toString()
+                               << iss.value(QStringLiteral("message")).toString();
+                    resultSummary += QStringLiteral(" | [%1] %2: %3")
+                        .arg(iss.value(QStringLiteral("sku")).toString(),
+                             iss.value(QStringLiteral("code")).toString(),
+                             iss.value(QStringLiteral("message")).toString());
+                }
             }
         }
     }
@@ -2860,10 +3100,12 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllFbaSkus(QString marketplaceId,
 
 QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
                                                            QHash<QString, QString>* asinToSku,
-                                                           QHash<QString, int>* asinToInventory)
+                                                           QHash<QString, int>* asinToInventory,
+                                                           QHash<QString, QPair<QString,QString>>* asinToGtin)
 {
     asinToSku->clear();
     if (asinToInventory) asinToInventory->clear();
+    if (asinToGtin) asinToGtin->clear();
 
     const QString endpoint = endpointForMarketplace(marketplaceId);
     const QString lwaReg   = lwaRegionForMarketplace(marketplaceId);
@@ -3054,12 +3296,23 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
         qDebug() << "AmazonCatalogApi: TSV headers found:" << headers;
 
         const int skuCol  = headers.indexOf(QStringLiteral("seller-sku"));
-        // Report format varies by region/type: some have "asin1", others "product-id"
-        int asinCol = headers.indexOf(QStringLiteral("asin1"));
-        if (asinCol < 0) asinCol = headers.indexOf(QStringLiteral("product-id"));
-        // "product-id-type" column: 1 = ASIN; absent means assume ASIN
+        // asin1Col: dedicated ASIN column (always the ASIN regardless of product-id-type).
+        const int asin1Col = headers.indexOf(QStringLiteral("asin1"));
+        // product-id: external identifier (ASIN if product-id-type=1, else EAN/UPC/etc.)
+        const int productIdCol = headers.indexOf(QStringLiteral("product-id"));
+        // Fall back: if no asin1, use product-id as ASIN source (type must be 1)
+        const int asinCol  = (asin1Col >= 0) ? asin1Col : productIdCol;
+        // "product-id-type" column: 1=ASIN, 3=UPC, 4=EAN, 5=JAN, 8=GTIN14
         const int typeCol = headers.indexOf(QStringLiteral("product-id-type"));
         const int qtyCol  = headers.indexOf(QStringLiteral("quantity"));
+
+        // product-id-type → SP-API gtinType string (only EAN/UPC/GTIN14 are kept)
+        static const QHash<QString, QString> kReportTypeMap{
+            {QStringLiteral("3"), QStringLiteral("upc")},
+            {QStringLiteral("4"), QStringLiteral("ean")},
+            {QStringLiteral("5"), QStringLiteral("ean")},   // JAN = Japanese EAN
+            {QStringLiteral("8"), QStringLiteral("gtin14")},
+        };
 
         if (skuCol < 0 || asinCol < 0) {
             m_lastError = QStringLiteral("Report TSV: could not find seller-sku/asin1 columns. Headers: ")
@@ -3070,6 +3323,7 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
 
         int skippedRows = 0;
         int nonAsinRows = 0;
+        int gtinRows = 0;
         const QRegularExpression asinRegex("^[A-Z0-9]{10}$");
 
         for (int i = 1; i < lines.size(); ++i) {
@@ -3088,6 +3342,8 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
             bool isAsin = (typeVal == QStringLiteral("1"));
             if (!isAsin && typeVal.isEmpty() && asinRegex.match(asin).hasMatch())
                 isAsin = true;
+            // If asin1 is a separate column, the asin variable is always the real ASIN.
+            if (asin1Col >= 0) isAsin = true;
 
             if (isAsin) {
                 if (!sku.isEmpty() && !asin.isEmpty()) {
@@ -3095,6 +3351,18 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
                         asinToSku->insert(asin, sku);
                     if (asinToInventory && qtyCol >= 0 && qtyCol < cols.size())
                         (*asinToInventory)[asin] += cols.at(qtyCol).trimmed().toInt();
+
+                    // When asin1 is a dedicated column, product-id may be the external ID (EAN etc.)
+                    if (asinToGtin && asin1Col >= 0 && productIdCol >= 0
+                            && productIdCol < cols.size()
+                            && !asinToGtin->contains(asin)) {
+                        const QString gtinVal = cols.at(productIdCol).trimmed();
+                        const QString gtinTy  = kReportTypeMap.value(typeVal);
+                        if (!gtinTy.isEmpty() && !gtinVal.isEmpty()) {
+                            asinToGtin->insert(asin, {gtinVal, gtinTy});
+                            ++gtinRows;
+                        }
+                    }
                 } else {
                     skippedRows++;
                 }
@@ -3110,6 +3378,7 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
         qDebug() << "AmazonCatalogApi: fetchAllSkusViaReport complete."
                  << "Total lines:" << lines.size()
                  << "Extracted ASINs:" << asinToSku->size()
+                 << "GTINs from report:" << gtinRows
                  << "Skipped rows:" << skippedRows
                  << "Non-ASIN rows:" << nonAsinRows;
     }

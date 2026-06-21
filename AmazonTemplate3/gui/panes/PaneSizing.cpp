@@ -1857,12 +1857,14 @@ void PaneSizing::onUploadVariantImageClicked()
 
 QCoro::Task<void> PaneSizing::_fetchAllSkusCached(const QString &marketplaceId,
                                                   QHash<QString, QString> *asinToSku,
-                                                  bool forceRefresh)
+                                                  bool forceRefresh,
+                                                  QHash<QString, QPair<QString,QString>> *asinToGtin)
 {
     asinToSku->clear();
 
     if (!m_workingDir.exists()) {
-        co_await m_api->fetchAllSkusViaReport(marketplaceId, asinToSku);
+        co_await m_api->fetchAllSkusViaReport(marketplaceId, asinToSku,
+                                               nullptr, asinToGtin);
         co_return;
     }
 
@@ -1870,7 +1872,7 @@ QCoro::Task<void> PaneSizing::_fetchAllSkusCached(const QString &marketplaceId,
         QStringLiteral("sizing/sku_cache_%1.json").arg(marketplaceId));
     QFile cacheFile(cachePath);
 
-    // 1. Try to load from cache
+    // 1. Try to load from cache (SKUs only — GTINs always fetched live from report)
     if (!forceRefresh && cacheFile.open(QIODevice::ReadOnly)) {
         const QJsonObject root = QJsonDocument::fromJson(cacheFile.readAll()).object();
         for (auto it = root.begin(); it != root.end(); ++it)
@@ -1884,7 +1886,8 @@ QCoro::Task<void> PaneSizing::_fetchAllSkusCached(const QString &marketplaceId,
     }
 
     // 2. Not in cache (or cache empty or forced) -> fetch from Amazon
-    co_await m_api->fetchAllSkusViaReport(marketplaceId, asinToSku);
+    co_await m_api->fetchAllSkusViaReport(marketplaceId, asinToSku,
+                                           nullptr, asinToGtin);
 
     // 3. Save to cache if successful
     if (!asinToSku->isEmpty()) {
@@ -7185,6 +7188,142 @@ void PaneSizing::onFixLogClicked()
     dlg->show();
 }
 
+void PaneSizing::_generateParentFlatFile(const QString &marketplaceCode,
+                                          const QString &parentSku,
+                                          const QJsonObject &parentAttrs,
+                                          const QString &productType,
+                                          const QString &variationTheme,
+                                          const QList<FlatFileChildEntry> &children)
+{
+    if (!m_productWorkingDir.exists()) return;
+
+    auto firstVal = [&](const QJsonObject &attrs, const QString &key) -> QString {
+        const QJsonArray arr = attrs.value(key).toArray();
+        if (arr.isEmpty()) return {};
+        const QJsonObject obj = arr.first().toObject();
+        const QString v = obj.value(QStringLiteral("value")).toString();
+        return v.isEmpty() ? obj.value(QStringLiteral("name")).toString() : v;
+    };
+    auto allVals = [&](const QJsonObject &attrs, const QString &key) -> QStringList {
+        QStringList out;
+        for (const QJsonValue &jv : attrs.value(key).toArray())
+            out << jv.toObject().value(QStringLiteral("value")).toString();
+        out.removeAll(QString{});
+        return out;
+    };
+
+    // --- Column headers (fixed order) ---
+    QStringList headers;
+    headers << QStringLiteral("item_sku")
+            << QStringLiteral("update_delete")
+            << QStringLiteral("feed_product_type")
+            << QStringLiteral("item_name")
+            << QStringLiteral("brand_name")
+            << QStringLiteral("parent_child")
+            << QStringLiteral("parent_sku")
+            << QStringLiteral("relationship_type")
+            << QStringLiteral("variation_theme")
+            << QStringLiteral("color_name")
+            << QStringLiteral("size_name")
+            << QStringLiteral("bullet_point1")
+            << QStringLiteral("bullet_point2")
+            << QStringLiteral("bullet_point3")
+            << QStringLiteral("bullet_point4")
+            << QStringLiteral("bullet_point5")
+            << QStringLiteral("generic_keywords")
+            << QStringLiteral("product_description")
+            << QStringLiteral("country_of_origin")
+            << QStringLiteral("department_name")
+            << QStringLiteral("condition_type")
+            << QStringLiteral("lifestyle")
+            << QStringLiteral("pattern_type")
+            << QStringLiteral("style_name")
+            << QStringLiteral("item_length_description")
+            << QStringLiteral("neck_style")
+            << QStringLiteral("outer_material_type");
+
+    const QStringList nodes = allVals(parentAttrs, QStringLiteral("recommended_browse_nodes"));
+    for (int i = 0; i < nodes.size(); ++i)
+        headers << QStringLiteral("recommended_browse_nodes%1").arg(i + 1);
+
+    const int nCols = headers.size();
+
+    // --- Parent row values (same column order) ---
+    const QStringList bullets = allVals(parentAttrs, QStringLiteral("bullet_point"));
+    QStringList parentRow;
+    parentRow << parentSku
+              << QStringLiteral("PartialUpdate")
+              << productType
+              << firstVal(parentAttrs, QStringLiteral("item_name"))
+              << firstVal(parentAttrs, QStringLiteral("brand"))
+              << QStringLiteral("Parent")
+              << QString{}                          // parent_sku (empty for parent)
+              << QStringLiteral("Variation")
+              << variationTheme
+              << QString{}                          // color_name (empty for parent)
+              << QString{}                          // size_name  (empty for parent)
+              << (bullets.size() > 0 ? bullets.at(0) : QString{})
+              << (bullets.size() > 1 ? bullets.at(1) : QString{})
+              << (bullets.size() > 2 ? bullets.at(2) : QString{})
+              << (bullets.size() > 3 ? bullets.at(3) : QString{})
+              << (bullets.size() > 4 ? bullets.at(4) : QString{})
+              << allVals(parentAttrs, QStringLiteral("generic_keyword")).join(QLatin1Char(' '))
+              << firstVal(parentAttrs, QStringLiteral("product_description"))
+              << firstVal(parentAttrs, QStringLiteral("country_of_origin"))
+              << firstVal(parentAttrs, QStringLiteral("department"))
+              << firstVal(parentAttrs, QStringLiteral("condition_type"))
+              << firstVal(parentAttrs, QStringLiteral("lifestyle"))
+              << firstVal(parentAttrs, QStringLiteral("pattern_type"))
+              << firstVal(parentAttrs, QStringLiteral("style"))
+              << firstVal(parentAttrs, QStringLiteral("item_length_description"))
+              << firstVal(parentAttrs, QStringLiteral("neck"))
+              << firstVal(parentAttrs, QStringLiteral("outer"));
+    for (const QString &node : nodes)
+        parentRow << node;
+
+    // --- Write xlsx ---
+    const QString fileName = QStringLiteral("flatfile_parent_%1_%2.txt")
+                                 .arg(marketplaceCode.toLower(),
+                                      QDate::currentDate().toString(QStringLiteral("yyyyMMdd")));
+    const QString filePath = m_productWorkingDir.filePath(fileName);
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        qWarning() << "_generateParentFlatFile: cannot open" << filePath;
+        return;
+    }
+    QTextStream out(&file);
+    out.setEncoding(QStringConverter::Utf8);
+
+    auto writeTsvRow = [&](const QStringList &row) {
+        out << row.join(QLatin1Char('\t')) << QLatin1Char('\n');
+    };
+
+    writeTsvRow(headers);
+    writeTsvRow(parentRow);
+
+    for (const auto &ch : children) {
+        QStringList childRow(nCols);
+        auto set = [&](const QString &hdr, const QString &val) {
+            const int idx = headers.indexOf(hdr);
+            if (idx >= 0) childRow[idx] = val;
+        };
+        set(QStringLiteral("item_sku"),          ch.sku);
+        set(QStringLiteral("update_delete"),     QStringLiteral("PartialUpdate"));
+        set(QStringLiteral("feed_product_type"), productType);
+        set(QStringLiteral("parent_child"),      QStringLiteral("Child"));
+        set(QStringLiteral("parent_sku"),        parentSku);
+        set(QStringLiteral("relationship_type"), QStringLiteral("Variation"));
+        set(QStringLiteral("variation_theme"),   variationTheme);
+        set(QStringLiteral("color_name"),        ch.color);
+        set(QStringLiteral("size_name"),         ch.size);
+        writeTsvRow(childRow);
+    }
+
+    file.close();
+    qDebug() << "_generateParentFlatFile: saved" << filePath;
+}
+
 QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages)
 {
     if (!m_brokenChildTable) co_return;
@@ -7247,6 +7386,9 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
     auto *btnLayout = new QHBoxLayout();
     auto *copyBtn = new QPushButton(tr("Copy log"), progressDlg);
     btnLayout->addWidget(copyBtn);
+    auto *openDirBtn = new QPushButton(tr("Open dir"), progressDlg);
+    openDirBtn->setEnabled(m_productWorkingDir.exists());
+    btnLayout->addWidget(openDirBtn);
     btnLayout->addStretch();
     auto *closeBtns = new QDialogButtonBox(QDialogButtonBox::Close, progressDlg);
     QPushButton *closeBtn = closeBtns->button(QDialogButtonBox::Close);
@@ -7269,6 +7411,10 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
     connect(copyBtn, &QPushButton::clicked, progressDlg, [logEditPtr]() {
         if (logEditPtr)
             QGuiApplication::clipboard()->setText(logEditPtr->toPlainText());
+    });
+    const QString prodWorkingPath = m_productWorkingDir.absolutePath();
+    connect(openDirBtn, &QPushButton::clicked, progressDlg, [prodWorkingPath]() {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(prodWorkingPath));
     });
     connect(closeBtns, &QDialogButtonBox::rejected, progressDlg, &QDialog::close);
 
@@ -7293,6 +7439,8 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
 
     // Map asin → sku (resolved from tree, settings.ini, or report)
     QMap<QString, QString> asinToSku;
+    // Map asin → {gtin, gtinType} — populated from the listings report as a side-effect
+    QHash<QString, QPair<QString,QString>> asinToGtin;
 
     // 4a. Tree model first
     if (m_treeModel) {
@@ -7343,7 +7491,7 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
         const QString reportMpId = firstMarketplaceIdFromCountryList(ui->listWidgetCountries);
 
         QHash<QString, QString> reportMap;
-        co_await _fetchAllSkusCached(reportMpId, &reportMap);
+        co_await _fetchAllSkusCached(reportMpId, &reportMap, false, &asinToGtin);
 
         if (reportMap.isEmpty() && !m_api->lastError().isEmpty()) {
             appendLog(tr("Reports API error: %1").arg(m_api->lastError()));
@@ -7545,17 +7693,50 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                     feedEntries.append({childSku, row.asin, false, feedParentSku, {}, {}});
                 }
 
-                // Fetch GTIN (EAN/UPC) for each entry; fall back to ASIN (logged as warning).
+                // Fetch GTIN (EAN/UPC) for each entry — try three sources in order:
+                //   1. Report cache (asinToGtin built during SKU resolution above)
+                //   2. Catalog Items API identifiers (all EU + all NA marketplaces)
+                //   3. Listings Items API attributes (seller-submitted, most reliable for EANs)
+                // Falls back to ASIN if all sources fail (logged as warning).
                 appendLog(tr("Fetching GTINs for feed entries…"));
                 for (auto &entry : feedEntries) {
                     if (entry.asin.isEmpty()) continue;
+
+                    appendLog(tr("  [%1 / %2]").arg(entry.asin, entry.sku));
+
+                    // Source 1: report cache (built during SKU resolution above)
+                    if (asinToGtin.contains(entry.asin)) {
+                        const auto &p = asinToGtin.value(entry.asin);
+                        entry.gtin     = p.first;
+                        entry.gtinType = p.second;
+                        appendLog(tr("    → %1 %2 (report cache)")
+                                      .arg(entry.gtinType, entry.gtin));
+                        continue;
+                    }
+                    appendLog(tr("    source 1 (report cache): not in cache"));
+
+                    // Source 2: Catalog Items API identifiers (all EU + all NA in two calls)
                     co_await m_api->fetchAsinGtin(entry.asin, primaryMpId,
                                                   &entry.gtin, &entry.gtinType);
-                    if (entry.gtin.isEmpty())
-                        appendLog(tr("  ⚠ No GTIN for ASIN %1 (SKU %2) — will use ASIN as fallback")
-                                      .arg(entry.asin, entry.sku));
-                    else
-                        appendLog(tr("  %1 → %2 %3").arg(entry.asin, entry.gtinType, entry.gtin));
+                    if (!entry.gtin.isEmpty()) {
+                        appendLog(tr("    → %1 %2 (catalog identifiers)")
+                                      .arg(entry.gtinType, entry.gtin));
+                        continue;
+                    }
+                    appendLog(tr("    source 2 (catalog identifiers): not found"));
+
+                    // Source 3: Listings Items API attributes by SKU — reads seller-submitted EAN
+                    if (!entry.sku.isEmpty()) {
+                        QString diagLog;
+                        co_await m_api->fetchListingGtin(primaryMpId, entry.sku,
+                                                         &entry.gtin, &entry.gtinType,
+                                                         &diagLog);
+                        appendLog(tr("    source 3 (listing attributes): %1").arg(
+                            entry.gtin.isEmpty() ? diagLog : tr("%1 %2").arg(entry.gtinType, entry.gtin)));
+                        if (!entry.gtin.isEmpty()) continue;
+                    }
+
+                    appendLog(tr("    ⚠ all sources exhausted — using ASIN as fallback"));
                 }
 
                 QStringList brokenMpIds;
@@ -7573,6 +7754,36 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                                                     variationTheme,
                                                     feedEntries, &feedResult);
                 appendLog(tr("Feed result: %1").arg(feedResult));
+
+                /* Flat file generation — disabled pending Option B (official template).
+                if (m_productWorkingDir.exists()) {
+                    QHash<QString, QPair<QString,QString>> asinColorSize;
+                    for (const auto &row : m_brokenChildTable->rows())
+                        asinColorSize.insert(row.asin, {row.color, row.size});
+                    QList<FlatFileChildEntry> children;
+                    for (const auto &e : feedEntries) {
+                        if (e.isParent) continue;
+                        const auto cs = asinColorSize.value(e.asin);
+                        children.append({e.sku, cs.first, cs.second});
+                    }
+                    appendLog(tr("Generating flat file(s) (%1 child(ren))…").arg(children.size()));
+                    for (const QString &mpId : brokenMpIds) {
+                        QString mpCode = mpId;
+                        for (int i = 0; i < m_brokenChildTable->marketplaceCount(); ++i) {
+                            const auto &s = m_brokenChildTable->marketplaceAt(i);
+                            if (s.id == mpId) { mpCode = s.code; break; }
+                        }
+                        QJsonObject parentAttrs;
+                        co_await m_api->fetchListingAttributes(mpId, feedParentSku, &parentAttrs);
+                        _generateParentFlatFile(mpCode, feedParentSku, parentAttrs,
+                                                m_productType, variationTheme, children);
+                        const QString fileName = QStringLiteral("flatfile_parent_%1_%2.txt")
+                            .arg(mpCode.toLower(),
+                                 QDate::currentDate().toString(QStringLiteral("yyyyMMdd")));
+                        appendLog(tr("  %1: %2").arg(mpCode, m_productWorkingDir.filePath(fileName)));
+                    }
+                }
+                */
             } else {
                 appendLog(tr("Feed upload skipped: parent SKU not resolved."));
             }
@@ -7604,12 +7815,25 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
             continue;
         }
 
-        // 6a. Parent fix skipped (useless for refresh)
-        /*
+        // 6a. Parent fix via direct Listings Items API PATCH (per child × marketplace)
         if (target.needsParent && fixParents) {
-            ...
+            const QString parentSku = asinToSku.value(row.parentAsin);
+            if (parentSku.isEmpty()) {
+                appendLog(tr("[%1] %2: no parent SKU — skipping direct patch").arg(mpCode, row.asin));
+            } else {
+                QString parentDetails;
+                co_await m_api->patchListingAsParent(mpId, parentSku, m_productType,
+                                                     variationTheme, &parentDetails);
+                appendLog(tr("[%1] parent %2: %3").arg(mpCode, parentSku, parentDetails));
+
+                bool ok = false;
+                QString childDetails;
+                co_await m_api->patchListingParent(mpId, childSku, m_productType,
+                                                   parentSku, variationTheme,
+                                                   &ok, &childDetails);
+                appendLog(tr("[%1] %2 → parent: %3").arg(mpCode, row.asin, childDetails));
+            }
         }
-        */
 
         // 6b. Image fix
         if (target.needsImages && fixImages) {

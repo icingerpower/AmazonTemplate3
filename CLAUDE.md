@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Workflow Rules
+
+- **Never commit without explicit user permission.** At most, ask if you may commit. Do not commit autonomously even after a successful build.
+
 ## What This Application Does
 
 AmazonTemplate3 is a Qt desktop tool for Amazon (and Temu) product listing template management. It reads product attribute data from Excel (`.xlsx`) source templates, fills/translates/validates attribute values across multiple marketplace country/language variants, and writes populated templates back to disk. It integrates with the OpenAI API (GPT models) to automatically generate or translate attribute values that cannot be derived mechanically.

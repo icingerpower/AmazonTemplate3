@@ -176,6 +176,19 @@ public:
     QCoro::Task<void> fetchAsinGtin(QString asin, QString marketplaceId,
                                     QString* gtin, QString* gtinType);
 
+    // GET /listings/2021-08-01/items/{sellerId}/{sku}?includedData=attributes
+    // Reads externally_assigned_product_identifier from the seller's own listing.
+    // Tries the primary marketplace, then other same-region markets, then the other region.
+    // diagLog (optional): filled with per-marketplace attempt results for UI logging.
+    QCoro::Task<void> fetchListingGtin(QString marketplaceId, QString sku,
+                                       QString* gtin, QString* gtinType,
+                                       QString* diagLog = nullptr);
+
+    // Fetches all listing attributes for a single SKU on a single marketplace.
+    // Returns the raw attributes object (SP-API format) in *attrs, or empty on failure.
+    QCoro::Task<void> fetchListingAttributes(QString marketplaceId, QString sku,
+                                             QJsonObject* attrs);
+
     // Builds and uploads a JSON_LISTINGS_FEED variation relationship feed via the Feeds API.
     // Fetches nothing — all data is passed in. Polls until DONE (3 min max).
     // Returns a human-readable status string in *resultOut.
@@ -247,9 +260,11 @@ public:
     // Fills *asinToSku with ASIN → sellerSku pairs.
     // Optionally fills *asinToInventory with ASIN → quantity-available.
     // GCC 13 ICE workaround: params by value.
+    // asinToGtin: optional; filled with ASIN → {gtin, gtinType} from non-ASIN rows in the report.
     QCoro::Task<void> fetchAllSkusViaReport(QString marketplaceId,
                                             QHash<QString, QString>* asinToSku,
-                                            QHash<QString, int>* asinToInventory = nullptr);
+                                            QHash<QString, int>* asinToInventory = nullptr,
+                                            QHash<QString, QPair<QString,QString>>* asinToGtin = nullptr);
 
     // Retrieve the productType of a seller listing via the Listings Items API summaries.
     // *productType is empty on error or when the listing is not found.

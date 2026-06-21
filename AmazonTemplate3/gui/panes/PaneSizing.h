@@ -180,7 +180,21 @@ private:
                                    bool *cancelled);
     QCoro::Task<void> _fetchAllSkusCached(const QString &marketplaceId,
                                           QHash<QString, QString> *asinToSku,
-                                          bool forceRefresh = false);
+                                          bool forceRefresh = false,
+                                          QHash<QString, QPair<QString,QString>> *asinToGtin = nullptr);
+    struct FlatFileChildEntry {
+        QString sku;
+        QString color;
+        QString size;
+    };
+    // Writes a partial-update flat file xlsx (parent + children) into m_productWorkingDir.
+    // parentAttrs: SP-API attributes object from fetchListingAttributes.
+    void _generateParentFlatFile(const QString &marketplaceCode,
+                                  const QString &parentSku,
+                                  const QJsonObject &parentAttrs,
+                                  const QString &productType,
+                                  const QString &variationTheme,
+                                  const QList<FlatFileChildEntry> &children);
     void _downloadMainImage(const QString &url, const QString &asin);
     void _downloadVariantImages(const QList<QPair<QString, QStringList>> &colorImages);
     void _runCliPrompt(const QString &executable, const QStringList &args,
