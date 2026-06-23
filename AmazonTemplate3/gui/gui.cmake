@@ -12,6 +12,9 @@ SET(GUI_FILES
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneWarnings.cpp
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneWarnings.h
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneWarnings.ui
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneGSPR.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneGSPR.h
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneGSPR.ui
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneStore.cpp
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneStore.h
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneStore.ui

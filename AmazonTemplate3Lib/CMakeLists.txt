@@ -60,6 +60,10 @@ add_library(AmazonTemplate3Lib STATIC
   BrokenChildTable.cpp
   TableUnresolvedAsins.h
   TableUnresolvedAsins.cpp
+  TableGpsrManufacturers.h
+  TableGpsrManufacturers.cpp
+  TableWarningsManufacturer.h
+  TableWarningsManufacturer.cpp
   aplus/APlusContent.h
   aplus/APlusContent.cpp
   aplus/APlusTreeModel.h
@@ -150,6 +154,10 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   BrokenChildTable.cpp
   TableUnresolvedAsins.h
   TableUnresolvedAsins.cpp
+  TableGpsrManufacturers.h
+  TableGpsrManufacturers.cpp
+  TableWarningsManufacturer.h
+  TableWarningsManufacturer.cpp
   aplus/APlusContent.h
   aplus/APlusContent.cpp
   aplus/APlusTreeModel.h

@@ -23,6 +23,9 @@ public:
     QString countryCode()   const { return m_countryCode; }
     QString countryName()   const { return m_countryName; }
     Region  region()        const { return m_region; }
+    // True for EU member states only (Europe region minus GB, which left the EU post-Brexit).
+    // Use this for EU-specific regulations such as GSPR.
+    bool    isEu()          const { return m_region == Region::Europe && m_countryCode != QStringLiteral("GB"); }
     // SP-API endpoint host (e.g. "sellingpartnerapi-eu.amazon.com")
     QString endpoint()      const { return m_endpoint; }
     // AWS signing region (e.g. "eu-west-1")
