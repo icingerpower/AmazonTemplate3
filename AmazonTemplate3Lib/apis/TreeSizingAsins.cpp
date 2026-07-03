@@ -14,6 +14,64 @@
 namespace {
 constexpr const char* kJsonFileName = "sizing_upload.json";
 
+// Map well-known non-English single-word color names to their English canonical
+// form so that "Schwarz" and "Black" (or "Noir" and "Black") dedup correctly
+// when Amazon's UK normalisation step didn't cover every child ASIN.
+// Only unambiguous, single-word, case-insensitive matches are handled; compound
+// colours such as "Schwarz-Weiß" are left unchanged because the English compound
+// may differ structurally.
+static QString canonicalColorKey(const QString &colorLower)
+{
+    static const QHash<QString, QString> kMap = {
+        // German
+        {QStringLiteral("schwarz"),  QStringLiteral("black")},
+        {QStringLiteral("weiß"),     QStringLiteral("white")},
+        {QStringLiteral("weiss"),    QStringLiteral("white")},
+        {QStringLiteral("grau"),     QStringLiteral("grey")},
+        {QStringLiteral("silber"),   QStringLiteral("silver")},
+        {QStringLiteral("gold"),     QStringLiteral("gold")},
+        {QStringLiteral("blau"),     QStringLiteral("blue")},
+        {QStringLiteral("rot"),      QStringLiteral("red")},
+        {QStringLiteral("gelb"),     QStringLiteral("yellow")},
+        {QStringLiteral("grün"),     QStringLiteral("green")},
+        {QStringLiteral("gruen"),    QStringLiteral("green")},
+        {QStringLiteral("braun"),    QStringLiteral("brown")},
+        {QStringLiteral("marine"),   QStringLiteral("navy")},
+        // French
+        {QStringLiteral("noir"),     QStringLiteral("black")},
+        {QStringLiteral("blanc"),    QStringLiteral("white")},
+        {QStringLiteral("gris"),     QStringLiteral("grey")},
+        {QStringLiteral("argent"),   QStringLiteral("silver")},
+        {QStringLiteral("bleu"),     QStringLiteral("blue")},
+        {QStringLiteral("rouge"),    QStringLiteral("red")},
+        {QStringLiteral("jaune"),    QStringLiteral("yellow")},
+        {QStringLiteral("vert"),     QStringLiteral("green")},
+        {QStringLiteral("marron"),   QStringLiteral("brown")},
+        {QStringLiteral("brun"),     QStringLiteral("brown")},
+        // Italian
+        {QStringLiteral("nero"),     QStringLiteral("black")},
+        {QStringLiteral("bianco"),   QStringLiteral("white")},
+        {QStringLiteral("grigio"),   QStringLiteral("grey")},
+        {QStringLiteral("rosso"),    QStringLiteral("red")},
+        {QStringLiteral("blu"),      QStringLiteral("blue")},
+        {QStringLiteral("giallo"),   QStringLiteral("yellow")},
+        {QStringLiteral("verde"),    QStringLiteral("green")},
+        {QStringLiteral("marrone"),  QStringLiteral("brown")},
+        // Spanish
+        {QStringLiteral("negro"),    QStringLiteral("black")},
+        {QStringLiteral("blanco"),   QStringLiteral("white")},
+        {QStringLiteral("gris"),     QStringLiteral("grey")},
+        {QStringLiteral("plata"),    QStringLiteral("silver")},
+        {QStringLiteral("azul"),     QStringLiteral("blue")},
+        {QStringLiteral("rojo"),     QStringLiteral("red")},
+        {QStringLiteral("amarillo"), QStringLiteral("yellow")},
+        {QStringLiteral("verde"),    QStringLiteral("green")},
+        {QStringLiteral("marrón"),   QStringLiteral("brown")},
+        {QStringLiteral("marron"),   QStringLiteral("brown")},
+    };
+    return kMap.value(colorLower, colorLower);
+}
+
 // Representative marketplace ID per geographic region, tried in order when
 // auto-detecting which region a product belongs to.
 // EU markets are tried first because most products managed here are EU-listed.
@@ -340,28 +398,57 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
                                    family.children.first().title,
                                    shoeWidths);
 
-            // Emit images grouped by unique color. Dedup by color name only
-            // (lowercased). Image-URL-based dedup is unreliable: Amazon frequently
-            // returns the parent product's images for all children regardless of
-            // color, making distinct colors like "Bronze Rose" and "Silver Gray"
-            // appear identical. We take the first child's image list for each color
-            // as the reference; if a child has no images we still emit the color
-            // so buildSlots() picks the right path (group shot vs aspirational).
+            // Emit images grouped by unique color. Dedup by canonical color key
+            // (lowercased + cross-language translation) so that "Black" and "Schwarz"
+            // are treated as the same color when Amazon's UK normalisation step didn't
+            // cover every child ASIN. Image-URL-based dedup is unreliable: Amazon
+            // frequently returns the parent product's images for all children regardless
+            // of color, making distinct colors appear identical.
+            // Two-pass approach: first build a canonical-key → children map so we can
+            // prefer the English display name when multiple language variants exist.
+            using AsinItem = AmazonCatalogApi::AsinItem;
+            QMap<QString, QList<const AsinItem *>> canonicalGroups;
+            QList<QString> canonicalOrder; // insertion-order for stable output
+            for (const auto& c : family.children) {
+                if (c.color.isEmpty()) continue;
+                const QString canon = canonicalColorKey(c.color.toLower());
+                if (!canonicalGroups.contains(canon))
+                    canonicalOrder.append(canon);
+                canonicalGroups[canon].append(&c);
+            }
+
             QList<QPair<QString, QStringList>> colorImages;
             QSet<QString> seenColors;
 
             QStringList logLines;
             logLines << tr("Color detection for %1:").arg(family.parentAsin);
 
-            for (const auto& c : family.children) {
-                if (c.color.isEmpty()) continue;
-                const QString colorKey = c.color.toLower();
-                if (seenColors.contains(colorKey)) continue;
-                seenColors.insert(colorKey);
-                colorImages.append({c.color, c.allImageUrls});
-                logLines << tr("  ADD   \"%1\" — images: %2")
-                            .arg(c.color)
-                            .arg(c.allImageUrls.size());
+            for (const QString &canon : canonicalOrder) {
+                const QList<const AsinItem *> &group = canonicalGroups[canon];
+                // Prefer the English (un-translated) name; fall back to first seen.
+                QString displayColor = group.first()->color;
+                for (const AsinItem *child : group) {
+                    if (canonicalColorKey(child->color.toLower()) == child->color.toLower()) {
+                        displayColor = child->color; // exact canonical = English word
+                        break;
+                    }
+                }
+                if (seenColors.contains(canon)) continue;
+                seenColors.insert(canon);
+                // Use the first child's images (most complete).
+                colorImages.append(qMakePair(displayColor, group.first()->allImageUrls));
+                if (group.size() > 1) {
+                    QStringList aliases;
+                    for (const AsinItem *ch : group) aliases << ch->color;
+                    logLines << tr("  ADD   \"%1\" (merged: %2) — images: %3")
+                                .arg(displayColor)
+                                .arg(aliases.join(QStringLiteral(", ")))
+                                .arg(group.first()->allImageUrls.size());
+                } else {
+                    logLines << tr("  ADD   \"%1\" — images: %2")
+                                .arg(displayColor)
+                                .arg(group.first()->allImageUrls.size());
+                }
             }
 
             logLines << tr("  → %1 distinct color(s): %2")

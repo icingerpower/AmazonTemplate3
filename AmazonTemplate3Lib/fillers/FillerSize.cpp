@@ -575,6 +575,74 @@ QVariant FillerSize::convertUnit(const QString &countryTo, const QVariant &origV
     return origValue;
 }
 
+QString FillerSize::convertSize(const QString &origSize,
+                               const QString &countryFrom,
+                               const QString &countryTo,
+                               const QString &gender,
+                               bool isShoes)
+{
+    if (origSize.isEmpty()) return origSize;
+
+    // Normalize: the tables key US sizes as "COM".
+    auto norm = [](const QString &c) -> QString {
+        return (c == QLatin1String("US")) ? QStringLiteral("COM") : c;
+    };
+    const QString from = norm(countryFrom);
+    const QString to   = norm(countryTo);
+    if (from == to) return origSize;
+
+    const bool isFemale = gender.compare(QStringLiteral("male"), Qt::CaseInsensitive) != 0;
+
+    if (isShoes) {
+        const auto &table = isFemale ? SHOE_FEMALE_ADULT_SIZES : SHOE_MALE_ADULT_SIZES;
+        bool ok = false;
+        const double num = origSize.toDouble(&ok);
+        if (ok) {
+            for (const auto &row : table) {
+                if (row.contains(from) && row.contains(to)
+                        && qFuzzyCompare(row[from], num))
+                    return QString::number(row[to], 'g', 4);
+            }
+        }
+        return origSize;
+    }
+
+    // Clothing: numeric lookup first.
+    const auto &table = isFemale ? CLOTHE_FEMALE_ADULT_SIZES : CLOTHE_MALE_ADULT_SIZES;
+    bool ok = false;
+    const int num = origSize.toInt(&ok);
+    if (ok) {
+        for (const auto &row : table) {
+            if (row.contains(from) && row.contains(to) && row[from] == num)
+                return QString::number(row[to]);
+        }
+        return origSize; // numeric but no match
+    }
+
+    // Letter sizes: COM/CA/IE expand to English words, BE contracts XL.
+    if (to == QLatin1String("COM") || to == QLatin1String("CA")
+            || to == QLatin1String("IE")) {
+        static const QHash<QString,QString> toEn{
+            {QStringLiteral("XS"),  QStringLiteral("X-Small")},
+            {QStringLiteral("S"),   QStringLiteral("Small")},
+            {QStringLiteral("M"),   QStringLiteral("Medium")},
+            {QStringLiteral("L"),   QStringLiteral("Large")},
+            {QStringLiteral("XL"),  QStringLiteral("X-Large")},
+            {QStringLiteral("XXL"), QStringLiteral("XX-Large")},
+            {QStringLiteral("3XL"), QStringLiteral("3X-Large")},
+            {QStringLiteral("4XL"), QStringLiteral("4X-Large")},
+            {QStringLiteral("5XL"), QStringLiteral("5X-Large")},
+            {QStringLiteral("6XL"), QStringLiteral("6X-Large")},
+        };
+        return toEn.value(origSize, origSize);
+    }
+    if (to == QLatin1String("BE")) {
+        if (origSize == QLatin1String("XL"))  return QStringLiteral("TG");
+        if (origSize == QLatin1String("XXL")) return QStringLiteral("TTG");
+    }
+    return origSize; // same letter size across EU/UK
+}
+
 QVariant FillerSize::convertClothingSize(
         const QString &countryFrom,
         const QString &countryTo,

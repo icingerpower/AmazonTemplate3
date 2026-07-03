@@ -442,18 +442,50 @@
                </property>
               </widget>
              </item>
+            </layout>
+           </item>
+           <item>
+            <layout class="QHBoxLayout" name="horizontalLayout_brokenAttr">
              <item>
-              <spacer name="horizontalSpacer_7">
+              <widget class="QLabel" name="labelBrokenAttrSource">
+               <property name="text">
+                <string>Attr source:</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QComboBox" name="comboBoxBrokenAttrMarket">
+               <property name="minimumWidth">
+                <number>60</number>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <spacer name="horizontalSpacer_brokenAttr">
                <property name="orientation">
                 <enum>Qt::Orientation::Horizontal</enum>
                </property>
                <property name="sizeHint" stdset="0">
                 <size>
-                 <width>40</width>
+                 <width>20</width>
                  <height>20</height>
                 </size>
                </property>
               </spacer>
+             </item>
+             <item>
+              <widget class="QLineEdit" name="lineEditBrokenTemplate">
+               <property name="placeholderText">
+                <string>Template file (xlsm/xlsx)…</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QPushButton" name="buttonBrowseBrokenTemplate">
+               <property name="text">
+                <string>Browse…</string>
+               </property>
+              </widget>
              </item>
             </layout>
            </item>

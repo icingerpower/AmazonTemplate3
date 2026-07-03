@@ -547,6 +547,29 @@ static QString firstAttrValue(const QJsonObject& attrs, const QString& key)
     return arr.first().toString();
 }
 
+// Like firstAttrValue but for enum fields that must be submitted in English (e.g. target_gender,
+// age_range_description). Prefers entries with an English language_tag (en_*), then entries with
+// no language_tag, then falls back to the first entry.
+static QString firstEnglishAttrValue(const QJsonObject& attrs, const QString& key)
+{
+    const QJsonArray arr = attrs.value(key).toArray();
+    if (arr.isEmpty()) return {};
+    QString noLangFallback, anyFallback;
+    for (const QJsonValue &v : arr) {
+        const QJsonObject obj = v.toObject();
+        const QString val  = obj.value(QStringLiteral("value")).toString();
+        if (val.isEmpty()) continue;
+        const QString lang = obj.value(QStringLiteral("language_tag")).toString();
+        if (lang.startsWith(QStringLiteral("en"), Qt::CaseInsensitive))
+            return val;
+        if (lang.isEmpty() && noLangFallback.isEmpty())
+            noLangFallback = val;
+        if (anyFallback.isEmpty())
+            anyFallback = val;
+    }
+    return noLangFallback.isEmpty() ? anyFallback : noLangFallback;
+}
+
 static QStringList allAttrValues(const QJsonObject& attrs, const QString& key)
 {
     QStringList result;
@@ -754,6 +777,121 @@ AmazonCatalogApi::fetchChildHealth(QString asin, QString marketplaceId, ChildHea
             break;
     }
     out->imageCount = static_cast<int>(variants.size());
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
+// fetchCatalogApparelAttrs
+// ---------------------------------------------------------------------------
+QCoro::Task<void> AmazonCatalogApi::fetchCatalogApparelAttrs(
+    QString marketplaceId, QString asin, CatalogApparelAttrs* out)
+{
+    static const QStringList kData{QStringLiteral("attributes")};
+    QByteArray body;
+    co_await _doGet(marketplaceId, asin, kData, &body);
+    if (body.isEmpty()) co_return;
+
+    const QJsonObject attrs =
+        QJsonDocument::fromJson(body).object().value(QStringLiteral("attributes")).toObject();
+    out->color      = firstAttrValue(attrs, QStringLiteral("color"));
+    // apparel_size_system: catalog API does not expose it reliably (garment_size_country returns
+    // country codes like "DE", not valid size-system values like "EU"). Leave empty if absent.
+    out->sizeSystem = firstAttrValue(attrs, QStringLiteral("apparel_size_system"));
+    // apparel_size_class, apparel_body_type, apparel_height_type: not available in Catalog API.
+    out->sizeClass  = firstAttrValue(attrs, QStringLiteral("apparel_size_class"));
+    // target_gender and age_range_description may be returned in the local language (e.g.
+    // "Erwachsene" instead of "Adult"). Use the English entry when multiple language_tags exist.
+    out->gender     = firstEnglishAttrValue(attrs, QStringLiteral("target_gender"));
+    out->ageRange   = firstEnglishAttrValue(attrs, QStringLiteral("age_range_description"));
+    out->bodyType   = firstAttrValue(attrs, QStringLiteral("apparel_body_type"));
+    out->heightType = firstAttrValue(attrs, QStringLiteral("apparel_height_type"));
+    co_return;
+}
+
+// searchCatalogForApparelAttrs — keyword search for a similar product that has the wanted attrs
+// ---------------------------------------------------------------------------
+QCoro::Task<void> AmazonCatalogApi::searchCatalogForApparelAttrs(
+    QString marketplaceId, const QString &keywords,
+    const QStringList &wantedAttrs,
+    CatalogApparelAttrs* out, QString* foundAsin)
+{
+    if (foundAsin) foundAsin->clear();
+
+    const QString endpoint = endpointForMarketplace(marketplaceId);
+
+    // No sellerId here: a seller-scoped search only finds their own products,
+    // defeating the purpose of finding a similar product in the broader catalog.
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("keywords"),       keywords);
+    query.addQueryItem(QStringLiteral("marketplaceIds"), marketplaceId);
+    query.addQueryItem(QStringLiteral("includedData"),   QStringLiteral("attributes"));
+    query.addQueryItem(QStringLiteral("pageSize"),       QStringLiteral("10"));
+
+    QUrl url;
+    url.setScheme(QStringLiteral("https"));
+    url.setHost(endpoint);
+    url.setPath(QStringLiteral("/catalog/2022-04-01/items"));
+    url.setQuery(query);
+
+    QNetworkRequest req(url);
+    QString token;
+    co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
+    if (token.isEmpty()) co_return;
+    req.setRawHeader("x-amz-access-token", token.toUtf8());
+    req.setRawHeader("accept", "application/json");
+
+    qDebug() << "AmazonCatalogApi: searchCatalogForApparelAttrs" << url.toString();
+    QNetworkReply *reply = _nam()->get(req);
+    co_await qCoro(reply).waitForFinished();
+
+    const QByteArray data = reply->readAll();
+    const int httpStatus  = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    reply->deleteLater();
+
+    if (httpStatus != 200 || data.isEmpty()) {
+        qWarning() << "AmazonCatalogApi: searchCatalogForApparelAttrs HTTP" << httpStatus;
+        co_return;
+    }
+
+    const QJsonArray items =
+        QJsonDocument::fromJson(data).object().value(QStringLiteral("items")).toArray();
+
+    qDebug() << "searchCatalogForApparelAttrs: got" << items.size() << "items";
+    if (!items.isEmpty()) {
+        // Log first item's attributes to verify the key names returned by this API.
+        const QJsonObject firstAttrs = items.first().toObject().value(QStringLiteral("attributes")).toObject();
+        qDebug() << "searchCatalogForApparelAttrs: first item ASIN"
+                 << items.first().toObject().value(QStringLiteral("asin")).toString()
+                 << "attrs keys:" << firstAttrs.keys()
+                 << "| raw:" << QJsonDocument(firstAttrs).toJson(QJsonDocument::Compact).left(500);
+    }
+
+    // Return first item that has at least one of the wanted attrs filled.
+    for (const QJsonValue &val : items) {
+        const QJsonObject item  = val.toObject();
+        const QJsonObject attrs = item.value(QStringLiteral("attributes")).toObject();
+        CatalogApparelAttrs candidate;
+        candidate.sizeSystem = firstAttrValue(attrs, QStringLiteral("apparel_size_system"));
+        candidate.sizeClass  = firstAttrValue(attrs, QStringLiteral("apparel_size_class"));
+        candidate.gender     = firstEnglishAttrValue(attrs, QStringLiteral("target_gender"));
+        candidate.ageRange   = firstEnglishAttrValue(attrs, QStringLiteral("age_range_description"));
+        candidate.bodyType   = firstAttrValue(attrs, QStringLiteral("apparel_body_type"));
+        candidate.heightType = firstAttrValue(attrs, QStringLiteral("apparel_height_type"));
+
+        bool hasAny = false;
+        if (wantedAttrs.contains(QStringLiteral("apparel_size_system"))   && !candidate.sizeSystem.isEmpty()) hasAny = true;
+        if (wantedAttrs.contains(QStringLiteral("apparel_size_class"))    && !candidate.sizeClass.isEmpty())  hasAny = true;
+        if (wantedAttrs.contains(QStringLiteral("target_gender"))         && !candidate.gender.isEmpty())     hasAny = true;
+        if (wantedAttrs.contains(QStringLiteral("age_range_description")) && !candidate.ageRange.isEmpty())   hasAny = true;
+        if (wantedAttrs.contains(QStringLiteral("apparel_body_type"))     && !candidate.bodyType.isEmpty())   hasAny = true;
+        if (wantedAttrs.contains(QStringLiteral("apparel_height_type"))   && !candidate.heightType.isEmpty()) hasAny = true;
+
+        if (hasAny) {
+            *out = candidate;
+            if (foundAsin) *foundAsin = item.value(QStringLiteral("asin")).toString();
+            co_return;
+        }
+    }
     co_return;
 }
 
@@ -1095,6 +1233,8 @@ QCoro::Task<void>
 AmazonCatalogApi::patchListingParent(QString marketplaceId, QString childSku,
                                      QString productType, QString parentSku,
                                      QString variationTheme,
+                                     QString color, QString size, QString sizeSystem,
+                                     const QHash<QString,QString> &extraAttrs,
                                      bool* success, QString* detailsOut)
 {
     *success = false;
@@ -1143,6 +1283,57 @@ AmazonCatalogApi::patchListingParent(QString marketplaceId, QString childSku,
             {QStringLiteral("op"),    QStringLiteral("replace")},
             {QStringLiteral("path"),  QStringLiteral("/attributes/variation_theme")},
             {QStringLiteral("value"), QJsonArray{themeValue}},
+        });
+    }
+
+    if (!color.isEmpty()) {
+        const QJsonObject cv{{QStringLiteral("value"), color},
+                             {QStringLiteral("marketplace_id"), marketplaceId}};
+        patches.append(QJsonObject{
+            {QStringLiteral("op"),    QStringLiteral("replace")},
+            {QStringLiteral("path"),  QStringLiteral("/attributes/color_name")},
+            {QStringLiteral("value"), QJsonArray{cv}},
+        });
+    }
+
+    if (!size.isEmpty()) {
+        const QJsonObject sv{{QStringLiteral("value"), size},
+                             {QStringLiteral("marketplace_id"), marketplaceId}};
+        patches.append(QJsonObject{
+            {QStringLiteral("op"),    QStringLiteral("replace")},
+            {QStringLiteral("path"),  QStringLiteral("/attributes/apparel_size")},
+            {QStringLiteral("value"), QJsonArray{sv}},
+        });
+    }
+
+    if (!sizeSystem.isEmpty()) {
+        const QJsonObject ssv{{QStringLiteral("value"), sizeSystem},
+                              {QStringLiteral("marketplace_id"), marketplaceId}};
+        patches.append(QJsonObject{
+            {QStringLiteral("op"),    QStringLiteral("replace")},
+            {QStringLiteral("path"),  QStringLiteral("/attributes/apparel_size_system")},
+            {QStringLiteral("value"), QJsonArray{ssv}},
+        });
+    }
+
+    // Extra apparel attrs (apparel_size_class, target_gender, age_range_description, …)
+    static const QHash<QString,QString> kExtraAttrPaths{
+        {QStringLiteral("apparel_size_class"),    QStringLiteral("/attributes/apparel_size_class")},
+        {QStringLiteral("target_gender"),         QStringLiteral("/attributes/target_gender")},
+        {QStringLiteral("age_range_description"), QStringLiteral("/attributes/age_range_description")},
+        {QStringLiteral("apparel_body_type"),     QStringLiteral("/attributes/apparel_body_type")},
+        {QStringLiteral("apparel_height_type"),   QStringLiteral("/attributes/apparel_height_type")},
+    };
+    for (auto it = extraAttrs.constBegin(); it != extraAttrs.constEnd(); ++it) {
+        if (it.value().isEmpty()) continue;
+        const QString attrPath = kExtraAttrPaths.value(it.key());
+        if (attrPath.isEmpty()) continue;
+        const QJsonObject av{{QStringLiteral("value"), it.value()},
+                             {QStringLiteral("marketplace_id"), marketplaceId}};
+        patches.append(QJsonObject{
+            {QStringLiteral("op"),    QStringLiteral("replace")},
+            {QStringLiteral("path"),  attrPath},
+            {QStringLiteral("value"), QJsonArray{av}},
         });
     }
 
@@ -1360,6 +1551,106 @@ QCoro::Task<void> AmazonCatalogApi::fetchListingAttributes(
 }
 
 // ---------------------------------------------------------------------------
+// checkListing — GET /listings/…/{sku}?includedData=issues,relationships,summaries
+// Diagnostic: exposes Amazon's asynchronous validation issues and the actual
+// variation relationships. A PATCH/feed can return ACCEPTED yet fail async
+// validation — the failure reasons only ever appear here.
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonCatalogApi::checkListing(QString marketplaceId, QString sku,
+                                                 ListingCheck* out)
+{
+    *out = ListingCheck{};
+    const QString sellerId = sellerIdForMarketplace(marketplaceId);
+    if (sellerId.isEmpty()) co_return;
+
+    QString token;
+    co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
+    if (token.isEmpty()) co_return;
+
+    QUrl url;
+    url.setScheme(QStringLiteral("https"));
+    url.setHost(endpointForMarketplace(marketplaceId));
+    url.setPath(QStringLiteral("/listings/2021-08-01/items/%1/%2").arg(sellerId, sku));
+    QUrlQuery q;
+    q.addQueryItem(QStringLiteral("marketplaceIds"), marketplaceId);
+    q.addQueryItem(QStringLiteral("includedData"),
+                   QStringLiteral("issues,relationships,summaries"));
+    q.addQueryItem(QStringLiteral("issueLocale"), QStringLiteral("en_US"));
+    url.setQuery(q);
+
+    QNetworkRequest req(url);
+    req.setRawHeader("x-amz-access-token", token.toUtf8());
+    req.setRawHeader("accept", "application/json");
+
+    QNetworkReply* reply = _nam()->get(req);
+    co_await qCoro(reply).waitForFinished();
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QByteArray data = reply->readAll();
+    reply->deleteLater();
+
+    if (status == 404) {
+        // SKU has no listing on this marketplace — the key insight when a
+        // child references a parent SKU that simply doesn't exist there.
+        co_return;
+    }
+    if (status != 200) {
+        qWarning() << "checkListing:" << sku << "HTTP" << status << data.left(300);
+        out->issues << QStringLiteral("[HTTP %1] %2")
+                           .arg(status).arg(QString::fromUtf8(data.left(200)));
+        co_return;
+    }
+
+    out->exists = true;
+    const QJsonObject root = QJsonDocument::fromJson(data).object();
+
+    // summaries → status flags + item name
+    const QJsonArray summaries = root.value(QStringLiteral("summaries")).toArray();
+    if (!summaries.isEmpty()) {
+        const QJsonObject s0 = summaries.first().toObject();
+        QStringList statusFlags;
+        for (const QJsonValue &sv : s0.value(QStringLiteral("status")).toArray())
+            statusFlags << sv.toString();
+        out->status   = statusFlags.join(QStringLiteral(","));
+        out->itemName = s0.value(QStringLiteral("itemName")).toString();
+    }
+
+    // issues → human-readable list
+    for (const QJsonValue &iv : root.value(QStringLiteral("issues")).toArray()) {
+        const QJsonObject iobj = iv.toObject();
+        QStringList attrNames;
+        for (const QJsonValue &av : iobj.value(QStringLiteral("attributeNames")).toArray())
+            attrNames << av.toString();
+        QString line = QStringLiteral("[%1 %2] %3")
+                           .arg(iobj.value(QStringLiteral("severity")).toString(),
+                                iobj.value(QStringLiteral("code")).toString(),
+                                iobj.value(QStringLiteral("message")).toString());
+        if (!attrNames.isEmpty())
+            line += QStringLiteral(" (attrs: %1)").arg(attrNames.join(QStringLiteral(", ")));
+        out->issues << line;
+    }
+
+    // relationships → actual variation family membership
+    for (const QJsonValue &rv : root.value(QStringLiteral("relationships")).toArray()) {
+        const QJsonObject robj = rv.toObject();
+        for (const QJsonValue &relv : robj.value(QStringLiteral("relationships")).toArray()) {
+            const QJsonObject rel = relv.toObject();
+            if (rel.value(QStringLiteral("type")).toString() != QStringLiteral("VARIATION"))
+                continue;
+            const QJsonArray parents = rel.value(QStringLiteral("parentSkus")).toArray();
+            if (!parents.isEmpty() && out->parentSku.isEmpty())
+                out->parentSku = parents.first().toString();
+            for (const QJsonValue &cv : rel.value(QStringLiteral("childSkus")).toArray())
+                out->childSkus << cv.toString();
+            const QJsonObject theme = rel.value(QStringLiteral("variationTheme")).toObject();
+            if (out->variationTheme.isEmpty())
+                out->variationTheme = theme.value(QStringLiteral("theme")).toString();
+        }
+    }
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
 // fetchListingGtin — GET /listings/2021-08-01/items/{sellerId}/{sku}?includedData=attributes
 // Reads externally_assigned_product_identifier from the seller's own listing data.
 // Tries primary marketplace first, then other same-region markets, then the other region.
@@ -1551,26 +1842,8 @@ AmazonCatalogApi::uploadVariationFeed(QStringList marketplaceIds,
 {
     resultOut->clear();
 
-    if (marketplaceIds.isEmpty()) {
-        *resultOut = QStringLiteral("ERROR: no marketplaceIds");
-        co_return;
-    }
     if (entries.isEmpty()) {
         *resultOut = QStringLiteral("ERROR: no entries");
-        co_return;
-    }
-
-    // Region is determined by the first marketplace (all marketplaceIds in a
-    // single feed must belong to the same region).
-    const QString primaryMpId  = marketplaceIds.first();
-    const QString endpointHost = endpointForMarketplace(primaryMpId);
-    const QString lwaRegion    = lwaRegionForMarketplace(primaryMpId);
-    const QString sellerId     = sellerIdForMarketplace(primaryMpId);
-
-    QString token;
-    co_await _getAccessToken(lwaRegion, &token);
-    if (token.isEmpty()) {
-        *resultOut = QStringLiteral("ERROR: failed to obtain LWA access token");
         co_return;
     }
 
@@ -1644,6 +1917,46 @@ AmazonCatalogApi::uploadVariationFeed(QStringList marketplaceIds,
         });
     }
 
+    co_await submitJsonListingsFeed(marketplaceIds, messages, resultOut);
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
+// submitJsonListingsFeed — generic JSON_LISTINGS_FEED submission.
+// Takes pre-built feed messages; handles document creation, S3 upload, feed
+// submission, polling and result-report download/summary.
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void>
+AmazonCatalogApi::submitJsonListingsFeed(QStringList marketplaceIds,
+                                          QJsonArray messages,
+                                          QString* resultOut)
+{
+    resultOut->clear();
+
+    if (marketplaceIds.isEmpty()) {
+        *resultOut = QStringLiteral("ERROR: no marketplaceIds");
+        co_return;
+    }
+    if (messages.isEmpty()) {
+        *resultOut = QStringLiteral("ERROR: no messages");
+        co_return;
+    }
+
+    // Region is determined by the first marketplace (all marketplaceIds in a
+    // single feed must belong to the same region).
+    const QString primaryMpId  = marketplaceIds.first();
+    const QString endpointHost = endpointForMarketplace(primaryMpId);
+    const QString lwaRegion    = lwaRegionForMarketplace(primaryMpId);
+    const QString sellerId     = sellerIdForMarketplace(primaryMpId);
+
+    QString token;
+    co_await _getAccessToken(lwaRegion, &token);
+    if (token.isEmpty()) {
+        *resultOut = QStringLiteral("ERROR: failed to obtain LWA access token");
+        co_return;
+    }
+
     const QJsonObject feedBody{
         {QStringLiteral("header"), QJsonObject{
             {QStringLiteral("sellerId"),    sellerId},
@@ -1654,7 +1967,15 @@ AmazonCatalogApi::uploadVariationFeed(QStringList marketplaceIds,
     };
     const QByteArray feedBytes = QJsonDocument(feedBody).toJson(QJsonDocument::Compact);
 
-    qDebug() << "AmazonCatalogApi::uploadVariationFeed: JSON body (" << feedBytes.size() << "bytes):\n"
+    // Keep a copy of every submitted feed on disk for diagnosis.
+    {
+        const QString ts = QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd'T'HHmmss'Z'"));
+        QFile f(QStringLiteral("/tmp/sp-api-feed-body-%1.json").arg(ts));
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text))
+            f.write(QJsonDocument(feedBody).toJson(QJsonDocument::Indented));
+    }
+
+    qDebug() << "AmazonCatalogApi::submitJsonListingsFeed: JSON body (" << feedBytes.size() << "bytes):\n"
              << QString::fromUtf8(feedBytes);
 
     // 1. Create the feed document (request a presigned upload URL)
@@ -3802,8 +4123,8 @@ QCoro::Task<void> AmazonCatalogApi::_fetchListingAttributesFull(
     item->isParent = (firstValue(QStringLiteral("parentage_level")) == QStringLiteral("parent"));
 
     item->brand  = firstValue(QStringLiteral("brand"));
-    item->gender = firstValue(QStringLiteral("target_gender"));
-    item->age    = firstValue(QStringLiteral("age_range_description"));
+    item->gender = firstEnglishAttrValue(attrs, QStringLiteral("target_gender"));
+    item->age    = firstEnglishAttrValue(attrs, QStringLiteral("age_range_description"));
 
     item->color = firstValue(QStringLiteral("color_name"));
     if (item->color.isEmpty())

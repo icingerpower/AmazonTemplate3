@@ -16,6 +16,7 @@
 #include "gui/DialogEditPrompts.h"
 #include "BrokenChildTable.h"
 #include "AmazonMarketplace.h"
+#include "fillers/FillerSize.h"
 #include <QTableView>
 #include <QHeaderView>
 #include <QUuid>
@@ -29,6 +30,8 @@
 #include <QLabel>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
+#include <QGridLayout>
+#include <QFormLayout>
 #include <QSpacerItem>
 #include <QPainter>
 #include <QPixmap>
@@ -79,6 +82,8 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QUrl>
+#include <QGroupBox>
+#include <QUrlQuery>
 #include <QButtonGroup>
 #include <QTreeView>
 #include <QHeaderView>
@@ -295,6 +300,11 @@ PaneSizing::PaneSizing(QWidget *parent)
             this, &PaneSizing::onFixImagesClicked);
     connect(ui->buttonFixLog, &QPushButton::clicked,
             this, &PaneSizing::onFixLogClicked);
+    connect(ui->buttonBrowseBrokenTemplate, &QPushButton::clicked,
+            this, &PaneSizing::onBrowseBrokenTemplateClicked);
+    connect(ui->comboBoxBrokenAttrMarket,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &PaneSizing::onBrokenAttrMarketChanged);
 
     _rebuildMeasurementForm();
     updateButtonStates();
@@ -456,10 +466,15 @@ static void injectColorImageHints(QList<ImageSlotSpec> &imageSpecs,
         }
     }
 
-    static const QString kPrefix = QStringLiteral("image_color_");
+    static const QString kColorPrefix  = QStringLiteral("image_color_");
+    static const QString kDetailPrefix = QStringLiteral("image_detail_");
     for (ImageSlotSpec &spec : imageSpecs) {
-        if (!spec.elementId.startsWith(kPrefix)) continue;
-        const QString colorId = spec.elementId.mid(kPrefix.size()); // e.g. "blue-floral"
+        const bool isColor  = spec.elementId.startsWith(kColorPrefix);
+        const bool isDetail = spec.elementId.startsWith(kDetailPrefix);
+        if (!isColor && !isDetail) continue;
+        const QString colorId = isColor
+            ? spec.elementId.mid(kColorPrefix.size())
+            : spec.elementId.mid(kDetailPrefix.size()); // e.g. "blue-floral"
 
         QStringList refPaths;
         for (const QString &f : productDir.entryList(QDir::Files)) {
@@ -625,6 +640,23 @@ void PaneSizing::_loadProductSettings()
     m_aplusExcludedColors = s.value(QStringLiteral("aplus/excluded_colors"))
         .toString().split(QLatin1Char(','), Qt::SkipEmptyParts);
 
+    const QString savedTpl = s.value(QStringLiteral("brokenChild/templatePath")).toString();
+    if (!savedTpl.isEmpty())
+        ui->lineEditBrokenTemplate->setText(savedTpl);
+
+    // Restore attribute-source marketplace: product settings.ini takes priority, then global.
+    const QString savedMpId = s.contains(QStringLiteral("brokenChild/attrMarketplace"))
+        ? s.value(QStringLiteral("brokenChild/attrMarketplace")).toString()
+        : QSettings().value(QStringLiteral("brokenChild/attrMarketplace")).toString();
+    if (!savedMpId.isEmpty()) {
+        for (int i = 0; i < ui->comboBoxBrokenAttrMarket->count(); ++i) {
+            if (ui->comboBoxBrokenAttrMarket->itemData(i).toString() == savedMpId) {
+                ui->comboBoxBrokenAttrMarket->setCurrentIndex(i);
+                break;
+            }
+        }
+    }
+
     if (!s.contains(QStringLiteral("sizing/type")))
         return;
 
@@ -702,6 +734,7 @@ void PaneSizing::_ensureModel(const QDir &dir)
         ui->tableViewBrokenChild->setModel(m_brokenChildTable);
         ui->tableViewBrokenChild->horizontalHeader()->setStretchLastSection(true);
         ui->tableViewBrokenChild->verticalHeader()->hide();
+        _refreshBrokenAttrCombo();
     }
 
     connect(m_treeModel.get(), &TreeSizingAsins::marketplacesChecked,
@@ -1323,8 +1356,11 @@ void PaneSizing::onLoadSubFolderClicked()
         QString    category;
         QString    folderName;
         QString    asin;
-        bool       euParentFailed = false;  // any EU mp has exists+!hasParent
-        bool       amParentFailed = false;  // any AM mp has exists+!hasParent
+        bool       euParentFailed     = false;  // any EU mp has exists+!hasParent
+        bool       amParentFailed     = false;  // any AM mp has exists+!hasParent
+        bool       sizeImageGenerated = false;  // aplus/size_chart/size_chart.png exists
+        bool       sizeImageUploaded  = false;  // sizing/sizeImageUploaded set in settings.ini
+        QDateTime  aplusUploadedAt;             // aplus/uploadedAt set in settings.ini
     };
     QList<SubFolderEntry> entries;
 
@@ -1387,6 +1423,17 @@ void PaneSizing::onLoadSubFolderClicked()
             }
         }
 
+        // Size image upload status
+        e.sizeImageGenerated = QFileInfo::exists(
+            fi.filePath() + QStringLiteral("/aplus/size_chart/size_chart.png"));
+        e.sizeImageUploaded = ini.contains(QStringLiteral("sizing/sizeImageUploaded"));
+
+        // A+ content upload date
+        const QVariant aplusUploadedVar = ini.value(QStringLiteral("aplus/uploadedAt"));
+        if (aplusUploadedVar.isValid() && !aplusUploadedVar.toString().isEmpty())
+            e.aplusUploadedAt = QDateTime::fromString(
+                aplusUploadedVar.toString(), Qt::ISODate);
+
         entries.append(e);
     }
 
@@ -1408,9 +1455,9 @@ void PaneSizing::onLoadSubFolderClicked()
     dlg.resize(900, 480);
     auto *layout = new QVBoxLayout(&dlg);
 
-    auto *table = new QTableWidget(entries.size(), 5, &dlg);
+    auto *table = new QTableWidget(entries.size(), 7, &dlg);
     table->setHorizontalHeaderLabels(
-        {tr("Date"), tr("Category"), tr("EU Parent"), tr("America"), tr("Folder")});
+        {tr("Date"), tr("Category"), tr("EU Parent"), tr("America"), tr("Size Image"), tr("A+ Upload"), tr("Folder")});
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setSelectionMode(QAbstractItemView::SingleSelection);
     table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -1441,12 +1488,41 @@ void PaneSizing::onLoadSubFolderClicked()
                 it->setBackground(QColor(220, 60, 60));
             table->setItem(i, 3, it);
         }
-        table->setItem(i, 4, new QTableWidgetItem(e.folderName));
+        // Size Image upload status column
+        {
+            auto *it = new QTableWidgetItem();
+            it->setTextAlignment(Qt::AlignCenter);
+            if (!e.sizeImageGenerated) {
+                it->setText(QStringLiteral("—"));
+            } else if (e.sizeImageUploaded) {
+                it->setText(QStringLiteral("✓"));
+                it->setForeground(QColor(46, 125, 50));   // dark green
+            } else {
+                it->setText(QStringLiteral("✗"));
+                it->setBackground(QColor(220, 60, 60));
+            }
+            table->setItem(i, 4, it);
+        }
+        // A+ Upload column
+        {
+            auto *it = new QTableWidgetItem();
+            it->setTextAlignment(Qt::AlignCenter);
+            if (e.aplusUploadedAt.isValid()) {
+                it->setText(e.aplusUploadedAt.toString(QStringLiteral("yyyy-MM-dd")));
+                it->setForeground(QColor(46, 125, 50));   // dark green
+            } else {
+                it->setText(QStringLiteral("—"));
+            }
+            table->setItem(i, 5, it);
+        }
+        table->setItem(i, 6, new QTableWidgetItem(e.folderName));
     }
     table->resizeColumnToContents(0);
     table->resizeColumnToContents(1);
     table->resizeColumnToContents(2);
     table->resizeColumnToContents(3);
+    table->resizeColumnToContents(4);
+    table->resizeColumnToContents(5);
     table->selectRow(0);
     layout->addWidget(table);
 
@@ -2527,9 +2603,10 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
             }
 
             // --- FAQ text (kept separate for retry on keyword violations) ---
+            // faqKey is hoisted so the retry loop can use it for pushVersion.
+            const QString faqKey = APlusUploadDialog::faqLangKeyForMarketplace(mpId);
             QString faqText;
             if (addFaq) {
-                const QString faqKey = APlusUploadDialog::faqLangKeyForMarketplace(mpId);
                 const auto *faq = findAplusElement(infos, APlusElementType::Faq,
                     QStringLiteral("faq_") + faqKey, QStringLiteral("faq"));
                 if (!faq) {
@@ -2573,6 +2650,45 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                 if (!smallAsin.isEmpty())
                     docName = smallAsin + QStringLiteral(" - ") + docName;
             }
+
+            // Persist a rewritten FAQ as a new version so it survives restart.
+            // Called after every successful in-upload rewrite.
+            QTextEdit *const faqLogPtr = progressUi.logPtr;
+            auto saveFaqRewrite = [this, &faqKey, faqLogPtr](const QString &text) {
+                if (!m_aplusContent || text.isEmpty()) {
+                    appendAplusLog(faqLogPtr, tr("  ⚠ saveFaqRewrite: skipped (no content or empty text)"));
+                    return;
+                }
+                QDir aplusDir = m_aplusContent->dir();
+                appendAplusLog(faqLogPtr, tr("  ℹ saveFaqRewrite: dir=%1").arg(aplusDir.absolutePath()));
+                if (!aplusDir.mkpath(QStringLiteral("faq"))) {
+                    appendAplusLog(faqLogPtr, tr("  ⚠ saveFaqRewrite: mkpath faq/ failed"));
+                    return;
+                }
+                const QString sfx = (faqKey == QLatin1String("en"))
+                    ? QString{} : QLatin1Char('_') + faqKey;
+                const QString relPath = QStringLiteral("faq/v_") + _aplusTimestamp()
+                                      + sfx + QStringLiteral(".txt");
+                const QString absPath = aplusDir.filePath(relPath);
+                {
+                    QFile f(absPath);
+                    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                        appendAplusLog(faqLogPtr, tr("  ⚠ saveFaqRewrite: cannot write %1").arg(absPath));
+                        return;
+                    }
+                    f.write(text.toUtf8());
+                }
+                APlusVersion ver;
+                ver.generated   = QDateTime::currentDateTime();
+                ver.desktopFile = ver.mobileFile = relPath;
+                const QString elemId  = QStringLiteral("faq_") + faqKey;
+                const APlusElement *e = m_aplusContent->findElement(elemId);
+                const QString dispName = e ? e->displayName
+                                           : tr("FAQ (%1)").arg(faqKey);
+                m_aplusContent->pushVersion(elemId, APlusElementType::Faq, dispName, ver);
+                if (m_aplusModel) _rebuildAplusModel();
+                appendAplusLog(faqLogPtr, tr("  ✓ saveFaqRewrite: saved %1").arg(relPath));
+            };
 
             // === Create / validate / submit — retried on FAQ keyword violations ===
             const int kMaxFaqRetries = 5;
@@ -2678,10 +2794,16 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                                 tr("  ↩ FAQ rejected (attempt %1/%2) — forbidden: %3 — regenerating…")
                                     .arg(faqAttempt).arg(kMaxFaqRetries)
                                     .arg(blocked.join(QStringLiteral(", "))));
+                            appendAplusLog(progressUi.logPtr,
+                                tr("  ℹ FAQ sent for rewrite:\n%1")
+                                    .arg(faqText.left(1000)));
                             // Pass ALL accumulated forbidden words so the model doesn't
                             // reintroduce words that were banned in earlier rounds.
                             const QString rewritePrompt =
                                 QStringLiteral("Rewrite the following Amazon A+ Content FAQ.\n"
+                                               "Keep the SAME language as the input (language code: ")
+                                + faqKey
+                                + QStringLiteral(").\n"
                                                "The words/phrases below are STRICTLY forbidden by Amazon's "
                                                "community guidelines and MUST NOT appear anywhere in the output "
                                                "(this list grows with each rejection round — honour all of them): ")
@@ -2712,37 +2834,208 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                             }
                             const CliRunResult r = co_await qCoro(cliFuture).result();
                             const QString newFaq = extractFaqContent(r.output.trimmed());
+                            appendAplusLog(progressUi.logPtr,
+                                tr("  ℹ CLI rewrite output:\n%1")
+                                    .arg(r.output.trimmed().left(1000)));
                             if (!newFaq.isEmpty()) {
                                 faqText = newFaq;
-                                continue; // retry with regenerated FAQ
+                                saveFaqRewrite(newFaq);
+                                // Pre-flight: verify no blocked keyword survived (saves an Amazon slot)
+                                bool preflightFailed = false;
+                                QString preflightPrompt;
+                                {
+                                    const QString lowerFaq = faqText.toLower();
+                                    QStringList still;
+                                    for (const QString &kw : std::as_const(allBlockedKeywords))
+                                        if (lowerFaq.contains(kw.toLower()))
+                                            still.append(kw);
+                                    if (!still.isEmpty()) {
+                                        preflightFailed = true;
+                                        appendAplusLog(progressUi.logPtr,
+                                            tr("  ⚠ Rewrite still contains %1 — targeted re-rewrite…")
+                                                .arg(still.join(QStringLiteral(", "))));
+                                        preflightPrompt =
+                                            QStringLiteral("CRITICAL: The FAQ below STILL contains the "
+                                                           "forbidden word(s): ")
+                                            + still.join(QStringLiteral(", "))
+                                            + QStringLiteral(".\nSearch EVERY line for these words and any "
+                                                             "compound forms that include them as a substring. "
+                                                             "Replace EACH occurrence with a different synonym. "
+                                                             "Keep the Q:/A: format and all pairs unchanged.\n"
+                                                             "Return ONLY the corrected FAQ.\n\n")
+                                            + faqText;
+                                    }
+                                } // lowerFaq, still destroyed
+                                if (preflightFailed) {
+                                    QPromise<CliRunResult> fixProm;
+                                    fixProm.start();
+                                    QFuture<CliRunResult> fixFut = fixProm.future();
+                                    {
+                                        auto sp2 = QSharedPointer<QPromise<CliRunResult>>::create(
+                                            std::move(fixProm));
+                                        cli->runPromptAsync(preflightPrompt, faqWorkDir, this,
+                                            [sp2](CliRunResult r2) mutable {
+                                                sp2->addResult(std::move(r2));
+                                                sp2->finish();
+                                            });
+                                    }
+                                    const CliRunResult fixR = co_await qCoro(fixFut).result();
+                                    const QString fixedFaq = extractFaqContent(fixR.output.trimmed());
+                                    appendAplusLog(progressUi.logPtr,
+                                        tr("  ℹ Targeted re-rewrite:\n%1")
+                                            .arg(fixR.output.trimmed().left(800)));
+                                    if (!fixedFaq.isEmpty()) {
+                                        faqText = fixedFaq;
+                                        saveFaqRewrite(fixedFaq);
+                                    }
+                                }
+                                continue; // retry with (possibly re-rewritten) FAQ
                             }
                             appendAplusLog(progressUi.logPtr,
                                 tr("  ⚠ CLI rewrite returned empty output — keeping original FAQ"));
                         }
 
                         // All retries exhausted (or no CLI / non-keyword failure).
-                        // If a FAQ was involved, ask whether to skip it or abort.
+                        // If a FAQ was involved, let the user skip, regenerate, or abort.
                         if (!allBlockedKeywords.isEmpty() && !faqText.isEmpty()) {
-                            const QString detail = tr(
-                                "The FAQ was rejected by Amazon %1 time(s).\n\n"
-                                "All forbidden words found: %2\n\n"
-                                "Skip FAQ and upload without it, or interrupt the entire upload?")
-                                    .arg(faqAttempt)
-                                    .arg(allBlockedKeywords.join(QStringLiteral(", ")));
-                            const auto btn = QMessageBox::question(
-                                this,
-                                tr("FAQ blocked by Amazon"),
-                                detail,
-                                QMessageBox::Ignore | QMessageBox::Abort,
-                                QMessageBox::Ignore);
-                            if (btn == QMessageBox::Abort) {
+                            bool userSkippedFaq = false;
+                            while (true) {
+                                const QString detail = tr(
+                                    "The FAQ was rejected by Amazon %1 time(s).\n\n"
+                                    "All forbidden words found: %2\n\n"
+                                    "Skip FAQ and upload without it, regenerate and retry, "
+                                    "or interrupt the entire upload?")
+                                        .arg(faqAttempt)
+                                        .arg(allBlockedKeywords.join(QStringLiteral(", ")));
+                                bool doAbort = false, doSkip = false;
+                                {
+                                    // Scoped so QMessageBox is destroyed before co_await.
+                                    QMessageBox msgBox(this);
+                                    msgBox.setWindowTitle(tr("FAQ blocked by Amazon"));
+                                    msgBox.setText(detail);
+                                    QPushButton *skipBtn  = msgBox.addButton(tr("Skip FAQ"),   QMessageBox::AcceptRole);
+                                    QPushButton *regenBtn = msgBox.addButton(tr("Regenerate"), QMessageBox::ActionRole);
+                                    QPushButton *abortBtn = msgBox.addButton(tr("Interrupt"),  QMessageBox::RejectRole);
+                                    msgBox.setDefaultButton(cli ? regenBtn : skipBtn);
+                                    if (!cli) regenBtn->setEnabled(false);
+                                    msgBox.exec();
+                                    const QAbstractButton *clicked = msgBox.clickedButton();
+                                    doAbort = (clicked == abortBtn);
+                                    doSkip  = (clicked == skipBtn);
+                                }
+                                if (doAbort) {
+                                    appendAplusLog(progressUi.logPtr,
+                                        tr("  ✗ Upload interrupted by user."));
+                                    co_return;
+                                }
+                                if (doSkip) {
+                                    userSkippedFaq = true;
+                                    break;
+                                }
+                                // Regenerate: same rewrite logic as the auto-retry above.
                                 appendAplusLog(progressUi.logPtr,
-                                    tr("  ✗ Upload interrupted by user."));
-                                co_return;
+                                    tr("  ↩ Manual FAQ regeneration — forbidden: %1…")
+                                        .arg(allBlockedKeywords.join(QStringLiteral(", "))));
+                                appendAplusLog(progressUi.logPtr,
+                                    tr("  ℹ FAQ sent for rewrite:\n%1")
+                                        .arg(faqText.left(1000)));
+                                const QString rewritePrompt =
+                                    QStringLiteral("Rewrite the following Amazon A+ Content FAQ.\n"
+                                                   "Keep the SAME language as the input (language code: ")
+                                    + faqKey
+                                    + QStringLiteral(").\n"
+                                                   "The words/phrases below are STRICTLY forbidden by Amazon's "
+                                                   "community guidelines and MUST NOT appear anywhere in the output "
+                                                   "(this list grows with each rejection round — honour all of them): ")
+                                    + allBlockedKeywords.join(QStringLiteral(", "))
+                                    + QStringLiteral(".\n\n"
+                                                   "Rules:\n"
+                                                   "- Replace or rephrase every sentence containing a forbidden word\n"
+                                                   "- Keep all Q&A pairs\n"
+                                                   "- Keep the Q:/A: format exactly\n"
+                                                   "- Return ONLY the FAQ, no extra text\n\n")
+                                    + faqText;
+                                QPromise<CliRunResult> cliPromise2;
+                                cliPromise2.start();
+                                QFuture<CliRunResult> cliFuture2 = cliPromise2.future();
+                                {
+                                    auto sp = QSharedPointer<QPromise<CliRunResult>>::create(
+                                        std::move(cliPromise2));
+                                    cli->runPromptAsync(rewritePrompt, faqWorkDir, this,
+                                        [sp](CliRunResult r) mutable {
+                                            sp->addResult(std::move(r));
+                                            sp->finish();
+                                        });
+                                }
+                                const CliRunResult r2 = co_await qCoro(cliFuture2).result();
+                                const QString newFaq = extractFaqContent(r2.output.trimmed());
+                                appendAplusLog(progressUi.logPtr,
+                                    tr("  ℹ CLI rewrite output:\n%1")
+                                        .arg(r2.output.trimmed().left(1000)));
+                                if (!newFaq.isEmpty()) {
+                                    faqText = newFaq;
+                                    saveFaqRewrite(newFaq);
+                                    // Pre-flight: verify no blocked keyword survived
+                                    bool preflightFailed2 = false;
+                                    QString preflightPrompt2;
+                                    {
+                                        const QString lowerFaq2 = faqText.toLower();
+                                        QStringList still2;
+                                        for (const QString &kw : std::as_const(allBlockedKeywords))
+                                            if (lowerFaq2.contains(kw.toLower()))
+                                                still2.append(kw);
+                                        if (!still2.isEmpty()) {
+                                            preflightFailed2 = true;
+                                            appendAplusLog(progressUi.logPtr,
+                                                tr("  ⚠ Rewrite still contains %1 — targeted re-rewrite…")
+                                                    .arg(still2.join(QStringLiteral(", "))));
+                                            preflightPrompt2 =
+                                                QStringLiteral("CRITICAL: The FAQ below STILL contains the "
+                                                               "forbidden word(s): ")
+                                                + still2.join(QStringLiteral(", "))
+                                                + QStringLiteral(".\nSearch EVERY line for these words and any "
+                                                                 "compound forms that include them as a substring. "
+                                                                 "Replace EACH occurrence with a different synonym. "
+                                                                 "Keep the Q:/A: format and all pairs unchanged.\n"
+                                                                 "Return ONLY the corrected FAQ.\n\n")
+                                                + faqText;
+                                        }
+                                    } // lowerFaq2, still2 destroyed
+                                    if (preflightFailed2) {
+                                        QPromise<CliRunResult> fixProm2;
+                                        fixProm2.start();
+                                        QFuture<CliRunResult> fixFut2 = fixProm2.future();
+                                        {
+                                            auto sp3 = QSharedPointer<QPromise<CliRunResult>>::create(
+                                                std::move(fixProm2));
+                                            cli->runPromptAsync(preflightPrompt2, faqWorkDir, this,
+                                                [sp3](CliRunResult r3) mutable {
+                                                    sp3->addResult(std::move(r3));
+                                                    sp3->finish();
+                                                });
+                                        }
+                                        const CliRunResult fixR2 = co_await qCoro(fixFut2).result();
+                                        const QString fixedFaq2 = extractFaqContent(fixR2.output.trimmed());
+                                        appendAplusLog(progressUi.logPtr,
+                                            tr("  ℹ Targeted re-rewrite:\n%1")
+                                                .arg(fixR2.output.trimmed().left(800)));
+                                        if (!fixedFaq2.isEmpty()) {
+                                            faqText = fixedFaq2;
+                                            saveFaqRewrite(fixedFaq2);
+                                        }
+                                    }
+                                    ++faqAttempt;
+                                    break; // retry upload with regenerated FAQ
+                                }
+                                appendAplusLog(progressUi.logPtr,
+                                    tr("  ⚠ CLI rewrite returned empty output — try again or skip."));
+                                // loop back to show dialog again
                             }
-                            faqText.clear();
-                            appendAplusLog(progressUi.logPtr,
-                                tr("  ↩ Retrying without FAQ…"));
+                            if (userSkippedFaq) {
+                                faqText.clear();
+                                appendAplusLog(progressUi.logPtr,
+                                    tr("  ↩ Retrying without FAQ…"));
+                            }
                             continue;
                         }
 
@@ -2763,6 +3056,13 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
 
     setAplusStatus(progressUi, tr("Done!"), totalSteps);
     appendAplusLog(progressUi.logPtr, tr("✓ All uploads complete."));
+
+    if (m_productWorkingDir.exists()) {
+        QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                    QSettings::IniFormat);
+        s.setValue(QStringLiteral("aplus/uploadedAt"),
+                   QDateTime::currentDateTime().toString(Qt::ISODate));
+    }
 
     // Warn if size images exist for this product but have never been uploaded.
     if (!m_groupImages.isEmpty()) {
@@ -3251,6 +3551,24 @@ static QList<PaneSizing::SizeChartTarget> buildSizeChartTargets(
 // The AI sometimes prefixes its answer with progress reports or file-link summaries.
 // We detect the first line that starts with "Q" followed by optional whitespace and ":",
 // which reliably marks the beginning of the FAQ content regardless of language.
+static QString sanitizeFaqText(const QString &text)
+{
+    QString out = text;
+    // Replace typographic dashes with plain hyphen-dash
+    out.replace(QChar(0x2014), QStringLiteral(" - ")); // em-dash —
+    out.replace(QChar(0x2013), QStringLiteral(" - ")); // en-dash –
+    // Strip markdown bold (**text** → text) and italic (*text* → text)
+    out.replace(QRegularExpression(QStringLiteral("\\*\\*(.+?)\\*\\*")), QStringLiteral("\\1"));
+    out.replace(QRegularExpression(QStringLiteral("\\*([^*\n]+)\\*")), QStringLiteral("\\1"));
+    // Strip markdown headers (## Heading → Heading)
+    out.replace(QRegularExpression(QStringLiteral("(?m)^#{1,6}\\s*")), QString{});
+    // Remove markdown horizontal-rule lines (--- / ***)
+    out.replace(QRegularExpression(QStringLiteral("(?m)^[-*]{3,}\\s*$")), QString{});
+    // Collapse 3+ blank lines down to one
+    out.replace(QRegularExpression(QStringLiteral("\n{3,}")), QStringLiteral("\n\n"));
+    return out.trimmed();
+}
+
 static QString extractFaqContent(const QString &raw)
 {
     const QStringList lines = raw.split(QLatin1Char('\n'));
@@ -3258,10 +3576,10 @@ static QString extractFaqContent(const QString &raw)
         const QString trimmed = lines.at(i).trimmed();
         if (trimmed.length() >= 3 && trimmed[0] == QLatin1Char('Q')
                 && (trimmed[1] == QLatin1Char(':') || trimmed[1] == QLatin1Char(' '))) {
-            return lines.mid(i).join(QLatin1Char('\n')).trimmed();
+            return sanitizeFaqText(lines.mid(i).join(QLatin1Char('\n')).trimmed());
         }
     }
-    return raw; // no Q: pattern found — return as-is
+    return sanitizeFaqText(raw); // no Q: pattern found — sanitize and return as-is
 }
 
 static QString makeFaqFormatPrompt(const QString &text)
@@ -3431,7 +3749,8 @@ void PaneSizing::onAplusGenerateAll()
     faqPrompt += tr("Generate a concise, engaging Amazon A+ Content FAQ section for "
                     "this product in English. Output as a list of question/answer pairs in plain text. "
                     "For any measurements (height, chest, weight, foot length, etc.), always include "
-                    "both metric and imperial equivalents, e.g. \"165–175 cm (65–69 in)\" or \"86 cm (34 in)\".");
+                    "both metric and imperial equivalents, e.g. \"165–175 cm (65–69 in)\" or \"86 cm (34 in)\". "
+                    "IMPORTANT: do NOT use em-dashes (—) anywhere in the output; use a comma or rewrite the sentence instead.");
 
     // --- Prompt review dialog ---
     // For clothing: show one representative prompt per workflow step (desktop only).
@@ -3442,7 +3761,7 @@ void PaneSizing::onAplusGenerateAll()
             groupShotPreview = spec.desktopPrompt;
         else if (spec.elementId.startsWith(QStringLiteral("image_color_")) && perColorPreview.isEmpty())
             perColorPreview = spec.desktopPrompt;
-        else if (spec.elementId == QStringLiteral("image_detail") && detailPreview.isEmpty())
+        else if (spec.elementId.startsWith(QStringLiteral("image_detail_")) && detailPreview.isEmpty())
             detailPreview = spec.desktopPrompt;
         else if (spec.elementId == QStringLiteral("image_aspirational") && aspirationalPreview.isEmpty())
             aspirationalPreview = spec.desktopPrompt;
@@ -3525,6 +3844,7 @@ void PaneSizing::onAplusGenerateAll()
     struct FailedEntry {
         CliTask              task;       // original task — can be re-run as-is
         std::function<void()> fillBlack; // alternative: write a black PNG and push it
+        QString              cliOutput;  // what the CLI printed (for diagnosis)
     };
     auto failedEntries = QSharedPointer<QList<FailedEntry>>::create();
 
@@ -3559,7 +3879,9 @@ void PaneSizing::onAplusGenerateAll()
                 desktopTask.label   = (vCount > 1)
                     ? tr("Desktop image — %1 (v%2)").arg(displayName).arg(v + 1)
                     : tr("Desktop image — %1").arg(displayName);
-                desktopTask.prompt  = spec.desktopPrompt;
+                desktopTask.prompt  = spec.desktopPrompt
+                    + QStringLiteral("\n\nOUTPUT PATH: Save the final image to this exact absolute path: ")
+                    + elemDir.absoluteFilePath(QStringLiteral("desktop.png"));
                 desktopTask.workDir = elemWorkDir;
                 desktopTask.onBefore = [beforeSnap, elemDir]() {
                     *beforeSnap = elemDir.entryList({QStringLiteral("*.png"),
@@ -3610,8 +3932,10 @@ void PaneSizing::onAplusGenerateAll()
                     desktopTask.onDone = [origDone, filePair, origTask, fillBlackFn, failedEntries]
                                          (CliRunResult r) {
                         origDone(r);
-                        if (filePair->first.isEmpty())
-                            failedEntries->append({origTask, fillBlackFn});
+                        if (filePair->first.isEmpty()) {
+                            const QString out = (r.output + r.errorOutput).trimmed();
+                            failedEntries->append({origTask, fillBlackFn, out});
+                        }
                     };
                 }
                 tasks.append(desktopTask);
@@ -3622,7 +3946,9 @@ void PaneSizing::onAplusGenerateAll()
                 mobileTask.label   = (vCount > 1)
                     ? tr("Mobile image — %1 (v%2)").arg(displayName).arg(v + 1)
                     : tr("Mobile image — %1").arg(displayName);
-                mobileTask.prompt  = spec.mobilePrompt;
+                mobileTask.prompt  = spec.mobilePrompt
+                    + QStringLiteral("\n\nOUTPUT PATH: Save the final image to this exact absolute path: ")
+                    + elemDir.absoluteFilePath(QStringLiteral("mobile.png"));
                 mobileTask.workDir = elemWorkDir;
                 mobileTask.onBefore = [beforeSnap, elemDir]() {
                     *beforeSnap = elemDir.entryList({QStringLiteral("*.png"),
@@ -3683,8 +4009,10 @@ void PaneSizing::onAplusGenerateAll()
                     mobileTask.onDone = [origDone, filePair, origTask, fillBlackFn, failedEntries]
                                         (CliRunResult r) {
                         origDone(r);
-                        if (filePair->second.isEmpty())
-                            failedEntries->append({origTask, fillBlackFn});
+                        if (filePair->second.isEmpty()) {
+                            const QString out = (r.output + r.errorOutput).trimmed();
+                            failedEntries->append({origTask, fillBlackFn, out});
+                        }
                     };
                 }
                 tasks.append(mobileTask);
@@ -3758,6 +4086,7 @@ void PaneSizing::onAplusGenerateAll()
                    + QStringLiteral(". Keep the question/answer format. "
                                     "Use metric units only — remove any imperial equivalents "
                                     "(e.g. write \"165–175 cm\" not \"165–175 cm (65–69 in)\"). "
+                                    "Do NOT use em-dashes (—) anywhere; use a comma or rewrite the sentence instead. "
                                     "Return only the translated text, no extra commentary.\n\n")
                    + base;
         };
@@ -3994,8 +4323,15 @@ void PaneSizing::onAplusGenerateAll()
             // --- Recovery dialog if any image tasks produced no output ---
             if (!failedEntries->isEmpty() && selfPtr) {
                 QStringList failedLabels;
-                for (const auto &e : std::as_const(*failedEntries))
+                for (const auto &e : std::as_const(*failedEntries)) {
                     failedLabels << e.task.label;
+                    // Log what the CLI actually said for each failed task
+                    if (!e.cliOutput.isEmpty())
+                        appendLog(QObject::tr("  ⚠ %1 — CLI said: %2")
+                                      .arg(e.task.label, e.cliOutput.left(300)));
+                    else
+                        appendLog(QObject::tr("  ⚠ %1 — CLI produced no output").arg(e.task.label));
+                }
 
                 QMessageBox box(selfPtr);
                 box.setWindowTitle(QObject::tr("Some images failed to generate"));
@@ -4027,8 +4363,17 @@ void PaneSizing::onAplusGenerateAll()
                             if (progressBarPtr) progressBarPtr->setValue(s - 1);
                             appendLog(QObject::tr("▶ %1").arg(lbl));
                         },
-                        [runAssessment](int s, int tot, const QString &, CliRunResult) mutable {
-                            if (s == tot + 1) runAssessment();
+                        [runAssessment, appendLog](int s, int tot, const QString &lbl, CliRunResult r) mutable {
+                            if (s == tot + 1) { runAssessment(); return; }
+                            const qint64 secs = r.durationMs / 1000;
+                            if (!r.processStarted)
+                                appendLog(QObject::tr("  ✗ Failed to start CLI for: %1").arg(lbl));
+                            else
+                                appendLog(QObject::tr("  ✓ Done (%1s): %2").arg(secs).arg(lbl));
+                            if (!r.output.trimmed().isEmpty())
+                                appendLog(QObject::tr("    output: %1").arg(r.output.trimmed().left(300)));
+                            if (!r.errorOutput.trimmed().isEmpty())
+                                appendLog(QObject::tr("    stderr: %1").arg(r.errorOutput.trimmed().left(200)));
                         });
                     return;
                 } else if (box.clickedButton() == blackBtn) {
@@ -4900,7 +5245,9 @@ void PaneSizing::onAplusGenerateImage(const QString &elementId)
 
         CliTask desktopTask;
         desktopTask.label = (vCount > 1) ? tr("Desktop %1 (v%2)").arg(displayName).arg(v+1) : tr("Desktop %1").arg(displayName);
-        desktopTask.prompt = finalDesktop;
+        desktopTask.prompt = finalDesktop
+            + QStringLiteral("\n\nOUTPUT PATH: Save the final image to this exact absolute path: ")
+            + elementDir.absoluteFilePath(QStringLiteral("desktop.png"));
         desktopTask.workDir = workDir;
         desktopTask.onBefore = [beforeSnap, elementDir]() {
             *beforeSnap = elementDir.entryList({QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files);
@@ -4917,7 +5264,9 @@ void PaneSizing::onAplusGenerateImage(const QString &elementId)
 
         CliTask mobileTask;
         mobileTask.label = (vCount > 1) ? tr("Mobile %1 (v%2)").arg(displayName).arg(v+1) : tr("Mobile %1").arg(displayName);
-        mobileTask.prompt = finalMobile;
+        mobileTask.prompt = finalMobile
+            + QStringLiteral("\n\nOUTPUT PATH: Save the final image to this exact absolute path: ")
+            + elementDir.absoluteFilePath(QStringLiteral("mobile.png"));
         mobileTask.workDir = workDir;
         mobileTask.onBefore = [beforeSnap, elementDir]() {
             *beforeSnap = elementDir.entryList({QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files);
@@ -5020,6 +5369,7 @@ void PaneSizing::onAplusGenerateSelected()
     splitter->addWidget(previewLabel);
     splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
+    splitter->setSizes({480, 600});
 
     const QDir aplusDir = m_aplusContent->dir();
     QStringList elementIds;
@@ -5233,6 +5583,8 @@ void PaneSizing::onAplusGenerateSelected()
             dt.prompt  = spec.desktopPrompt;
             if (!sel.extraInstr.isEmpty())
                 dt.prompt += QStringLiteral("\n\nAdditional instruction: ") + sel.extraInstr;
+            dt.prompt += QStringLiteral("\n\nOUTPUT PATH: Save the final image to this exact absolute path: ")
+                + elemDir.absoluteFilePath(QStringLiteral("desktop.png"));
             dt.workDir = elemWorkDir;
             dt.onBefore = [beforeSnap, elemDir]() {
                 *beforeSnap = elemDir.entryList(
@@ -5250,12 +5602,6 @@ void PaneSizing::onAplusGenerateSelected()
                              QDir::Files)) {
                         if (!beforeSnap->contains(f)) { filePair->first = elemDir.filePath(f); break; }
                     }
-                }
-                if (filePair->first.isEmpty() && !r.output.trimmed().isEmpty()) {
-                    const QString p = elemDir.filePath(QStringLiteral("v_") + _aplusTimestamp()
-                                                       + QStringLiteral("_desktop.txt"));
-                    QFile f(p); if (f.open(QIODevice::WriteOnly)) f.write(r.output.toUtf8());
-                    filePair->first = p;
                 }
                 if (tsPtr->isEmpty()) *tsPtr = _aplusTimestamp();
                 {
@@ -5288,6 +5634,8 @@ void PaneSizing::onAplusGenerateSelected()
             mt.prompt  = spec.mobilePrompt;
             if (!sel.extraInstr.isEmpty())
                 mt.prompt += QStringLiteral("\n\nAdditional instruction: ") + sel.extraInstr;
+            mt.prompt += QStringLiteral("\n\nOUTPUT PATH: Save the final image to this exact absolute path: ")
+                + elemDir.absoluteFilePath(QStringLiteral("mobile.png"));
             mt.workDir = elemWorkDir;
             mt.onBefore = [beforeSnap, elemDir]() {
                 *beforeSnap = elemDir.entryList(
@@ -5305,12 +5653,6 @@ void PaneSizing::onAplusGenerateSelected()
                              QDir::Files)) {
                         if (!beforeSnap->contains(f)) { filePair->second = elemDir.filePath(f); break; }
                     }
-                }
-                if (filePair->second.isEmpty() && !r.output.trimmed().isEmpty()) {
-                    const QString p = elemDir.filePath(QStringLiteral("v_") + _aplusTimestamp()
-                                                       + QStringLiteral("_mobile.txt"));
-                    QFile f(p); if (f.open(QIODevice::WriteOnly)) f.write(r.output.toUtf8());
-                    filePair->second = p;
                 }
                 if (tsPtr->isEmpty()) *tsPtr = _aplusTimestamp();
                 {
@@ -5438,6 +5780,9 @@ void PaneSizing::onAplusGenerateSelected()
             const QString errOut = r.errorOutput.trimmed();
             if (!errOut.isEmpty())
                 appendLog(QObject::tr("  stderr: %1").arg(errOut.right(400)));
+            const QString stdOut = r.output.trimmed();
+            if (!stdOut.isEmpty())
+                appendLog(QObject::tr("  output: %1").arg(stdOut.right(600)));
             if (barPtr) barPtr->setValue(step);
         });
 }
@@ -7123,6 +7468,154 @@ QCoro::Task<void> PaneSizing::_loadBrokenChildData(bool forceRefresh)
 // Broken-child fix workflow
 // ---------------------------------------------------------------------------
 
+void PaneSizing::_refreshBrokenAttrCombo()
+{
+    if (!m_brokenChildTable) return;
+    const QString currentMpId = _brokenAttrMarketplaceId();
+
+    QSignalBlocker blocker(ui->comboBoxBrokenAttrMarket);
+    ui->comboBoxBrokenAttrMarket->clear();
+    for (int i = 0; i < m_brokenChildTable->marketplaceCount(); ++i) {
+        const auto &spec = m_brokenChildTable->marketplaceAt(i);
+        ui->comboBoxBrokenAttrMarket->addItem(spec.code.toUpper(), spec.id);
+    }
+
+    // Restore previously selected marketplace if still in list.
+    if (!currentMpId.isEmpty()) {
+        for (int i = 0; i < ui->comboBoxBrokenAttrMarket->count(); ++i) {
+            if (ui->comboBoxBrokenAttrMarket->itemData(i).toString() == currentMpId) {
+                ui->comboBoxBrokenAttrMarket->setCurrentIndex(i);
+                return;
+            }
+        }
+    }
+    // Fallback: pick global then product setting.
+    const QString saved = m_productWorkingDir.exists()
+        ? QSettings(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                    QSettings::IniFormat)
+              .value(QStringLiteral("brokenChild/attrMarketplace")).toString()
+        : QSettings().value(QStringLiteral("brokenChild/attrMarketplace")).toString();
+    if (!saved.isEmpty()) {
+        for (int i = 0; i < ui->comboBoxBrokenAttrMarket->count(); ++i) {
+            if (ui->comboBoxBrokenAttrMarket->itemData(i).toString() == saved) {
+                ui->comboBoxBrokenAttrMarket->setCurrentIndex(i);
+                return;
+            }
+        }
+    }
+}
+
+QString PaneSizing::_brokenAttrMarketplaceId() const
+{
+    if (ui->comboBoxBrokenAttrMarket->count() == 0) return {};
+    return ui->comboBoxBrokenAttrMarket->currentData().toString();
+}
+
+void PaneSizing::onBrokenAttrMarketChanged(int /*index*/)
+{
+    const QString mpId = _brokenAttrMarketplaceId();
+    if (mpId.isEmpty()) return;
+    // Save to both global QSettings and product settings.ini.
+    QSettings().setValue(QStringLiteral("brokenChild/attrMarketplace"), mpId);
+    if (m_productWorkingDir.exists()) {
+        QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                    QSettings::IniFormat);
+        s.setValue(QStringLiteral("brokenChild/attrMarketplace"), mpId);
+    }
+}
+
+void PaneSizing::onBrowseBrokenTemplateClicked()
+{
+    const QString cur = ui->lineEditBrokenTemplate->text().trimmed();
+    const QString startDir = cur.isEmpty()
+        ? m_productWorkingDir.absolutePath()
+        : QFileInfo(cur).dir().absolutePath();
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Select variation template"), startDir,
+        tr("Excel templates (*.xlsm *.xlsx);;All files (*)"));
+    if (path.isEmpty()) return;
+    ui->lineEditBrokenTemplate->setText(path);
+    if (m_productWorkingDir.exists()) {
+        QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                    QSettings::IniFormat);
+        s.setValue(QStringLiteral("brokenChild/templatePath"), path);
+    }
+}
+
+bool PaneSizing::_confirmFixSettings(bool fixParents)
+{
+    auto *dlg    = new QDialog(this);
+    auto *layout = new QVBoxLayout(dlg);
+    dlg->setWindowTitle(tr("Fix settings"));
+
+    if (fixParents) {
+        // --- Attribute source country ---
+        auto *grpAttr = new QGroupBox(tr("Attribute source country"), dlg);
+        auto *grpLay  = new QHBoxLayout(grpAttr);
+        auto *combo   = new QComboBox(dlg);
+        for (int i = 0; i < ui->comboBoxBrokenAttrMarket->count(); ++i) {
+            combo->addItem(ui->comboBoxBrokenAttrMarket->itemText(i),
+                           ui->comboBoxBrokenAttrMarket->itemData(i));
+        }
+        combo->setCurrentIndex(ui->comboBoxBrokenAttrMarket->currentIndex());
+        grpLay->addWidget(combo);
+        layout->addWidget(grpAttr);
+
+        // --- Template file ---
+        auto *grpTpl  = new QGroupBox(tr("Variation template (xlsm/xlsx)"), dlg);
+        auto *tplLay  = new QHBoxLayout(grpTpl);
+        auto *tplEdit = new QLineEdit(ui->lineEditBrokenTemplate->text().trimmed(), dlg);
+        tplEdit->setMinimumWidth(320);
+        auto *browseBtn = new QPushButton(tr("Browse…"), dlg);
+        tplLay->addWidget(tplEdit);
+        tplLay->addWidget(browseBtn);
+        layout->addWidget(grpTpl);
+
+        connect(browseBtn, &QPushButton::clicked, dlg, [this, tplEdit]() {
+            const QString cur = tplEdit->text().trimmed();
+            const QString startDir = cur.isEmpty()
+                ? m_productWorkingDir.absolutePath()
+                : QFileInfo(cur).dir().absolutePath();
+            const QString path = QFileDialog::getOpenFileName(
+                this, tr("Select variation template"), startDir,
+                tr("Excel templates (*.xlsm *.xlsx);;All files (*)"));
+            if (!path.isEmpty()) tplEdit->setText(path);
+        });
+
+        auto *btns = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dlg);
+        layout->addWidget(btns);
+        connect(btns, &QDialogButtonBox::accepted, dlg, &QDialog::accept);
+        connect(btns, &QDialogButtonBox::rejected, dlg, &QDialog::reject);
+
+        if (dlg->exec() != QDialog::Accepted) { dlg->deleteLater(); return false; }
+
+        // Apply selections back to the main UI.
+        const int sel = combo->currentIndex();
+        if (sel >= 0) ui->comboBoxBrokenAttrMarket->setCurrentIndex(sel);
+        const QString tplPath = tplEdit->text().trimmed();
+        if (!tplPath.isEmpty()) {
+            ui->lineEditBrokenTemplate->setText(tplPath);
+            if (m_productWorkingDir.exists()) {
+                QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                            QSettings::IniFormat);
+                s.setValue(QStringLiteral("brokenChild/templatePath"), tplPath);
+            }
+        }
+    } else {
+        // Images-only fix: just confirm, no template needed.
+        auto *btns = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dlg);
+        layout->addWidget(new QLabel(tr("Fix images only — no template required."), dlg));
+        layout->addWidget(btns);
+        connect(btns, &QDialogButtonBox::accepted, dlg, &QDialog::accept);
+        connect(btns, &QDialogButtonBox::rejected, dlg, &QDialog::reject);
+        if (dlg->exec() != QDialog::Accepted) { dlg->deleteLater(); return false; }
+    }
+
+    dlg->deleteLater();
+    return true;
+}
+
+// Pre-flight confirmation dialog temporarily disabled to speed up fix iterations.
 void PaneSizing::onFixAllClicked()
 {
     _runBrokenChildFix(true, true);
@@ -7186,6 +7679,430 @@ void PaneSizing::onFixLogClicked()
     layout->addWidget(btnBox);
 
     dlg->show();
+}
+
+// Recursively replaces every "marketplace_id" field in a copied attribute value
+// so that raw attribute structures fetched from one marketplace can be
+// submitted to another.
+static QJsonValue swapMarketplaceIdRec(const QJsonValue &v, const QString &mpId)
+{
+    if (v.isObject()) {
+        QJsonObject o = v.toObject();
+        for (auto it = o.begin(); it != o.end(); ++it) {
+            if (it.key() == QLatin1String("marketplace_id"))
+                it.value() = mpId;
+            else
+                it.value() = swapMarketplaceIdRec(it.value(), mpId);
+        }
+        return o;
+    }
+    if (v.isArray()) {
+        QJsonArray a;
+        for (const QJsonValue &e : v.toArray())
+            a.append(swapMarketplaceIdRec(e, mpId));
+        return a;
+    }
+    return v;
+}
+
+QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
+    QString mpId, QString mpCode,
+    QString parentSku, QString productType, QString variationTheme,
+    QJsonObject parentAttrsFallback,
+    QList<VariationTemplateEntry> tplEntries,
+    QHash<QString,QString> familyAttrFallback,
+    QJsonArray* messagesOut, QStringList* logOut)
+{
+    *messagesOut = QJsonArray{};
+
+    static const QStringList kFamilyKeys{
+        QStringLiteral("apparel_size_system"),
+        QStringLiteral("apparel_size_class"),
+        QStringLiteral("target_gender"),
+        QStringLiteral("age_range_description"),
+        QStringLiteral("apparel_body_type"),
+        QStringLiteral("apparel_height_type"),
+    };
+
+    int messageId = 1;
+    for (const VariationTemplateEntry &e : tplEntries) {
+        if (e.sku.isEmpty()) continue;
+
+        // The SKU's own listing on the TARGET marketplace is the best source:
+        // values are already localized and schema-shaped for this marketplace.
+        QJsonObject localAttrs;
+        co_await m_api->fetchListingAttributes(mpId, e.sku, &localAttrs);
+
+        QJsonArray patches;
+        auto addPatch = [&](const QString &key, const QJsonValue &val) {
+            patches.append(QJsonObject{
+                {QStringLiteral("op"),    QStringLiteral("replace")},
+                {QStringLiteral("path"),  QStringLiteral("/attributes/") + key},
+                {QStringLiteral("value"), val},
+            });
+        };
+        auto simpleVal = [&](const QString &v) {
+            return QJsonArray{QJsonObject{{QStringLiteral("value"), v},
+                                          {QStringLiteral("marketplace_id"), mpId}}};
+        };
+        // Raw nested copy: local listing first (already this marketplace), then
+        // the fallback attributes object (marketplace_id swapped recursively).
+        auto rawOr = [&](const QString &key,
+                         const QJsonObject &fbAttrs) -> QJsonValue {
+            if (localAttrs.contains(key))
+                return localAttrs.value(key);
+            if (fbAttrs.contains(key))
+                return swapMarketplaceIdRec(fbAttrs.value(key), mpId);
+            return QJsonValue();  // null → "not available"
+        };
+        auto usable = [](const QJsonValue &v) {
+            return !v.isUndefined() && !v.isNull();
+        };
+
+        // Product identifier — mirrors external_product_id(+type) flat file columns.
+        if (!e.gtin.isEmpty() && !e.gtinType.isEmpty()) {
+            addPatch(QStringLiteral("externally_assigned_product_identifier"),
+                     QJsonArray{QJsonObject{
+                         {QStringLiteral("type_of_product_id"), e.gtinType},
+                         {QStringLiteral("product_id"),         e.gtin},
+                     }});
+        } else if (!e.asin.isEmpty()) {
+            addPatch(QStringLiteral("merchant_suggested_asin"), simpleVal(e.asin));
+        }
+
+        addPatch(QStringLiteral("parentage_level"),
+                 QJsonArray{QJsonObject{
+                     {QStringLiteral("value"), e.isParent ? QStringLiteral("parent")
+                                                          : QStringLiteral("child")},
+                     {QStringLiteral("marketplace_id"), mpId}}});
+        if (!variationTheme.isEmpty())
+            addPatch(QStringLiteral("variation_theme"),
+                     QJsonArray{QJsonObject{
+                         {QStringLiteral("name"),           variationTheme},
+                         {QStringLiteral("marketplace_id"), mpId}}});
+
+        if (e.isParent) {
+            // Descriptive attributes so a missing/invalid parent listing can be
+            // (re)created — this is what the flat file's parent row provides and
+            // what the previous skinny feed lacked.
+            static const QStringList kParentCopyKeys{
+                QStringLiteral("brand"),
+                QStringLiteral("item_name"),
+                QStringLiteral("product_description"),
+                QStringLiteral("bullet_point"),
+                QStringLiteral("recommended_browse_nodes"),
+                QStringLiteral("department"),
+                QStringLiteral("country_of_origin"),
+                QStringLiteral("condition_type"),
+            };
+            for (const QString &k : kParentCopyKeys) {
+                const QJsonValue v = rawOr(k, parentAttrsFallback);
+                if (usable(v)) addPatch(k, v);
+            }
+            for (const QString &k : kFamilyKeys) {
+                QJsonValue v = rawOr(k, parentAttrsFallback);
+                if (!usable(v) && !familyAttrFallback.value(k).isEmpty())
+                    v = simpleVal(familyAttrFallback.value(k));
+                if (usable(v)) addPatch(k, v);
+            }
+        } else {
+            addPatch(QStringLiteral("child_parent_sku_relationship"),
+                     QJsonArray{QJsonObject{
+                         {QStringLiteral("child_relationship_type"), QStringLiteral("variation")},
+                         {QStringLiteral("parent_sku"),              parentSku},
+                         {QStringLiteral("marketplace_id"),          mpId}}});
+
+            // Color — theme attribute; child-specific, no family fallback.
+            QJsonValue colorV = rawOr(QStringLiteral("color_name"), {});
+            if (!usable(colorV) && !e.color.isEmpty())
+                colorV = simpleVal(e.color);
+            if (usable(colorV)) {
+                addPatch(QStringLiteral("color_name"), colorV);
+                const QJsonValue mapV = rawOr(QStringLiteral("color_map"), {});
+                addPatch(QStringLiteral("color_map"), usable(mapV) ? mapV : colorV);
+            } else {
+                logOut->append(tr("⚠ %1: no color available — theme attribute missing!").arg(e.sku));
+            }
+
+            // Size — own local raw value, else template size converted to this country.
+            QJsonValue sizeV = rawOr(QStringLiteral("apparel_size"), {});
+            if (!usable(sizeV) && !e.size.isEmpty()) {
+                QString sz = e.size;
+                if (!e.sizeSource.isEmpty() && e.sizeSource != mpCode)
+                    sz = FillerSize::convertSize(sz, e.sizeSource, mpCode);
+                sizeV = simpleVal(sz);
+            }
+            if (usable(sizeV)) {
+                addPatch(QStringLiteral("apparel_size"), sizeV);
+            } else {
+                logOut->append(tr("⚠ %1: no size available — theme attribute missing!").arg(e.sku));
+            }
+
+            // Family-level apparel attributes: local raw → own collected value →
+            // family fallback (first-found among children / parent / dialog).
+            auto ownFor = [&](const QString &k) -> QString {
+                if (k == QLatin1String("apparel_size_system"))   return e.sizeSystem;
+                if (k == QLatin1String("apparel_size_class"))    return e.sizeClass;
+                if (k == QLatin1String("target_gender"))         return e.gender;
+                if (k == QLatin1String("age_range_description")) return e.ageRange;
+                if (k == QLatin1String("apparel_body_type"))     return e.bodyType;
+                if (k == QLatin1String("apparel_height_type"))   return e.heightType;
+                return {};
+            };
+            for (const QString &k : kFamilyKeys) {
+                QJsonValue v = rawOr(k, {});
+                if (!usable(v)) {
+                    QString s = ownFor(k);
+                    if (s.isEmpty()) s = familyAttrFallback.value(k);
+                    if (!s.isEmpty()) v = simpleVal(s);
+                }
+                if (usable(v)) addPatch(k, v);
+            }
+        }
+
+        logOut->append(tr("%1 %2: %3 patch(es), local listing %4")
+                           .arg(e.isParent ? QStringLiteral("parent") : QStringLiteral("child "),
+                                e.sku)
+                           .arg(patches.size())
+                           .arg(localAttrs.isEmpty() ? tr("ABSENT") : tr("found")));
+
+        messagesOut->append(QJsonObject{
+            {QStringLiteral("messageId"),     messageId++},
+            {QStringLiteral("sku"),           e.sku},
+            {QStringLiteral("operationType"), QStringLiteral("PATCH")},
+            {QStringLiteral("productType"),   productType},
+            {QStringLiteral("patches"),       patches},
+        });
+    }
+    co_return;
+}
+
+QString PaneSizing::_fillVariationTemplate(
+    const QString &templatePath,
+    const QString &parentSku,
+    const QJsonObject &parentAttrs,
+    const QString &attrMarketplaceId,
+    const QString &productType,
+    const QString &variationTheme,
+    const QList<VariationTemplateEntry> &feedEntries,
+    const QHash<QString,QString> &attrOverrides)
+{
+    QXlsx::Document doc(templatePath);
+    if (!doc.load()) {
+        qWarning() << "_fillVariationTemplate: cannot load" << templatePath;
+        return {};
+    }
+
+    // Find the Vorlage (data entry) sheet: try by name, then scan for feed_product_type in row 3.
+    QString sheetName;
+    for (const QString &s : doc.sheetNames()) {
+        if (s.compare(QStringLiteral("Vorlage"), Qt::CaseInsensitive) == 0) {
+            sheetName = s; break;
+        }
+    }
+    if (sheetName.isEmpty()) {
+        for (const QString &s : doc.sheetNames()) {
+            doc.selectSheet(s);
+            for (int c = 1; c <= 10; ++c) {
+                if (doc.read(3, c).toString() == QStringLiteral("feed_product_type")) {
+                    sheetName = s; break;
+                }
+            }
+            if (!sheetName.isEmpty()) break;
+        }
+    }
+    if (sheetName.isEmpty()) {
+        qWarning() << "_fillVariationTemplate: no Vorlage sheet found in" << templatePath;
+        return {};
+    }
+    doc.selectSheet(sheetName);
+
+    // Map marketplace ID to the country code used in FillerSize size tables.
+    static const QHash<QString, QString> kMpToCountry{
+        {QStringLiteral("A1PA6795UKMFR9"), QStringLiteral("DE")},
+        {QStringLiteral("A13V1IB3VIYZZH"), QStringLiteral("FR")},
+        {QStringLiteral("APJ6JRA9NG5V4"),  QStringLiteral("IT")},
+        {QStringLiteral("A1RKKUPIHCS9HS"), QStringLiteral("ES")},
+        {QStringLiteral("AMEN7PMS3EDWL"),  QStringLiteral("NL")},
+        {QStringLiteral("A1F83G8C2ARO7P"), QStringLiteral("UK")},
+        {QStringLiteral("ATVPDKIKX0DER"),  QStringLiteral("COM")},
+        {QStringLiteral("A2EUQ1WTGCTBG2"), QStringLiteral("COM")},
+    };
+    const QString templateCountry = kMpToCountry.value(attrMarketplaceId);
+    qDebug() << "_fillVariationTemplate: attr marketplace" << attrMarketplaceId
+             << "→ template country" << (templateCountry.isEmpty() ? "(unknown)" : templateCountry);
+
+    // Build column name → 1-based column index from row 3.
+    QHash<QString, int> colMap;
+    for (int c = 1; c <= 300; ++c) {
+        const QString key = doc.read(3, c).toString().trimmed();
+        if (!key.isEmpty()) colMap[key] = c;
+    }
+
+    // Write a value into the named column of a row (no-op if column not in template).
+    auto cell = [&](int row, const QString &colName, const QString &val) {
+        if (val.isEmpty()) return;
+        const auto it = colMap.constFind(colName);
+        if (it != colMap.constEnd()) doc.write(row, it.value(), val);
+    };
+
+    // Extract first scalar value from a SP-API attribute array.
+    auto firstVal = [&](const QString &key) -> QString {
+        const QJsonArray arr = parentAttrs.value(key).toArray();
+        if (arr.isEmpty()) return {};
+        const QJsonObject obj = arr.first().toObject();
+        const QString v = obj.value(QStringLiteral("value")).toString();
+        return v.isEmpty() ? obj.value(QStringLiteral("name")).toString() : v;
+    };
+    auto allVals = [&](const QString &key) -> QStringList {
+        QStringList out;
+        for (const QJsonValue &jv : parentAttrs.value(key).toArray())
+            out << jv.toObject().value(QStringLiteral("value")).toString();
+        out.removeAll(QString{});
+        return out;
+    };
+
+    // Map SP-API gtinType ("ean","gtin","upc","gtin14") to Amazon flat file type string.
+    auto idType = [](const QString &t) -> QString {
+        if (t == QLatin1String("ean"))    return QStringLiteral("EAN");
+        if (t == QLatin1String("gtin"))   return QStringLiteral("GTIN");
+        if (t == QLatin1String("upc"))    return QStringLiteral("UPC");
+        if (t == QLatin1String("gtin14")) return QStringLiteral("GTIN14");
+        return t.toUpper();
+    };
+
+    // Find parent feed entry (for GTIN).
+    VariationTemplateEntry parentEntry;
+    for (const auto &e : feedEntries)
+        if (e.isParent) { parentEntry = e; break; }
+
+    // Build ASIN → {color, size} from broken child table.
+    QHash<QString, QPair<QString,QString>> asinColorSize;
+    if (m_brokenChildTable) {
+        for (const auto &r : m_brokenChildTable->rows())
+            asinColorSize.insert(r.asin, {r.color, r.size});
+    }
+
+    // Collect apparel attrs from children: "first found" wins across the whole set.
+    // Parent listing often lacks these; use any child that has a value.
+    QString fbSizeSystem, fbSizeClass, fbGender, fbAgeRange, fbBodyType, fbHeightType;
+    for (const auto &e : feedEntries) {
+        if (e.isParent) continue;
+        if (fbSizeSystem.isEmpty()  && !e.sizeSystem.isEmpty())  fbSizeSystem  = e.sizeSystem;
+        if (fbSizeClass.isEmpty()   && !e.sizeClass.isEmpty())   fbSizeClass   = e.sizeClass;
+        if (fbGender.isEmpty()      && !e.gender.isEmpty())      fbGender      = e.gender;
+        if (fbAgeRange.isEmpty()    && !e.ageRange.isEmpty())    fbAgeRange    = e.ageRange;
+        if (fbBodyType.isEmpty()    && !e.bodyType.isEmpty())    fbBodyType    = e.bodyType;
+        if (fbHeightType.isEmpty()  && !e.heightType.isEmpty())  fbHeightType  = e.heightType;
+        if (!fbSizeSystem.isEmpty() && !fbSizeClass.isEmpty() && !fbGender.isEmpty()
+                && !fbAgeRange.isEmpty() && !fbBodyType.isEmpty() && !fbHeightType.isEmpty())
+            break;
+    }
+
+    const QString brand = firstVal(QStringLiteral("brand"));
+    const QStringList bullets = allVals(QStringLiteral("bullet_point"));
+    const QStringList nodes   = allVals(QStringLiteral("recommended_browse_nodes"));
+
+    // dataRow = 4 (from template settings URL parameter).
+    int row = 4;
+
+    // --- Parent row ---
+    cell(row, QStringLiteral("feed_product_type"),      productType);
+    cell(row, QStringLiteral("item_sku"),               parentSku);
+    cell(row, QStringLiteral("brand_name"),             brand);
+    cell(row, QStringLiteral("update_delete"),          QStringLiteral("PartialUpdate"));
+    if (!parentEntry.gtin.isEmpty()) {
+        cell(row, QStringLiteral("external_product_id"),      parentEntry.gtin);
+        cell(row, QStringLiteral("external_product_id_type"), idType(parentEntry.gtinType));
+    }
+    cell(row, QStringLiteral("item_name"),              firstVal(QStringLiteral("item_name")));
+    cell(row, QStringLiteral("product_description"),    firstVal(QStringLiteral("product_description")));
+    if (!nodes.isEmpty())
+        cell(row, QStringLiteral("recommended_browse_nodes"), nodes.first());
+    cell(row, QStringLiteral("outer_material_type"),    firstVal(QStringLiteral("outer")));
+    cell(row, QStringLiteral("inner_material_type"),    firstVal(QStringLiteral("inner")));
+    cell(row, QStringLiteral("parent_child"),           QStringLiteral("Parent"));
+    cell(row, QStringLiteral("relationship_type"),      QStringLiteral("Variation"));
+    cell(row, QStringLiteral("variation_theme"),        variationTheme);
+    cell(row, QStringLiteral("generic_keywords"),
+         allVals(QStringLiteral("generic_keyword")).join(QLatin1Char(' ')));
+    cell(row, QStringLiteral("pattern_type"),           firstVal(QStringLiteral("pattern_type")));
+    cell(row, QStringLiteral("lifestyle"),              firstVal(QStringLiteral("lifestyle")));
+    cell(row, QStringLiteral("style_name"),             firstVal(QStringLiteral("style")));
+    cell(row, QStringLiteral("neck_style"),             firstVal(QStringLiteral("neck")));
+    cell(row, QStringLiteral("department_name"),        firstVal(QStringLiteral("department")));
+    for (int i = 0; i < bullets.size() && i < 5; ++i)
+        cell(row, QStringLiteral("bullet_point%1").arg(i + 1), bullets.at(i));
+    cell(row, QStringLiteral("item_length_description"), firstVal(QStringLiteral("item_length_description")));
+    cell(row, QStringLiteral("country_of_origin"),      firstVal(QStringLiteral("country_of_origin")));
+    cell(row, QStringLiteral("condition_type"),         firstVal(QStringLiteral("condition_type")));
+    // For each field: use parent attrs if available, then first-found child value, then override.
+    auto parentOrChild = [&](const QString &key, const QString &childFb) {
+        const QString v = firstVal(key);
+        if (!v.isEmpty()) return v;
+        if (!childFb.isEmpty()) return childFb;
+        return attrOverrides.value(key);
+    };
+    cell(row, QStringLiteral("target_gender"),         parentOrChild(QStringLiteral("target_gender"),         fbGender));
+    cell(row, QStringLiteral("age_range_description"),  parentOrChild(QStringLiteral("age_range_description"), fbAgeRange));
+    cell(row, QStringLiteral("apparel_body_type"),      parentOrChild(QStringLiteral("apparel_body_type"),     fbBodyType));
+    cell(row, QStringLiteral("apparel_height_type"),    parentOrChild(QStringLiteral("apparel_height_type"),   fbHeightType));
+    cell(row, QStringLiteral("apparel_size_system"),    parentOrChild(QStringLiteral("apparel_size_system"),   fbSizeSystem));
+    cell(row, QStringLiteral("apparel_size_class"),     parentOrChild(QStringLiteral("apparel_size_class"),    fbSizeClass));
+
+    // --- Child rows ---
+    for (const auto &e : feedEntries) {
+        if (e.isParent) continue;
+        ++row;
+        cell(row, QStringLiteral("feed_product_type"),  productType);
+        cell(row, QStringLiteral("item_sku"),           e.sku);
+        cell(row, QStringLiteral("brand_name"),         brand);
+        cell(row, QStringLiteral("update_delete"),      QStringLiteral("PartialUpdate"));
+        if (!e.gtin.isEmpty()) {
+            cell(row, QStringLiteral("external_product_id"),      e.gtin);
+            cell(row, QStringLiteral("external_product_id_type"), idType(e.gtinType));
+        }
+        cell(row, QStringLiteral("parent_child"),       QStringLiteral("Child"));
+        cell(row, QStringLiteral("parent_sku"),         parentSku);
+        cell(row, QStringLiteral("relationship_type"),  QStringLiteral("Variation"));
+        cell(row, QStringLiteral("variation_theme"),    variationTheme);
+        cell(row, QStringLiteral("color_name"),         e.color);
+        cell(row, QStringLiteral("color_map"),          e.color);
+        {
+            QString sz = e.size;
+            if (!sz.isEmpty() && !templateCountry.isEmpty()
+                    && !e.sizeSource.isEmpty() && e.sizeSource != templateCountry) {
+                sz = FillerSize::convertSize(sz, e.sizeSource, templateCountry);
+            }
+            cell(row, QStringLiteral("size_name"),    sz);
+            cell(row, QStringLiteral("apparel_size"), sz);
+        }
+        // Each field: own value → first-found across children → parent attrs → override.
+        auto best = [&](const QString &own, const QString &fb, const QString &key) {
+            if (!own.isEmpty()) return own;
+            if (!fb.isEmpty()) return fb;
+            const QString pv = firstVal(key);
+            if (!pv.isEmpty()) return pv;
+            return attrOverrides.value(key);
+        };
+        cell(row, QStringLiteral("apparel_size_system"),   best(e.sizeSystem,  fbSizeSystem,  QStringLiteral("apparel_size_system")));
+        cell(row, QStringLiteral("apparel_size_class"),    best(e.sizeClass,   fbSizeClass,   QStringLiteral("apparel_size_class")));
+        cell(row, QStringLiteral("target_gender"),         best(e.gender,      fbGender,      QStringLiteral("target_gender")));
+        cell(row, QStringLiteral("age_range_description"), best(e.ageRange,    fbAgeRange,    QStringLiteral("age_range_description")));
+        cell(row, QStringLiteral("apparel_body_type"),     best(e.bodyType,    fbBodyType,    QStringLiteral("apparel_body_type")));
+        cell(row, QStringLiteral("apparel_height_type"),   best(e.heightType,  fbHeightType,  QStringLiteral("apparel_height_type")));
+    }
+
+    // Save filled copy next to the working dir, preserving the original's extension.
+    const QString ext     = QFileInfo(templatePath).suffix();
+    const QString outPath = m_productWorkingDir.filePath(
+        QStringLiteral("filled_variation_%1.%2")
+            .arg(QDate::currentDate().toString(QStringLiteral("yyyyMMdd")), ext));
+    if (!doc.saveAs(outPath)) {
+        qWarning() << "_fillVariationTemplate: saveAs failed:" << outPath;
+        return {};
+    }
+    return outPath;
 }
 
 void PaneSizing::_generateParentFlatFile(const QString &marketplaceCode,
@@ -7389,6 +8306,10 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
     auto *openDirBtn = new QPushButton(tr("Open dir"), progressDlg);
     openDirBtn->setEnabled(m_productWorkingDir.exists());
     btnLayout->addWidget(openDirBtn);
+    auto *copyPathBtn = new QPushButton(tr("Copy path"), progressDlg);
+    copyPathBtn->setEnabled(false);
+    copyPathBtn->setToolTip(tr("Copy path of the filled template to clipboard"));
+    btnLayout->addWidget(copyPathBtn);
     btnLayout->addStretch();
     auto *closeBtns = new QDialogButtonBox(QDialogButtonBox::Close, progressDlg);
     QPushButton *closeBtn = closeBtns->button(QDialogButtonBox::Close);
@@ -7400,6 +8321,7 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
     QPointer<QProgressBar> progressBarPtr(progressBar);
     QPointer<QTextEdit>    logEditPtr(logEdit);
     QPointer<QPushButton>  closeBtnPtr(closeBtn);
+    QPointer<QPushButton>  copyPathBtnPtr(copyPathBtn);
     QPointer<QDialog>      dlgPtr(progressDlg);
 
     auto appendLog = [logEditPtr](const QString &line) {
@@ -7658,7 +8580,11 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
     }
     */
 
-    // ── 5g. Upload JSON_LISTINGS_FEED variation relationship feed ───────────
+    // ── 5g. Upload full-fidelity JSON_LISTINGS_FEED per marketplace ─────────
+    // When the feed path ran, the per-child PATCH in 6a is skipped: the feed
+    // carries strictly more data, and concurrent submissions for the same SKU
+    // can interleave badly in Amazon's async processing.
+    bool fullFeedSubmitted = false;
     if (fixParents) {
         const QString primaryMpId = firstMarketplaceIdFromCountryList(ui->listWidgetCountries);
         if (!primaryMpId.isEmpty()) {
@@ -7746,14 +8672,333 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                     if (!brokenMpIds.contains(mpId)) brokenMpIds << mpId;
                 }
 
-                appendLog(tr("Uploading JSON_LISTINGS_FEED for %1 marketplace(s), %2 entry(ies)…")
-                              .arg(brokenMpIds.size()).arg(feedEntries.size()));
+                // Collect the complete per-child data set — the same data the
+                // manual flat file carries. Used for BOTH the template file and
+                // the full-fidelity per-marketplace feeds below.
+                const QString tplPath = ui->lineEditBrokenTemplate->text().trimmed();
+                {
+                    const QString attrMpId = _brokenAttrMarketplaceId().isEmpty()
+                        ? (brokenMpIds.isEmpty() ? primaryMpId : brokenMpIds.first())
+                        : _brokenAttrMarketplaceId();
+                    appendLog(tr("Fetching parent attributes (%1) for template…")
+                                  .arg(ui->comboBoxBrokenAttrMarket->currentText()));
+                    QJsonObject parentAttrs;
+                    co_await m_api->fetchListingAttributes(attrMpId, feedParentSku, &parentAttrs);
 
-                QString feedResult;
-                co_await m_api->uploadVariationFeed(brokenMpIds, m_productType,
-                                                    variationTheme,
-                                                    feedEntries, &feedResult);
-                appendLog(tr("Feed result: %1").arg(feedResult));
+                    // Fallback color/size/sizeSource from BrokenChildTable (may be from any marketplace).
+                    struct ColorSizeSrc { QString color; QString size; QString sizeSource; };
+                    QHash<QString, ColorSizeSrc> fallbackByAsin;
+                    for (const auto &r : m_brokenChildTable->rows())
+                        fallbackByAsin.insert(r.asin, {r.color, r.size, r.sizeSource});
+
+                    auto childFirstVal = [](const QJsonObject &attrs, const QString &key) -> QString {
+                        const QJsonArray arr = attrs.value(key).toArray();
+                        if (arr.isEmpty()) return {};
+                        const QJsonObject obj = arr.first().toObject();
+                        const QString v = obj.value(QStringLiteral("value")).toString();
+                        return v.isEmpty() ? obj.value(QStringLiteral("name")).toString() : v;
+                    };
+
+                    QList<VariationTemplateEntry> tplEntries;
+                    for (const auto &e : feedEntries) {
+                        const auto fb = fallbackByAsin.value(e.asin);
+                        // Size fallback from BrokenChildTable is acceptable (with conversion).
+                        // Color fallback is NOT: BrokenChildTable always stores English (Step 3c).
+                        QString color;
+                        QString size    = fb.size;
+                        QString sizeSrc = fb.sizeSource;
+                        QString sizeSystem, sizeClass, gender, ageRange, bodyType, heightType;
+                        if (!e.asin.isEmpty() && !e.isParent) {
+                            // 1. Listings Items API (by SKU) — seller-submitted, localized.
+                            QJsonObject childListingAttrs;
+                            if (!e.sku.isEmpty())
+                                co_await m_api->fetchListingAttributes(attrMpId, e.sku, &childListingAttrs);
+                            const QString lc   = childFirstVal(childListingAttrs, QStringLiteral("color_name"));
+                            const QString ls   = childFirstVal(childListingAttrs, QStringLiteral("apparel_size"));
+                            const QString lss  = childFirstVal(childListingAttrs, QStringLiteral("apparel_size_system"));
+                            const QString lsc  = childFirstVal(childListingAttrs, QStringLiteral("apparel_size_class"));
+                            const QString lg   = childFirstVal(childListingAttrs, QStringLiteral("target_gender"));
+                            const QString la   = childFirstVal(childListingAttrs, QStringLiteral("age_range_description"));
+                            const QString lbt  = childFirstVal(childListingAttrs, QStringLiteral("apparel_body_type"));
+                            const QString lht  = childFirstVal(childListingAttrs, QStringLiteral("apparel_height_type"));
+
+                            // 2. Catalog Items API (by ASIN) — fallback for any field missing from Listings API.
+                            AmazonCatalogApi::CatalogApparelAttrs cat;
+                            if (lc.isEmpty() || lss.isEmpty() || lsc.isEmpty()
+                                    || lg.isEmpty() || la.isEmpty() || lbt.isEmpty() || lht.isEmpty())
+                                co_await m_api->fetchCatalogApparelAttrs(attrMpId, e.asin, &cat);
+
+                            color      = lc.isEmpty()  ? cat.color      : lc;
+                            sizeSystem = lss.isEmpty() ? cat.sizeSystem  : lss;
+                            sizeClass  = lsc.isEmpty() ? cat.sizeClass   : lsc;
+                            gender     = lg.isEmpty()  ? cat.gender      : lg;
+                            ageRange   = la.isEmpty()  ? cat.ageRange    : la;
+                            bodyType   = lbt.isEmpty() ? cat.bodyType    : lbt;
+                            heightType = lht.isEmpty() ? cat.heightType  : lht;
+                            if (!ls.isEmpty()) { size = ls; sizeSrc = {}; }
+
+                            appendLog(tr("  [tpl] %1 (%2): color=%3 size=%4 sizeSystem=%5 gender=%6 age=%7")
+                                          .arg(e.asin, e.sku,
+                                               color.isEmpty()      ? QStringLiteral("(empty)") : color,
+                                               size.isEmpty()       ? QStringLiteral("(empty)") : size,
+                                               sizeSystem.isEmpty() ? QStringLiteral("(empty)") : sizeSystem,
+                                               gender.isEmpty()     ? QStringLiteral("(empty)") : gender,
+                                               ageRange.isEmpty()   ? QStringLiteral("(empty)") : ageRange));
+                        }
+                        tplEntries.append({e.sku, e.asin, e.isParent,
+                                           e.gtin, e.gtinType,
+                                           color, size, sizeSrc,
+                                           sizeSystem, sizeClass, gender, ageRange, bodyType, heightType});
+                    }
+
+                    // Detect which apparel attrs are still empty across ALL children + parent.
+                    QHash<QString,QString> attrOverrides;
+                    QHash<QString,QString> familyAttrFallback;
+                    {
+                        QString fbSys, fbCls, fbGen, fbAge, fbBody, fbHt;
+                        for (const auto &e : tplEntries) {
+                            if (e.isParent) continue;
+                            if (fbSys.isEmpty()  && !e.sizeSystem.isEmpty()) fbSys  = e.sizeSystem;
+                            if (fbCls.isEmpty()  && !e.sizeClass.isEmpty())  fbCls  = e.sizeClass;
+                            if (fbGen.isEmpty()  && !e.gender.isEmpty())     fbGen  = e.gender;
+                            if (fbAge.isEmpty()  && !e.ageRange.isEmpty())   fbAge  = e.ageRange;
+                            if (fbBody.isEmpty() && !e.bodyType.isEmpty())   fbBody = e.bodyType;
+                            if (fbHt.isEmpty()   && !e.heightType.isEmpty()) fbHt   = e.heightType;
+                        }
+                        // Also fall back to parent listing attrs (same JSON format).
+                        auto tryParent = [&](const QString &key, QString &fb) {
+                            if (!fb.isEmpty()) return;
+                            fb = childFirstVal(parentAttrs, key);
+                        };
+                        tryParent(QStringLiteral("apparel_size_system"),   fbSys);
+                        tryParent(QStringLiteral("apparel_size_class"),    fbCls);
+                        tryParent(QStringLiteral("target_gender"),         fbGen);
+                        tryParent(QStringLiteral("age_range_description"), fbAge);
+                        tryParent(QStringLiteral("apparel_body_type"),     fbBody);
+                        tryParent(QStringLiteral("apparel_height_type"),   fbHt);
+
+                        QStringList missing;
+                        if (fbSys.isEmpty())  missing << QStringLiteral("apparel_size_system");
+                        if (fbCls.isEmpty())  missing << QStringLiteral("apparel_size_class");
+                        if (fbGen.isEmpty())  missing << QStringLiteral("target_gender");
+                        if (fbAge.isEmpty())  missing << QStringLiteral("age_range_description");
+                        if (fbBody.isEmpty()) missing << QStringLiteral("apparel_body_type");
+                        if (fbHt.isEmpty())   missing << QStringLiteral("apparel_height_type");
+
+                        if (!missing.isEmpty()) {
+                            appendLog(tr("⚠ Apparel attrs still empty after all API sources: %1").arg(missing.join(QStringLiteral(", "))));
+
+                            // Step 1: catalog keyword search on the selected marketplace.
+                            const QString itemName = childFirstVal(parentAttrs, QStringLiteral("item_name"));
+                            const QStringList nameWords = itemName.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+                            const QString searchKw = QStringList(nameWords.mid(0, 3)).join(QLatin1Char(' '));
+
+                            QHash<QString,QString> candidate;
+                            QString candidateAsin;
+                            if (!searchKw.isEmpty()) {
+                                appendLog(tr("  Searching catalog for similar product (\"%1\")…").arg(searchKw));
+                                AmazonCatalogApi::CatalogApparelAttrs searchCat;
+                                co_await m_api->searchCatalogForApparelAttrs(
+                                    attrMpId, searchKw, missing, &searchCat, &candidateAsin);
+                                if (!candidateAsin.isEmpty()) {
+                                    if (missing.contains(QStringLiteral("apparel_size_system"))   && !searchCat.sizeSystem.isEmpty()) candidate[QStringLiteral("apparel_size_system")]   = searchCat.sizeSystem;
+                                    if (missing.contains(QStringLiteral("apparel_size_class"))    && !searchCat.sizeClass.isEmpty())  candidate[QStringLiteral("apparel_size_class")]    = searchCat.sizeClass;
+                                    if (missing.contains(QStringLiteral("target_gender"))         && !searchCat.gender.isEmpty())     candidate[QStringLiteral("target_gender")]         = searchCat.gender;
+                                    if (missing.contains(QStringLiteral("age_range_description")) && !searchCat.ageRange.isEmpty())   candidate[QStringLiteral("age_range_description")] = searchCat.ageRange;
+                                    if (missing.contains(QStringLiteral("apparel_body_type"))     && !searchCat.bodyType.isEmpty())   candidate[QStringLiteral("apparel_body_type")]     = searchCat.bodyType;
+                                    if (missing.contains(QStringLiteral("apparel_height_type"))   && !searchCat.heightType.isEmpty()) candidate[QStringLiteral("apparel_height_type")]   = searchCat.heightType;
+                                    appendLog(tr("  Found candidate ASIN %1").arg(candidateAsin));
+                                }
+                            }
+
+                            // Step 2: UK LISTINGS API fallback (by child SKU).
+                            // apparel_size_class / apparel_body_type / apparel_height_type are
+                            // Listings-API-only fields — the Catalog API never exposes them, so
+                            // reading the working UK listing directly is the only automated source.
+                            // The children already exist on UK (the working marketplace), so their
+                            // seller-submitted values are authoritative.
+                            static const QString kUkMpId = QStringLiteral("A1F83G8C2ARO7P");
+                            const bool stillMissing = std::any_of(
+                                missing.cbegin(), missing.cend(),
+                                [&](const QString &f){ return candidate.value(f).isEmpty(); });
+                            if (stillMissing && kUkMpId != attrMpId) {
+                                for (const auto &e : tplEntries) {
+                                    if (e.isParent || e.sku.isEmpty()) continue;
+                                    QJsonObject ukAttrs;
+                                    co_await m_api->fetchListingAttributes(kUkMpId, e.sku, &ukAttrs);
+                                    if (ukAttrs.isEmpty()) continue;
+                                    for (const QString &f : missing) {
+                                        if (!candidate.value(f).isEmpty()) continue;
+                                        const QString v = childFirstVal(ukAttrs, f);
+                                        if (!v.isEmpty()) {
+                                            candidate[f] = v;
+                                            candidateAsin.clear(); // internal — no ASIN to display
+                                        }
+                                    }
+                                    const bool allFound = std::none_of(
+                                        missing.cbegin(), missing.cend(),
+                                        [&](const QString &f){ return candidate.value(f).isEmpty(); });
+                                    if (allFound) break;
+                                }
+                                appendLog(tr("  UK listing fallback filled: %1")
+                                              .arg(QStringList(candidate.keys()).join(QStringLiteral(", "))));
+                            }
+
+                            // Load cached values from the last run for this product type + marketplace.
+                            // Cache wins over "not found" but loses to actual API values.
+                            const QString attrCacheFile = m_workingDir.filePath(
+                                QStringLiteral("apparel_attrs_cache.ini"));
+                            QSettings attrCache(attrCacheFile, QSettings::IniFormat);
+                            const QString productTypeKey = m_productType.isEmpty()
+                                ? QStringLiteral("UNKNOWN") : m_productType;
+                            attrCache.beginGroup(productTypeKey);
+                            attrCache.beginGroup(attrMpId);
+                            for (const QString &f : missing) {
+                                if (candidate.value(f).isEmpty()) {
+                                    const QString cached = attrCache.value(f).toString();
+                                    if (!cached.isEmpty())
+                                        candidate[f] = cached;
+                                }
+                            }
+                            attrCache.endGroup();
+                            attrCache.endGroup();
+
+                            // No dialog. Apply whatever the automated sources found and
+                            // move on. Descriptive apparel attributes are OPTIONAL for a
+                            // relationship fix — the children already carry them on the
+                            // broken marketplaces (they exist, just unlinked). Anything
+                            // still empty is logged; if Amazon actually requires it, the
+                            // checkListing post-check reports the exact field per SKU.
+                            attrCache.beginGroup(productTypeKey);
+                            attrCache.beginGroup(attrMpId);
+                            for (const QString &f : missing) {
+                                const QString v = candidate.value(f);
+                                if (!v.isEmpty()) {
+                                    attrOverrides.insert(f, v);
+                                    attrCache.setValue(f, v); // persist for next run
+                                }
+                            }
+                            attrCache.endGroup();
+                            attrCache.endGroup();
+                            attrCache.sync();
+
+                            if (!attrOverrides.isEmpty())
+                                appendLog(tr("  Apparel attrs auto-resolved: %1").arg(
+                                    QStringList(attrOverrides.keys()).join(QStringLiteral(", "))));
+                            QStringList unresolved;
+                            for (const QString &f : missing)
+                                if (candidate.value(f).isEmpty()) unresolved << f;
+                            if (!unresolved.isEmpty())
+                                appendLog(tr("  Left empty (optional; check post-fix issues if rejected): %1")
+                                              .arg(unresolved.join(QStringLiteral(", "))));
+                        }
+
+                        // Family-level fallback chain shared by the template and
+                        // the feeds: first-found among children → parent listing
+                        // → user dialog value.
+                        auto famFb = [&](const QString &key, const QString &fb) {
+                            if (!fb.isEmpty()) return fb;
+                            const QString pv = childFirstVal(parentAttrs, key);
+                            if (!pv.isEmpty()) return pv;
+                            return attrOverrides.value(key);
+                        };
+                        familyAttrFallback.insert(QStringLiteral("apparel_size_system"),   famFb(QStringLiteral("apparel_size_system"),   fbSys));
+                        familyAttrFallback.insert(QStringLiteral("apparel_size_class"),    famFb(QStringLiteral("apparel_size_class"),    fbCls));
+                        familyAttrFallback.insert(QStringLiteral("target_gender"),         famFb(QStringLiteral("target_gender"),         fbGen));
+                        familyAttrFallback.insert(QStringLiteral("age_range_description"), famFb(QStringLiteral("age_range_description"), fbAge));
+                        familyAttrFallback.insert(QStringLiteral("apparel_body_type"),     famFb(QStringLiteral("apparel_body_type"),     fbBody));
+                        familyAttrFallback.insert(QStringLiteral("apparel_height_type"),   famFb(QStringLiteral("apparel_height_type"),   fbHt));
+                    }
+
+                    if (!tplPath.isEmpty() && m_productWorkingDir.exists()) {
+                        const QString filledPath = _fillVariationTemplate(
+                            tplPath, feedParentSku, parentAttrs, attrMpId,
+                            m_productType, variationTheme, tplEntries, attrOverrides);
+                        if (!filledPath.isEmpty()) {
+                            appendLog(tr("Template filled: %1").arg(filledPath));
+                            if (copyPathBtnPtr) {
+                                copyPathBtnPtr->setEnabled(true);
+                                connect(copyPathBtnPtr, &QPushButton::clicked,
+                                        progressDlg, [filledPath]() {
+                                    QGuiApplication::clipboard()->setText(filledPath);
+                                });
+                            }
+                        } else {
+                            appendLog(tr("⚠ Template filling failed — check file path and sheet structure."));
+                        }
+                    }
+
+                    // ── Full-fidelity JSON_LISTINGS_FEED, one per marketplace ──
+                    // Mirrors the manual flat file: complete parent row + complete
+                    // child rows, localized per country. checkListing before/after
+                    // exposes Amazon's async validation errors (the reason earlier
+                    // ACCEPTED submissions silently never materialized).
+                    for (const QString &feedMpId : brokenMpIds) {
+                        QString feedMpCode = feedMpId;
+                        for (int i = 0; i < m_brokenChildTable->marketplaceCount(); ++i) {
+                            const auto &s = m_brokenChildTable->marketplaceAt(i);
+                            if (s.id == feedMpId) { feedMpCode = s.code; break; }
+                        }
+                        appendLog(tr("═══ %1 — full variation feed ═══").arg(feedMpCode));
+
+                        // Pre-check: does the parent listing even exist here?
+                        {
+                            AmazonCatalogApi::ListingCheck pc;
+                            co_await m_api->checkListing(feedMpId, feedParentSku, &pc);
+                            if (!pc.exists) {
+                                appendLog(tr("  parent %1: NOT LISTED on %2 — feed will create it")
+                                              .arg(feedParentSku, feedMpCode));
+                            } else {
+                                appendLog(tr("  parent %1: status=[%2] linked children=%3 theme=%4")
+                                              .arg(feedParentSku,
+                                                   pc.status.isEmpty() ? tr("none") : pc.status)
+                                              .arg(pc.childSkus.size())
+                                              .arg(pc.variationTheme.isEmpty() ? tr("(none)") : pc.variationTheme));
+                                for (const QString &iss : pc.issues)
+                                    appendLog(QStringLiteral("    ") + iss);
+                            }
+                        }
+
+                        QJsonArray feedMessages;
+                        QStringList buildLog;
+                        co_await _buildFullVariationMessages(
+                            feedMpId, feedMpCode, feedParentSku, m_productType,
+                            variationTheme, parentAttrs, tplEntries,
+                            familyAttrFallback, &feedMessages, &buildLog);
+                        for (const QString &l : buildLog)
+                            appendLog(QStringLiteral("  ") + l);
+
+                        QString feedResult;
+                        const QStringList feedMpList{feedMpId};
+                        co_await m_api->submitJsonListingsFeed(
+                            feedMpList, feedMessages, &feedResult);
+                        appendLog(tr("  Feed result: %1").arg(feedResult));
+                        _appendFixLog(feedParentSku, feedMpCode,
+                                      QStringLiteral("full feed: ") + feedResult);
+                        fullFeedSubmitted = true;
+
+                        // Post-check: per-child validation issues + relationship
+                        // state. Async validation may lag — issues shown here are
+                        // authoritative, missing relationships may still appear.
+                        for (const auto &e : tplEntries) {
+                            if (e.isParent || e.sku.isEmpty()) continue;
+                            AmazonCatalogApi::ListingCheck cc;
+                            co_await m_api->checkListing(feedMpId, e.sku, &cc);
+                            if (!cc.exists) {
+                                appendLog(tr("  %1: NOT LISTED").arg(e.sku));
+                                continue;
+                            }
+                            const bool linked = (cc.parentSku == feedParentSku);
+                            appendLog(tr("  %1: parent=%2 status=[%3]%4")
+                                          .arg(e.sku,
+                                               cc.parentSku.isEmpty() ? tr("(none)") : cc.parentSku,
+                                               cc.status,
+                                               linked ? QStringLiteral(" ✓") : QString()));
+                            for (const QString &iss : cc.issues)
+                                appendLog(QStringLiteral("    ") + iss);
+                        }
+                    }
+                }
 
                 /* Flat file generation — disabled pending Option B (official template).
                 if (m_productWorkingDir.exists()) {
@@ -7815,8 +9060,12 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
             continue;
         }
 
-        // 6a. Parent fix via direct Listings Items API PATCH (per child × marketplace)
-        if (target.needsParent && fixParents) {
+        // 6a. Parent fix via direct Listings Items API PATCH (per child × marketplace).
+        // Skipped when the full feed already covered this — see 5g.
+        if (target.needsParent && fixParents && fullFeedSubmitted) {
+            appendLog(tr("[%1] %2: parent fix covered by full feed — skipping direct patch")
+                          .arg(mpCode, row.asin));
+        } else if (target.needsParent && fixParents) {
             const QString parentSku = asinToSku.value(row.parentAsin);
             if (parentSku.isEmpty()) {
                 appendLog(tr("[%1] %2: no parent SKU — skipping direct patch").arg(mpCode, row.asin));
@@ -7826,11 +9075,80 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                                                      variationTheme, &parentDetails);
                 appendLog(tr("[%1] parent %2: %3").arg(mpCode, parentSku, parentDetails));
 
+                // Fetch this child's own attributes on this marketplace to get
+                // localized color/size/sizeSystem values (may differ per country).
+                QString localColor;
+                QString localSize       = row.size;
+                QString localSizeSystem;
+                QString localSizeClass, localGender, localAgeRange, localBodyType, localHeightType;
+                QJsonObject childAttrs;
+                co_await m_api->fetchListingAttributes(mpId, childSku, &childAttrs);
+                if (!childAttrs.isEmpty()) {
+                    auto firstVal = [&](const QString &key) {
+                        const QJsonArray arr = childAttrs.value(key).toArray();
+                        if (arr.isEmpty()) return QString{};
+                        const QJsonObject obj = arr.first().toObject();
+                        const QString v = obj.value(QStringLiteral("value")).toString();
+                        return v.isEmpty() ? obj.value(QStringLiteral("name")).toString() : v;
+                    };
+                    localColor      = firstVal(QStringLiteral("color_name"));
+                    localSizeSystem = firstVal(QStringLiteral("apparel_size_system"));
+                    localSizeClass  = firstVal(QStringLiteral("apparel_size_class"));
+                    localGender     = firstVal(QStringLiteral("target_gender"));
+                    localAgeRange   = firstVal(QStringLiteral("age_range_description"));
+                    localBodyType   = firstVal(QStringLiteral("apparel_body_type"));
+                    localHeightType = firstVal(QStringLiteral("apparel_height_type"));
+                    const QString s  = firstVal(QStringLiteral("apparel_size"));
+                    if (!s.isEmpty()) {
+                        localSize = s;
+                    } else if (!localSize.isEmpty() && !row.sizeSource.isEmpty()
+                               && row.sizeSource != mpCode) {
+                        localSize = FillerSize::convertSize(localSize, row.sizeSource, mpCode);
+                    }
+                }
+                // Catalog Items API fallback for any field still empty.
+                if (localColor.isEmpty() || localSizeSystem.isEmpty()
+                        || localSizeClass.isEmpty() || localGender.isEmpty()
+                        || localAgeRange.isEmpty() || localBodyType.isEmpty() || localHeightType.isEmpty()) {
+                    AmazonCatalogApi::CatalogApparelAttrs cat;
+                    co_await m_api->fetchCatalogApparelAttrs(mpId, row.asin, &cat);
+                    if (localColor.isEmpty())      localColor      = cat.color;
+                    if (localSizeSystem.isEmpty()) localSizeSystem = cat.sizeSystem;
+                    if (localSizeClass.isEmpty())  localSizeClass  = cat.sizeClass;
+                    if (localGender.isEmpty())     localGender     = cat.gender;
+                    if (localAgeRange.isEmpty())   localAgeRange   = cat.ageRange;
+                    if (localBodyType.isEmpty())   localBodyType   = cat.bodyType;
+                    if (localHeightType.isEmpty()) localHeightType = cat.heightType;
+                }
+                // UK catalog fallback for attrs still empty (same ASIN, different marketplace).
+                static const QString kUkMpId6a = QStringLiteral("A1F83G8C2ARO7P");
+                if (kUkMpId6a != mpId && (localSizeClass.isEmpty() || localGender.isEmpty()
+                        || localAgeRange.isEmpty() || localBodyType.isEmpty() || localHeightType.isEmpty())) {
+                    AmazonCatalogApi::CatalogApparelAttrs ukCat;
+                    co_await m_api->fetchCatalogApparelAttrs(kUkMpId6a, row.asin, &ukCat);
+                    if (localSizeClass.isEmpty())  localSizeClass  = ukCat.sizeClass;
+                    if (localGender.isEmpty())     localGender     = ukCat.gender;
+                    if (localAgeRange.isEmpty())   localAgeRange   = ukCat.ageRange;
+                    if (localBodyType.isEmpty())   localBodyType   = ukCat.bodyType;
+                    if (localHeightType.isEmpty()) localHeightType = ukCat.heightType;
+                }
+                QHash<QString,QString> extraAttrs;
+                if (!localSizeClass.isEmpty())  extraAttrs[QStringLiteral("apparel_size_class")]    = localSizeClass;
+                if (!localGender.isEmpty())     extraAttrs[QStringLiteral("target_gender")]         = localGender;
+                if (!localAgeRange.isEmpty())   extraAttrs[QStringLiteral("age_range_description")] = localAgeRange;
+                if (!localBodyType.isEmpty())   extraAttrs[QStringLiteral("apparel_body_type")]     = localBodyType;
+                if (!localHeightType.isEmpty()) extraAttrs[QStringLiteral("apparel_height_type")]   = localHeightType;
+
+                appendLog(tr("[%1] %2 color=%3 size=%4 sizeSystem=%5 gender=%6 sizeClass=%7")
+                              .arg(mpCode, row.asin, localColor, localSize, localSizeSystem,
+                                   localGender, localSizeClass));
+
                 bool ok = false;
                 QString childDetails;
                 co_await m_api->patchListingParent(mpId, childSku, m_productType,
                                                    parentSku, variationTheme,
-                                                   &ok, &childDetails);
+                                                   localColor, localSize, localSizeSystem,
+                                                   extraAttrs, &ok, &childDetails);
                 appendLog(tr("[%1] %2 → parent: %3").arg(mpCode, row.asin, childDetails));
             }
         }

@@ -58,7 +58,8 @@ public:
         QDate   createdDate; // summaries[0].createdDate (ISO 8601 date part)
         int     inventory = 0; // quantity from merchant listings report
         QSet<QString> existsInMarketplaces; // marketplaceIds where this SKU is listed
-        bool          isParent = false;     // true for variation parents (no color/size)
+        bool          isParent      = false; // true for variation parents (no color/size)
+        bool          manuallyMoved = false; // user moved this item to a different tree node
     };
 
     explicit AmazonCatalogApi(const QString& lwaClientId,
@@ -109,6 +110,29 @@ public:
     QCoro::Task<void> fetchChildHealth(QString asin, QString marketplaceId,
                                        ChildHealthInfo* out);
 
+    // Fetches apparel-specific attributes from the Catalog Items API (by ASIN).
+    // Keys differ from the Listings Items API: "color" not "color_name", "size" not "apparel_size".
+    // Out fields are left empty if the attribute is absent or the call fails.
+    struct CatalogApparelAttrs {
+        QString color;       // "color" attribute
+        QString sizeSystem;  // "apparel_size_system"
+        QString sizeClass;   // "apparel_size_class"
+        QString gender;      // "target_gender"
+        QString ageRange;    // "age_range_description"
+        QString bodyType;    // "apparel_body_type"
+        QString heightType;  // "apparel_height_type"
+    };
+    QCoro::Task<void> fetchCatalogApparelAttrs(QString marketplaceId, QString asin,
+                                               CatalogApparelAttrs* out);
+
+    // Search the catalog for a product matching keywords that has at least one of wantedAttrs
+    // filled. Writes the first matching attrs into *out and the ASIN into *foundAsin.
+    QCoro::Task<void> searchCatalogForApparelAttrs(QString marketplaceId,
+                                                   const QString &keywords,
+                                                   const QStringList &wantedAttrs,
+                                                   CatalogApparelAttrs* out,
+                                                   QString* foundAsin);
+
     // Fetch image CDN URLs for asin in marketplace, in variant order (MAIN first,
     // then PT01, PT02…). One URL per variant, best representative size.
     // GCC 13 ICE workaround: params by value.
@@ -137,6 +161,10 @@ public:
                                          QString productType,
                                          QString parentSku,
                                          QString variationTheme,
+                                         QString color,
+                                         QString size,
+                                         QString sizeSystem,
+                                         const QHash<QString,QString> &extraAttrs,
                                          bool* success,
                                          QString* detailsOut = nullptr);
 
@@ -189,6 +217,27 @@ public:
     QCoro::Task<void> fetchListingAttributes(QString marketplaceId, QString sku,
                                              QJsonObject* attrs);
 
+    // Diagnostic result for a single SKU × marketplace. The `issues` list contains
+    // Amazon's ASYNCHRONOUS validation errors — the real reason a previously
+    // ACCEPTED submission never materialized.
+    struct ListingCheck {
+        bool        exists = false;   // false on HTTP 404 (SKU not listed on this marketplace)
+        QString     status;           // summaries[].status joined: "BUYABLE", "DISCOVERABLE", …
+        QString     itemName;         // summaries[].itemName
+        QStringList issues;           // "[severity code] message (attributeNames)"
+        QString     parentSku;        // relationships VARIATION parentSkus[0] (when SKU is a child)
+        QStringList childSkus;        // relationships VARIATION childSkus (when SKU is a parent)
+        QString     variationTheme;   // relationships variationTheme.theme (e.g. "SIZE/COLOR")
+    };
+
+    // GET /listings/2021-08-01/items/{sellerId}/{sku}
+    //     ?includedData=issues,relationships,summaries&issueLocale=en_US
+    // The single most useful diagnostic call: exposes per-marketplace listing
+    // status, validation issues and the ACTUAL variation relationships Amazon has.
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> checkListing(QString marketplaceId, QString sku,
+                                   ListingCheck* out);
+
     // Builds and uploads a JSON_LISTINGS_FEED variation relationship feed via the Feeds API.
     // Fetches nothing — all data is passed in. Polls until DONE (3 min max).
     // Returns a human-readable status string in *resultOut.
@@ -199,6 +248,14 @@ public:
                                            QString variationTheme,
                                            QList<VariationFeedEntry> entries,
                                            QString* resultOut);
+
+    // Generic JSON_LISTINGS_FEED submission with pre-built messages.
+    // Handles feed document creation, S3 upload, submission, polling and
+    // result-report summary. Writes the submitted body to /tmp for diagnosis.
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> submitJsonListingsFeed(QStringList marketplaceIds,
+                                              QJsonArray messages,
+                                              QString* resultOut);
 
     // PATCH all image slots on a listing using CDN URLs (no binary upload).
     // imageUrls[0] → main_product_image_locator,

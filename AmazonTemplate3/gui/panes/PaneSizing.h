@@ -4,6 +4,8 @@
 #include <QWidget>
 #include <QDir>
 #include <QImage>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QList>
 #include <QMap>
 #include <QMenu>
@@ -100,6 +102,11 @@ private slots:
     void onFixParentsClicked();
     void onFixImagesClicked();
     void onFixLogClicked();
+    void onBrowseBrokenTemplateClicked();
+    void onBrokenAttrMarketChanged(int index);
+    // Shows a pre-flight confirmation dialog for parent-fix runs.
+    // Returns true if the user confirmed, false if cancelled.
+    bool _confirmFixSettings(bool fixParents);
 
 private:
     struct AsinSku {
@@ -187,7 +194,7 @@ private:
         QString color;
         QString size;
     };
-    // Writes a partial-update flat file xlsx (parent + children) into m_productWorkingDir.
+    // Writes a partial-update flat file txt (parent + children) into m_productWorkingDir.
     // parentAttrs: SP-API attributes object from fetchListingAttributes.
     void _generateParentFlatFile(const QString &marketplaceCode,
                                   const QString &parentSku,
@@ -195,6 +202,53 @@ private:
                                   const QString &productType,
                                   const QString &variationTheme,
                                   const QList<FlatFileChildEntry> &children);
+    struct VariationTemplateEntry {
+        QString sku;
+        QString asin;
+        bool    isParent  = false;
+        QString gtin;
+        QString gtinType;
+        QString color;
+        QString size;
+        QString sizeSource;      // marketplace code where size was fetched (e.g. "FR", "UK")
+        QString sizeSystem;      // apparel_size_system
+        QString sizeClass;       // apparel_size_class
+        QString gender;          // target_gender
+        QString ageRange;        // age_range_description
+        QString bodyType;        // apparel_body_type
+        QString heightType;      // apparel_height_type
+    };
+    // Opens an Amazon Inventory template (xlsm/xlsx), fills the Vorlage sheet with
+    // parent + child variation data, and saves a copy in m_productWorkingDir.
+    // attrMarketplaceId: the marketplace the parentAttrs were fetched from (drives size system).
+    // Returns the filled file path, or an empty string on failure.
+    QString _fillVariationTemplate(const QString &templatePath,
+                                    const QString &parentSku,
+                                    const QJsonObject &parentAttrs,
+                                    const QString &attrMarketplaceId,
+                                    const QString &productType,
+                                    const QString &variationTheme,
+                                    const QList<VariationTemplateEntry> &entries,
+                                    const QHash<QString,QString> &attrOverrides = {});
+    // Builds JSON_LISTINGS_FEED messages carrying the same complete data as the
+    // manual flat file (full parent row + full child rows), localized for ONE
+    // marketplace: each SKU's own listing attributes on that marketplace are
+    // preferred (raw nested copy), then the collected template data (sizes
+    // converted between countries), then familyAttrFallback (first-found among
+    // children / parent listing / user dialog).
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> _buildFullVariationMessages(QString mpId, QString mpCode,
+                                                  QString parentSku,
+                                                  QString productType,
+                                                  QString variationTheme,
+                                                  QJsonObject parentAttrsFallback,
+                                                  QList<VariationTemplateEntry> tplEntries,
+                                                  QHash<QString,QString> familyAttrFallback,
+                                                  QJsonArray* messagesOut,
+                                                  QStringList* logOut);
+    void _refreshBrokenAttrCombo();
+    // Returns the marketplace ID currently selected in comboBoxBrokenAttrMarket.
+    QString _brokenAttrMarketplaceId() const;
     void _downloadMainImage(const QString &url, const QString &asin);
     void _downloadVariantImages(const QList<QPair<QString, QStringList>> &colorImages);
     void _runCliPrompt(const QString &executable, const QStringList &args,

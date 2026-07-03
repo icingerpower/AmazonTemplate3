@@ -52,6 +52,17 @@ public:
     static const QList<QHash<QString, double>> SHOE_FEMALE_ADULT_SIZES;
     static const QList<QHash<QString, double>> SHOE_MALE_ADULT_SIZES;
 
+    // Convert a size value from one country to another using the static tables.
+    // countryFrom/To: country code as used in the tables (e.g. "FR","DE","UK","US","COM").
+    // gender: "female"/"male" (case-insensitive); defaults to female.
+    // isShoes: use shoe tables instead of clothing tables.
+    // Returns the converted size as a string, or origSize unchanged if no mapping found.
+    static QString convertSize(const QString &origSize,
+                               const QString &countryFrom,
+                               const QString &countryTo,
+                               const QString &gender = QStringLiteral("female"),
+                               bool isShoes = false);
+
 
 private:
     QVariant convertClothingSize(
