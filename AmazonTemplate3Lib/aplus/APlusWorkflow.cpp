@@ -500,18 +500,15 @@ public:
             result << spec;
         }
 
-        // 4. Detail / Fabric shot
-        {
+        // 4. Detail / Fabric shot — one per color (mirrors per-color image slots)
+        for (const QString &color : orderedColors) {
             ImageSlotSpec spec;
-            spec.elementId   = QStringLiteral("image_detail");
-            spec.displayName = QCoreApplication::translate("APlusWorkflow", "Detail / Fabric");
+            spec.elementId   = QStringLiteral("image_detail_") + colorSafeId(color);
+            spec.displayName = QCoreApplication::translate("APlusWorkflow", "Detail / Fabric — %1").arg(color);
 
-            const QString colorMention = focusColor.isEmpty()
-                ? QString{}
-                : QCoreApplication::translate("APlusWorkflow", " in %1").arg(focusColor);
+            const QString colorMention =
+                QCoreApplication::translate("APlusWorkflow", " in %1").arg(color);
 
-            // If a reference image is available the close-up must be faithful to it;
-            // if not, the detail can be impressionistic / suggested.
             const QString fabricAccuracy = mainImageHint.isEmpty()
                 ? QCoreApplication::translate("APlusWorkflow",
                     "No reference photo is available, so the close-up may suggest fabric "
@@ -523,7 +520,7 @@ public:
                     "alter the fabric pattern, weave or stitching.");
 
             const QString desktopSpec = defaultDesktopPrompt(2).arg(colorMention, fabricAccuracy);
-            const QString mobileSpec = defaultMobilePrompt(2).arg(colorMention, fabricAccuracy);
+            const QString mobileSpec  = defaultMobilePrompt(2).arg(colorMention, fabricAccuracy);
 
             spec.desktopPrompt = buildPreamble(productDesc, mainImageHint, detailInstr) + desktopSpec;
             spec.mobilePrompt  = buildPreamble(productDesc, mainImageHint, detailInstr) + mobileSpec;

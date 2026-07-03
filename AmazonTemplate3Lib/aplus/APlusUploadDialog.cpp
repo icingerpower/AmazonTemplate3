@@ -279,9 +279,14 @@ bool APlusUploadDialog::_isCellEnabled(int row, int col) const
     if (row < 0 || row >= m_images.size()) return false;
     if (col < 0 || col >= m_colorKeys.size()) return false;
     const QString &id = m_images.at(row).id;
-    const QString prefix = QStringLiteral("image_color_");
-    if (!id.startsWith(prefix)) return true;  // non-color-specific: enabled everywhere
-    const QString imageKey = colorSafeId(id.mid(prefix.size()));
+    static const QString kColorPrefix  = QStringLiteral("image_color_");
+    static const QString kDetailPrefix = QStringLiteral("image_detail_");
+    const bool isColorSlot  = id.startsWith(kColorPrefix);
+    const bool isDetailSlot = id.startsWith(kDetailPrefix);
+    if (!isColorSlot && !isDetailSlot) return true;  // non-color-specific: enabled everywhere
+    const QString imageKey = isColorSlot
+        ? colorSafeId(id.mid(kColorPrefix.size()))
+        : colorSafeId(id.mid(kDetailPrefix.size()));
     const QString &colKey = m_colorKeys.at(col);
     if (colKey.isEmpty() || imageKey == colKey) return true;  // exact match
     // If imageKey matches another column, this element belongs exclusively there.
@@ -290,12 +295,13 @@ bool APlusUploadDialog::_isCellEnabled(int row, int col) const
     // imageKey matches no column at all — the element was generated with a colour name
     // in a different language than the current session (e.g. "Blanc et or jaune" stored
     // but "White and Yellow Gold" is the current name). Enable it only for columns that
-    // have no native colour element so it can fill the gap rather than being invisible.
+    // have no native element of the same type so it can fill the gap rather than being invisible.
+    const QString &sameTypePrefix = isColorSlot ? kColorPrefix : kDetailPrefix;
     for (int r = 0; r < m_images.size(); ++r) {
         if (r == row) continue;
         const QString &rid = m_images.at(r).id;
-        if (!rid.startsWith(prefix)) continue;
-        if (colorSafeId(rid.mid(prefix.size())) == colKey) return false;
+        if (!rid.startsWith(sameTypePrefix)) continue;
+        if (colorSafeId(rid.mid(sameTypePrefix.size())) == colKey) return false;
     }
     return true;
 }
