@@ -1,0 +1,734 @@
+#pragma GCC optimize("O1")
+#include "TemuInventoryApi.h"
+
+#include <QNetworkAccessManager>
+#include <QNetworkRequest>
+#include <QNetworkReply>
+#include <QUrl>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QJsonValue>
+#include <QDateTime>
+#include <QCryptographicHash>
+#include <QRegularExpression>
+#include <QDebug>
+#include <algorithm>
+#include <QNetworkProxy>
+
+#include <QCoro/QCoroNetworkReply>
+
+namespace {
+static QString jsonValueToStringForSign(const QJsonValue &val)
+{
+    if (val.isString()) {
+        return val.toString();
+    } else if (val.isDouble()) {
+        double d = val.toDouble();
+        if (d == static_cast<int>(d)) {
+            return QString::number(static_cast<int>(d));
+        } else {
+            return QString::number(d, 'f', 6).replace(QRegularExpression(QStringLiteral("\\.?0+$")), QString());
+        }
+    } else if (val.isBool()) {
+        return val.toBool() ? QStringLiteral("true") : QStringLiteral("false");
+    } else if (val.isNull()) {
+        return QStringLiteral("null");
+    } else if (val.isArray()) {
+        QJsonDocument doc(val.toArray());
+        return QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+    } else if (val.isObject()) {
+        QJsonDocument doc(val.toObject());
+        return QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+    }
+    return QString();
+}
+
+static QString generateSign(const QJsonObject &params, const QString &appSecret)
+{
+    QStringList keys = params.keys();
+    std::sort(keys.begin(), keys.end());
+
+    QString baseString;
+    for (const QString &key : keys) {
+        baseString += key + jsonValueToStringForSign(params.value(key));
+    }
+
+    QString signString = appSecret + baseString + appSecret;
+    QByteArray hash = QCryptographicHash::hash(signString.toUtf8(), QCryptographicHash::Md5);
+    return QString::fromLatin1(hash.toHex().toUpper());
+}
+} // namespace
+
+TemuInventoryApi::TemuInventoryApi(QString appKey, QString appSecret, QString accessToken, QObject *parent)
+    : QObject(parent)
+    , m_appKey(std::move(appKey))
+    , m_appSecret(std::move(appSecret))
+    , m_accessToken(std::move(accessToken))
+{
+}
+
+TemuInventoryApi::TemuInventoryApi(QString appKey, QString appSecret, QString accessToken,
+                                   QString proxyHost, int proxyPort, QString proxyUser, QString proxyPassword,
+                                   QObject *parent)
+    : QObject(parent)
+    , m_appKey(std::move(appKey))
+    , m_appSecret(std::move(appSecret))
+    , m_accessToken(std::move(accessToken))
+    , m_proxyHost(std::move(proxyHost))
+    , m_proxyPort(proxyPort)
+    , m_proxyUser(std::move(proxyUser))
+    , m_proxyPassword(std::move(proxyPassword))
+{
+}
+
+QNetworkAccessManager *TemuInventoryApi::_nam()
+{
+    if (!m_nam) {
+        m_nam = new QNetworkAccessManager(this);
+        m_nam->setTransferTimeout(30'000); // 30 s
+        if (!m_proxyHost.isEmpty()) {
+            QNetworkProxy proxy(QNetworkProxy::HttpProxy, m_proxyHost, m_proxyPort, m_proxyUser, m_proxyPassword);
+            m_nam->setProxy(proxy);
+        }
+    }
+    return m_nam;
+}
+
+QCoro::Task<void> TemuInventoryApi::_postRequest(const QString &method, const QJsonObject &businessParams, QJsonObject *resultOut)
+{
+    *resultOut = QJsonObject();
+    m_lastError.clear();
+
+    QJsonObject reqObj = businessParams;
+    QString apiVersion = QStringLiteral("V1");
+    if (reqObj.contains(QStringLiteral("_version_override"))) {
+        apiVersion = reqObj.value(QStringLiteral("_version_override")).toString();
+        reqObj.remove(QStringLiteral("_version_override"));
+    } else {
+        QRegularExpression verReg(QStringLiteral("\\.v([1-9]+)\\."));
+        auto match = verReg.match(method);
+        if (match.hasMatch()) {
+            apiVersion = QStringLiteral("V") + match.captured(1).toUpper();
+        } else if (method == QStringLiteral("bg.goods.sales.get")) {
+            apiVersion = QStringLiteral("V2");
+        }
+    }
+
+    reqObj.insert(QStringLiteral("type"), method);
+    reqObj.insert(QStringLiteral("app_key"), m_appKey);
+    reqObj.insert(QStringLiteral("access_token"), m_accessToken);
+    reqObj.insert(QStringLiteral("data_type"), QStringLiteral("JSON"));
+    reqObj.insert(QStringLiteral("version"), apiVersion);
+
+    qint64 timestamp = QDateTime::currentDateTimeUtc().toSecsSinceEpoch();
+    reqObj.insert(QStringLiteral("timestamp"), timestamp);
+
+    // Generate sign
+    QString sign = generateSign(reqObj, m_appSecret);
+    reqObj.insert(QStringLiteral("sign"), sign);
+
+    qDebug() << "Temu API POST request:" << method << "Payload:" << QJsonDocument(reqObj).toJson(QJsonDocument::Compact);
+
+    QUrl url(QStringLiteral("https://openapi-b-eu.temu.com/openapi/router"));
+    QNetworkRequest req(url);
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+
+    QJsonDocument doc(reqObj);
+    QByteArray payload = doc.toJson(QJsonDocument::Compact);
+
+    QNetworkReply *reply = _nam()->post(req, payload);
+    co_await qCoro(reply).waitForFinished();
+
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QByteArray data = reply->readAll();
+    reply->deleteLater();
+
+    qDebug() << "Temu API POST response status:" << status << "Data size:" << data.size();
+    if (data.size() < 4000) {
+        qDebug() << "Temu API POST response body:" << data;
+    } else {
+        qDebug() << "Temu API POST response body (truncated):" << data.left(4000) << "...";
+    }
+
+    if (status != 200) {
+        m_lastError = QStringLiteral("HTTP %1: %2").arg(status).arg(QString::fromUtf8(data.left(800)));
+        co_return;
+    }
+
+    QJsonParseError parseErr;
+    QJsonDocument respDoc = QJsonDocument::fromJson(data, &parseErr);
+    if (parseErr.error != QJsonParseError::NoError) {
+        m_lastError = QStringLiteral("JSON parse error: %1").arg(parseErr.errorString());
+        qDebug() << "Temu API JSON parse error:" << m_lastError;
+        co_return;
+    }
+
+    QJsonObject respObj = respDoc.object();
+    QJsonObject responseVal = respObj.value(QStringLiteral("response")).toObject();
+    if (responseVal.isEmpty()) {
+        responseVal = respObj;
+    }
+
+    bool success = responseVal.value(QStringLiteral("success")).toBool(false);
+    if (!success) {
+        QString errCode = responseVal.value(QStringLiteral("errorCode")).toVariant().toString();
+        QString errMsg = responseVal.value(QStringLiteral("errorMsg")).toString();
+        m_lastError = QStringLiteral("API Error %1: %2").arg(errCode, errMsg);
+        qDebug() << "Temu API Error returned:" << m_lastError;
+        co_return;
+    }
+
+    *resultOut = responseVal.value(QStringLiteral("result")).toObject();
+    qDebug() << "Temu API success. Result keys:" << resultOut->keys();
+    co_return;
+}
+
+QCoro::Task<void> TemuInventoryApi::_scanSkuStocks(QHash<QString, SkuStockInfo> *out,
+                                                    std::function<void(const QString&)> onProgress)
+{
+    out->clear();
+
+    auto log = [&onProgress](const QString &msg) {
+        if (onProgress) onProgress(msg);
+        qDebug() << "Temu _scanSkuStocks:" << msg;
+    };
+
+    // bg.local.goods.sku.list.query requires skuSearchType as an INTEGER.
+    // Verified live (2026-07): type 2 = in-stock SKUs, type 3 = out-of-stock
+    // SKUs — both return real per-SKU "stock" plus skuSn/skuId/goodsId.
+    // Type 7 lists every SKU but its "stock" is always 0 (unusable).
+    // This is the ONLY place per-SKU stock is exposed; the goods-level
+    // "quantity" from bg.local.goods.list.query disagrees with the per-SKU
+    // values for multi-SKU goods, so don't use it.
+    const QList<int> searchTypes = { 2, 3 };
+    const int pageSize = 50;
+    const int kMaxPages = 50; // safety net: some search types repeat pages forever
+
+    for (int searchType : searchTypes) {
+        int typeCount = 0;
+        for (int page = 1; page <= kMaxPages; ++page) {
+            QJsonObject params;
+            params.insert(QStringLiteral("pageNo"), page);
+            params.insert(QStringLiteral("pageSize"), pageSize);
+            params.insert(QStringLiteral("skuSearchType"), searchType);
+
+            QJsonObject result;
+            m_lastError.clear();
+            co_await _postRequest(QStringLiteral("bg.local.goods.sku.list.query"), params, &result);
+            if (!m_lastError.isEmpty()) {
+                log(QStringLiteral("  ✗ SKU scan failed (skuSearchType=%1 page=%2): %3")
+                    .arg(searchType).arg(page).arg(m_lastError));
+                co_return;
+            }
+
+            const QJsonArray skuList = result.value(QStringLiteral("skuList")).toArray();
+            if (skuList.isEmpty())
+                break;
+
+            for (const QJsonValue &sVal : skuList) {
+                const QJsonObject s = sVal.toObject();
+                const QString skuSn = s.value(QStringLiteral("skuSn")).toString();
+                if (skuSn.isEmpty())
+                    continue;
+                SkuStockInfo info;
+                info.skuSn   = skuSn;
+                info.goodsId = s.value(QStringLiteral("goodsId")).toVariant().toLongLong();
+                info.skuId   = s.value(QStringLiteral("skuId")).toVariant().toLongLong();
+                info.stock   = s.value(QStringLiteral("stock")).toInt(0);
+                out->insert(skuSn.toLower(), info);
+                ++typeCount;
+            }
+
+            if (skuList.size() < pageSize)
+                break;
+        }
+        qDebug() << "Temu _scanSkuStocks: skuSearchType" << searchType
+                 << "->" << typeCount << "SKUs";
+    }
+
+    log(QStringLiteral("  → SKU scan complete: %1 SKU(s) with stock info").arg(out->size()));
+    co_return;
+}
+
+QCoro::Task<void> TemuInventoryApi::fetchInventory(QStringList skus, QHash<QString, int> *out)
+{
+    qDebug() << "Temu fetchInventory starting for SKUs:" << skus;
+    out->clear();
+    // Do NOT pre-fill with 0: a SKU absent from the store must stay absent
+    // from *out so the table shows "-" instead of a fake 0.
+
+    QHash<QString, SkuStockInfo> stocks;
+    co_await _scanSkuStocks(&stocks);
+    if (!m_lastError.isEmpty())
+        co_return;
+
+    for (const QString &s : skus) {
+        const auto it = stocks.constFind(s.toLower());
+        if (it == stocks.constEnd())
+            continue;
+        out->insert(s, it->stock);
+        qDebug() << "Temu fetchInventory: matched SKU" << s << "stock" << it->stock;
+    }
+
+    qDebug() << "Temu fetchInventory finished. Final inventory map:" << *out;
+    co_return;
+}
+
+QCoro::Task<void> TemuInventoryApi::fetchSales(QStringList skus, int days, QHash<QString, int> *out)
+{
+    qDebug() << "Temu fetchSales starting for SKUs:" << skus << "over" << days << "days";
+    out->clear();
+    for (const QString &sku : skus) {
+        out->insert(sku, 0); // Initialize all to 0
+    }
+
+    qint64 nowSecs = QDateTime::currentDateTimeUtc().toSecsSinceEpoch();
+    qint64 startSecs = QDateTime::currentDateTimeUtc().addDays(-days).toSecsSinceEpoch();
+
+    int page = 1;
+    const int pageSize = 100;
+    bool hasMore = true;
+
+    while (hasMore) {
+        QJsonObject businessParams;
+        businessParams.insert(QStringLiteral("pageNo"), page);
+        businessParams.insert(QStringLiteral("pageNumber"), page);
+        businessParams.insert(QStringLiteral("page"), page);
+        businessParams.insert(QStringLiteral("pageSize"), pageSize);
+        businessParams.insert(QStringLiteral("createAfter"), startSecs);
+        businessParams.insert(QStringLiteral("createBefore"), nowSecs);
+
+        QJsonObject result;
+        co_await _postRequest(QStringLiteral("bg.order.list.v2.get"), businessParams, &result);
+
+        if (!m_lastError.isEmpty()) {
+            qDebug() << "Temu fetchSales error on page" << page << ":" << m_lastError;
+            break;
+        }
+
+        QJsonArray orderList = result.value(QStringLiteral("orderList")).toArray();
+        if (orderList.isEmpty()) orderList = result.value(QStringLiteral("order_list")).toArray();
+        if (orderList.isEmpty()) orderList = result.value(QStringLiteral("pageItems")).toArray();
+        if (orderList.isEmpty()) orderList = result.value(QStringLiteral("page_items")).toArray();
+        if (orderList.isEmpty()) orderList = result.value(QStringLiteral("list")).toArray();
+        if (orderList.isEmpty()) {
+            if (result.value(QStringLiteral("data")).isArray()) {
+                orderList = result.value(QStringLiteral("data")).toArray();
+            } else if (result.value(QStringLiteral("data")).isObject()) {
+                QJsonObject dataObj = result.value(QStringLiteral("data")).toObject();
+                orderList = dataObj.value(QStringLiteral("orderList")).toArray();
+                if (orderList.isEmpty()) orderList = dataObj.value(QStringLiteral("order_list")).toArray();
+                if (orderList.isEmpty()) orderList = dataObj.value(QStringLiteral("pageItems")).toArray();
+                if (orderList.isEmpty()) orderList = dataObj.value(QStringLiteral("page_items")).toArray();
+                if (orderList.isEmpty()) orderList = dataObj.value(QStringLiteral("list")).toArray();
+            }
+        }
+
+        qDebug() << "Temu fetchSales page" << page << "retrieved" << orderList.size() << "orders.";
+
+        if (orderList.isEmpty()) {
+            hasMore = false;
+            break;
+        }
+
+        for (const QJsonValue &parentVal : orderList) {
+            QJsonObject parentObj = parentVal.toObject();
+
+            // parentObj is a parent order map from pageItems.
+            // Retrieve its inner orderList (which contains the sub-orders / items).
+            QJsonArray subOrders = parentObj.value(QStringLiteral("orderList")).toArray();
+            if (subOrders.isEmpty()) subOrders = parentObj.value(QStringLiteral("order_list")).toArray();
+            if (subOrders.isEmpty()) {
+                // Flat structure fallback
+                subOrders.append(parentObj);
+            }
+
+            for (const QJsonValue &subVal : subOrders) {
+                QJsonObject itemObj = subVal.toObject();
+
+                // Try top-level SKU in order item
+                QString sku = itemObj.value(QStringLiteral("skuExtCode")).toString();
+                if (sku.isEmpty()) sku = itemObj.value(QStringLiteral("extCode")).toString();
+                if (sku.isEmpty()) sku = itemObj.value(QStringLiteral("skuCode")).toString();
+                if (sku.isEmpty()) sku = itemObj.value(QStringLiteral("sku")).toString();
+                if (sku.isEmpty()) sku = itemObj.value(QStringLiteral("productSkuId")).toVariant().toString();
+                if (sku.isEmpty()) sku = itemObj.value(QStringLiteral("outerSkuId")).toString();
+                if (sku.isEmpty()) sku = itemObj.value(QStringLiteral("outer_sku_id")).toString();
+                if (sku.isEmpty()) sku = itemObj.value(QStringLiteral("sellerSkuCode")).toString();
+                if (sku.isEmpty()) sku = itemObj.value(QStringLiteral("seller_sku_code")).toString();
+                if (sku.isEmpty()) sku = itemObj.value(QStringLiteral("outSkuCode")).toString();
+                if (sku.isEmpty()) sku = itemObj.value(QStringLiteral("out_sku_code")).toString();
+                if (sku.isEmpty()) sku = itemObj.value(QStringLiteral("skuId")).toVariant().toString();
+                if (sku.isEmpty()) sku = itemObj.value(QStringLiteral("sku_id")).toVariant().toString();
+
+                // Try nested productList in order item
+                QJsonArray prodList = itemObj.value(QStringLiteral("productList")).toArray();
+                if (prodList.isEmpty()) prodList = itemObj.value(QStringLiteral("product_list")).toArray();
+
+                QStringList nestedSkus;
+                for (const QJsonValue &prodVal : prodList) {
+                    QJsonObject prodObj = prodVal.toObject();
+                    QString pSku = prodObj.value(QStringLiteral("extCode")).toString();
+                    if (pSku.isEmpty()) pSku = prodObj.value(QStringLiteral("skuExtCode")).toString();
+                    if (pSku.isEmpty()) pSku = prodObj.value(QStringLiteral("skuCode")).toString();
+                    if (pSku.isEmpty()) pSku = prodObj.value(QStringLiteral("sku")).toString();
+                    if (pSku.isEmpty()) pSku = prodObj.value(QStringLiteral("productSkuId")).toVariant().toString();
+                    if (pSku.isEmpty()) pSku = prodObj.value(QStringLiteral("outerSkuId")).toString();
+                    if (pSku.isEmpty()) pSku = prodObj.value(QStringLiteral("sellerSkuCode")).toString();
+                    if (pSku.isEmpty()) pSku = prodObj.value(QStringLiteral("productId")).toVariant().toString();
+                    if (!pSku.isEmpty()) {
+                        nestedSkus.append(pSku);
+                    }
+                }
+
+                int qty = itemObj.value(QStringLiteral("quantity")).toInt();
+                if (qty <= 0) qty = itemObj.value(QStringLiteral("goodsCount")).toInt();
+                if (qty <= 0) qty = itemObj.value(QStringLiteral("count")).toInt();
+                if (qty <= 0) qty = 1;
+
+                QString orderSn = itemObj.value(QStringLiteral("orderSn")).toString();
+                if (orderSn.isEmpty()) orderSn = parentObj.value(QStringLiteral("parentOrderSn")).toString();
+
+                if (!sku.isEmpty()) {
+                    qDebug() << "Temu fetchSales: found SKU" << sku << "ordered quantity" << qty << "in order" << orderSn;
+                    QString matchedSku;
+                    for (const QString &s : skus) {
+                        if (s.compare(sku, Qt::CaseInsensitive) == 0) {
+                            matchedSku = s;
+                            break;
+                        }
+                    }
+                    if (!matchedSku.isEmpty()) {
+                        (*out)[matchedSku] += qty;
+                    }
+                }
+
+                for (const QString &nSku : nestedSkus) {
+                    qDebug() << "Temu fetchSales: found nested SKU" << nSku << "ordered quantity" << qty << "in order" << orderSn;
+                    QString matchedSku;
+                    for (const QString &s : skus) {
+                        if (s.compare(nSku, Qt::CaseInsensitive) == 0) {
+                            matchedSku = s;
+                            break;
+                        }
+                    }
+                    if (!matchedSku.isEmpty()) {
+                        (*out)[matchedSku] += qty;
+                    }
+                }
+            }
+        }
+
+        if (orderList.size() < pageSize) {
+            hasMore = false;
+        } else {
+            page++;
+        }
+    }
+
+    qDebug() << "Temu fetchSales finished. Final sales map:" << *out;
+    co_return;
+}
+
+QCoro::Task<void> TemuInventoryApi::updateInventory(const QHash<QString,int> &qtyBySku,
+                                                     std::function<void(const QString&)> onProgress)
+{
+    m_lastError.clear();
+
+    auto log = [&onProgress](const QString &msg) {
+        if (onProgress) onProgress(msg);
+        qDebug() << "Temu updateInventory:" << msg;
+    };
+
+    // Phase 1: per-SKU stock scan (skuSn → goodsId/skuId/current stock).
+    // Works for multi-SKU goods too — stock is read and edited per SKU.
+    log(QStringLiteral("  Scanning SKU stock…"));
+    QHash<QString, SkuStockInfo> stocks;
+    co_await _scanSkuStocks(&stocks, onProgress);
+    if (!m_lastError.isEmpty())
+        co_return;
+
+    // Phase 2: push a stock diff for each target SKU found in the store.
+    int updatedCount = 0;
+    int notFoundCount = 0;
+
+    for (auto it = qtyBySku.constBegin(); it != qtyBySku.constEnd(); ++it) {
+        const QString &sku  = it.key();
+        const int targetQty = it.value();
+
+        const auto sIt = stocks.constFind(sku.toLower());
+        if (sIt == stocks.constEnd()) {
+            log(QStringLiteral("  ⚠ %1: not listed in this store, skipping").arg(sku));
+            ++notFoundCount;
+            continue;
+        }
+        const SkuStockInfo &info = *sIt;
+
+        // bg.local.goods.stock.edit is DIFF-based: stockDiff = target − current.
+        // Verified live (2026-07): {goodsId, skuStockChangeList:[{skuId, stockDiff}]}.
+        // A stockDiff of 0 returns success=true but operateResult=false, so skip no-ops.
+        const int diff = targetQty - info.stock;
+        if (diff == 0) {
+            log(QStringLiteral("  = %1 already at %2 units, nothing to do")
+                .arg(sku).arg(targetQty));
+            ++updatedCount;
+            continue;
+        }
+
+        log(QStringLiteral("  → %1 (goodsId=%2, skuId=%3): %4 → %5 (diff %6%7)")
+            .arg(sku)
+            .arg(info.goodsId).arg(info.skuId)
+            .arg(info.stock).arg(targetQty)
+            .arg(diff > 0 ? QStringLiteral("+") : QString()).arg(diff));
+
+        QJsonObject change;
+        change.insert(QStringLiteral("skuId"), info.skuId);
+        change.insert(QStringLiteral("stockDiff"), diff);
+        QJsonArray changeList;
+        changeList.append(change);
+
+        QJsonObject editParams;
+        editParams.insert(QStringLiteral("goodsId"), info.goodsId);
+        editParams.insert(QStringLiteral("skuStockChangeList"), changeList);
+
+        QJsonObject editResult;
+        m_lastError.clear();
+        co_await _postRequest(QStringLiteral("bg.local.goods.stock.edit"), editParams, &editResult);
+
+        if (!m_lastError.isEmpty()) {
+            log(QStringLiteral("  ✗ stock.edit failed for %1: %2").arg(sku, m_lastError));
+            continue;
+        }
+
+        // success=true is not enough — check operateResult + per-SKU status.
+        const bool operateResult = editResult.value(QStringLiteral("operateResult")).toBool(false);
+        bool skuOk = false;
+        QString skuErr;
+        const QJsonArray statusList =
+            editResult.value(QStringLiteral("skuStockEditStatusInfoList")).toArray();
+        for (const QJsonValue &stVal : statusList) {
+            const QJsonObject st = stVal.toObject();
+            if (st.value(QStringLiteral("skuId")).toVariant().toLongLong() == info.skuId) {
+                skuOk   = st.value(QStringLiteral("stockEditStatus")).toBool(false);
+                skuErr  = st.value(QStringLiteral("errorMsg")).toString();
+                if (skuErr.isEmpty())
+                    skuErr = st.value(QStringLiteral("errorCode")).toVariant().toString();
+            }
+        }
+
+        if (operateResult && skuOk) {
+            log(QStringLiteral("  ✓ %1 updated to %2 units").arg(sku).arg(targetQty));
+            ++updatedCount;
+        } else {
+            log(QStringLiteral("  ✗ %1: API accepted the call but edit was rejected "
+                               "(operateResult=%2, skuStatus=%3%4) — raw: %5")
+                .arg(sku)
+                .arg(operateResult ? QStringLiteral("true") : QStringLiteral("false"))
+                .arg(skuOk ? QStringLiteral("ok") : QStringLiteral("failed"))
+                .arg(skuErr.isEmpty() ? QString() : QStringLiteral(", error: ") + skuErr)
+                .arg(QString::fromUtf8(QJsonDocument(editResult).toJson(QJsonDocument::Compact).left(400))));
+        }
+    }
+
+    log(QStringLiteral("  → Done: %1 SKU(s) up to date, %2 not listed in this store")
+        .arg(updatedCount).arg(notFoundCount));
+    co_return;
+}
+
+QCoro::Task<QList<TemuInventoryApi::TemuOrder>> TemuInventoryApi::fetchUnshippedOrders()
+{
+    QList<TemuOrder> out;
+    qint64 nowSecs = QDateTime::currentDateTimeUtc().toSecsSinceEpoch();
+    // Go back 30 days to find unshipped orders
+    qint64 startSecs = QDateTime::currentDateTimeUtc().addDays(-30).toSecsSinceEpoch();
+
+    int page = 1;
+    const int pageSize = 100;
+    bool hasMore = true;
+
+    while (hasMore) {
+        QJsonObject businessParams;
+        businessParams.insert(QStringLiteral("pageNo"), page);
+        businessParams.insert(QStringLiteral("pageNumber"), page);
+        businessParams.insert(QStringLiteral("page"), page);
+        businessParams.insert(QStringLiteral("pageSize"), pageSize);
+        businessParams.insert(QStringLiteral("createAfter"), startSecs);
+        businessParams.insert(QStringLiteral("createBefore"), nowSecs);
+        // Request pending shipment orders specifically
+        businessParams.insert(QStringLiteral("orderStatus"), 2);
+        QJsonArray statusList;
+        statusList.append(2);
+        businessParams.insert(QStringLiteral("orderStatusList"), statusList);
+
+        QJsonObject result;
+        co_await _postRequest(QStringLiteral("bg.order.list.v2.get"), businessParams, &result);
+
+        if (!m_lastError.isEmpty()) {
+            qWarning() << "Temu fetchUnshippedOrders error on page" << page << ":" << m_lastError;
+            break;
+        }
+
+        QJsonArray orderList = result.value(QStringLiteral("orderList")).toArray();
+        if (orderList.isEmpty()) orderList = result.value(QStringLiteral("order_list")).toArray();
+        if (orderList.isEmpty()) orderList = result.value(QStringLiteral("pageItems")).toArray();
+
+        if (orderList.isEmpty()) {
+            hasMore = false;
+            break;
+        }
+
+        for (const QJsonValue &parentVal : orderList) {
+            QJsonObject parentObj = parentVal.toObject();
+            
+            QJsonArray subOrders = parentObj.value(QStringLiteral("orderList")).toArray();
+            if (subOrders.isEmpty()) subOrders = parentObj.value(QStringLiteral("order_list")).toArray();
+            if (subOrders.isEmpty()) {
+                subOrders.append(parentObj);
+            }
+
+            for (const QJsonValue &subVal : subOrders) {
+                QJsonObject itemObj = subVal.toObject();
+
+                // Read items
+                TemuOrder order;
+                order.orderSn = itemObj.value(QStringLiteral("orderSn")).toString();
+                order.parentOrderSn = itemObj.value(QStringLiteral("parentOrderSn")).toString();
+                if (order.parentOrderSn.isEmpty()) {
+                    order.parentOrderSn = parentObj.value(QStringLiteral("parentOrderMap")).toObject()
+                                                .value(QStringLiteral("parentOrderSn")).toString();
+                }
+                if (order.parentOrderSn.isEmpty()) {
+                    order.parentOrderSn = order.orderSn;
+                }
+
+                int parentStatus = parentObj.value(QStringLiteral("parentOrderMap")).toObject()
+                                           .value(QStringLiteral("parentOrderStatus")).toInt();
+                int itemStatus = itemObj.value(QStringLiteral("orderStatus")).toInt();
+
+                int finalStatus = (itemStatus > 0 ? itemStatus : parentStatus);
+                if (finalStatus != 2) {
+                    continue;
+                }
+
+                order.status = QString::number(finalStatus);
+                order.quantity = itemObj.value(QStringLiteral("quantity")).toInt();
+                if (order.quantity <= 0) order.quantity = itemObj.value(QStringLiteral("goodsCount")).toInt();
+
+                // Find product details
+                QJsonArray prodList = itemObj.value(QStringLiteral("productList")).toArray();
+                if (!prodList.isEmpty()) {
+                    QJsonObject prodObj = prodList.first().toObject();
+                    order.goodsId = prodObj.value(QStringLiteral("productId")).toVariant().toLongLong();
+                    order.skuId = prodObj.value(QStringLiteral("productSkuId")).toVariant().toLongLong();
+                    order.sku = prodObj.value(QStringLiteral("extCode")).toString();
+                    if (order.sku.isEmpty()) order.sku = prodObj.value(QStringLiteral("skuExtCode")).toString();
+                }
+                if (order.goodsId == 0) {
+                    order.goodsId = itemObj.value(QStringLiteral("goodsId")).toVariant().toLongLong();
+                }
+                if (order.skuId == 0) {
+                    order.skuId = itemObj.value(QStringLiteral("skuId")).toVariant().toLongLong();
+                }
+                if (order.sku.isEmpty()) {
+                    order.sku = itemObj.value(QStringLiteral("skuExtCode")).toString();
+                }
+
+                out.append(order);
+            }
+        }
+
+        if (orderList.size() < pageSize) {
+            hasMore = false;
+        } else {
+            page++;
+        }
+    }
+
+    co_return out;
+}
+
+QCoro::Task<QJsonArray> TemuInventoryApi::fetchLogisticsCompanies()
+{
+    QJsonObject businessParams;
+    QJsonObject result;
+    co_await _postRequest(QStringLiteral("bg.shiporder.logistics.get"), businessParams, &result);
+    
+    if (!m_lastError.isEmpty()) {
+        qWarning() << "Temu fetchLogisticsCompanies error:" << m_lastError;
+        co_return {};
+    }
+    
+    if (result.contains(QStringLiteral("result"))) {
+        co_return result.value(QStringLiteral("result")).toArray();
+    }
+    co_return result.value(QStringLiteral("data")).toArray();
+}
+
+QCoro::Task<bool> TemuInventoryApi::shipOrder(const QString &parentOrderSn, const QString &orderSn,
+                                              qint64 goodsId, qint64 skuId, int quantity,
+                                              const QString &trackingNumber, const QString &carrierName)
+{
+    m_lastError.clear();
+
+    // 1. Find matched carrier ID
+    qint64 carrierId = 0;
+    QJsonArray companies = co_await fetchLogisticsCompanies();
+    for (const QJsonValue &cVal : companies) {
+        QJsonObject cObj = cVal.toObject();
+        qint64 id = cObj.value(QStringLiteral("expressCompanyId")).toVariant().toLongLong();
+        if (id == 0) id = cObj.value(QStringLiteral("shipId")).toVariant().toLongLong();
+        QString name = cObj.value(QStringLiteral("expressCompanyName")).toString();
+        if (name.isEmpty()) name = cObj.value(QStringLiteral("shipName")).toString();
+        
+        if (!name.isEmpty() && !carrierName.isEmpty() &&
+            (name.compare(carrierName, Qt::CaseInsensitive) == 0 ||
+             name.contains(carrierName, Qt::CaseInsensitive) ||
+             carrierName.contains(name, Qt::CaseInsensitive))) {
+            carrierId = id;
+            qDebug() << "Temu shipOrder: matched carrier" << carrierName << "to Temu carrier" << name << "ID" << carrierId;
+            break;
+        }
+    }
+
+    if (carrierId == 0 && !companies.isEmpty()) {
+        // Fallback to first carrier
+        QJsonObject first = companies.first().toObject();
+        carrierId = first.value(QStringLiteral("expressCompanyId")).toVariant().toLongLong();
+        if (carrierId == 0) carrierId = first.value(QStringLiteral("shipId")).toVariant().toLongLong();
+        qWarning() << "Temu shipOrder: carrier" << carrierName << "not matched. Falling back to ID" << carrierId;
+    }
+
+    // 2. Build SendRequest item
+    QJsonObject sendRequest;
+    sendRequest.insert(QStringLiteral("carrierId"), carrierId);
+    sendRequest.insert(QStringLiteral("trackingNumber"), trackingNumber);
+
+    QJsonObject itemInfo;
+    itemInfo.insert(QStringLiteral("parentOrderSn"), parentOrderSn);
+    itemInfo.insert(QStringLiteral("orderSn"), orderSn);
+    itemInfo.insert(QStringLiteral("goodsId"), goodsId);
+    itemInfo.insert(QStringLiteral("skuId"), skuId);
+    itemInfo.insert(QStringLiteral("quantity"), quantity);
+
+    QJsonArray orderSendInfoList;
+    orderSendInfoList.append(itemInfo);
+    sendRequest.insert(QStringLiteral("orderSendInfoList"), orderSendInfoList);
+
+    QJsonArray sendRequestList;
+    sendRequestList.append(sendRequest);
+
+    QJsonObject businessParams;
+    businessParams.insert(QStringLiteral("sendType"), 0); // 0 = single shipping package
+    businessParams.insert(QStringLiteral("sendRequestList"), sendRequestList);
+
+    QJsonObject result;
+    co_await _postRequest(QStringLiteral("bg.logistics.shipment.v2.confirm"), businessParams, &result);
+
+    if (!m_lastError.isEmpty()) {
+        qWarning() << "Temu shipOrder failed:" << m_lastError;
+        co_return false;
+    }
+
+    co_return true;
+}

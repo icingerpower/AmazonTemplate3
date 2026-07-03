@@ -12,345 +12,502 @@
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>
-    <widget class="QGroupBox" name="groupBoxOpenAi">
-     <property name="title">
-      <string>OpenAI</string>
-     </property>
-     <layout class="QFormLayout" name="formLayoutOpenAi">
-      <item row="0" column="0">
-       <widget class="QLabel" name="labelOpenAiKey">
-        <property name="text">
-         <string>API Key</string>
-        </property>
-       </widget>
-      </item>
-      <item row="0" column="1">
-       <widget class="QLineEdit" name="lineEditOpenAiKey">
-        <property name="echoMode">
-         <enum>QLineEdit::EchoMode::PasswordEchoOnEdit</enum>
-        </property>
-        <property name="placeholderText">
-         <string>sk-proj-...</string>
-        </property>
-       </widget>
-      </item>
-     </layout>
+    <widget class="QToolBox" name="toolBox">
+     <!-- ═══════════════════ AMAZON PAGE ═══════════════════ -->
+     <widget class="QWidget" name="pageAmazon">
+      <attribute name="label">
+       <string>Amazon</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="verticalLayoutAmazon">
+       <item>
+        <widget class="QGroupBox" name="groupBoxLwa">
+         <property name="title">
+          <string>Login with Amazon (LWA)</string>
+         </property>
+         <layout class="QFormLayout" name="formLayoutLwa">
+          <item row="0" column="0" colspan="2">
+           <widget class="QLabel" name="labelLwaUrl">
+            <property name="text">
+             <string>&lt;a href=&quot;https://solutionproviderportal.amazon.com/sellingpartner/developerconsole#&quot;&gt;https://solutionproviderportal.amazon.com/sellingpartner/developerconsole#&lt;/a&gt;</string>
+            </property>
+            <property name="textFormat">
+             <enum>Qt::TextFormat::RichText</enum>
+            </property>
+            <property name="openExternalLinks">
+             <bool>true</bool>
+            </property>
+            <property name="textInteractionFlags">
+             <set>Qt::TextInteractionFlag::TextBrowserInteraction</set>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="labelLwaClientId">
+            <property name="text">
+             <string>Client ID</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QLineEdit" name="lineEditLwaClientId">
+            <property name="echoMode">
+             <enum>QLineEdit::EchoMode::PasswordEchoOnEdit</enum>
+            </property>
+            <property name="placeholderText">
+             <string>amzn1.application-oa2-client....</string>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="0">
+           <widget class="QLabel" name="labelLwaClientSecret">
+            <property name="text">
+             <string>Client Secret</string>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="1">
+           <widget class="QLineEdit" name="lineEditLwaClientSecret">
+            <property name="echoMode">
+             <enum>QLineEdit::EchoMode::Password</enum>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="groupBoxMarketplace">
+         <property name="title">
+          <string>Marketplace</string>
+         </property>
+         <layout class="QVBoxLayout" name="verticalLayoutMarketplace">
+          <item>
+           <widget class="QGroupBox" name="groupBoxEu">
+            <property name="title">
+             <string>Europe</string>
+            </property>
+            <layout class="QFormLayout" name="formLayoutEu">
+             <item row="0" column="0" colspan="2">
+              <widget class="QLabel" name="labelEuUrl">
+               <property name="text">
+                <string>&lt;a href=&quot;https://sellercentral.amazon.co.uk/sw/AccountInfo/MerchantToken/step/MerchantToken&quot;&gt;https://sellercentral.amazon.co.uk/sw/AccountInfo/MerchantToken/step/MerchantToken&lt;/a&gt;</string>
+               </property>
+               <property name="textFormat">
+                <enum>Qt::TextFormat::RichText</enum>
+               </property>
+               <property name="openExternalLinks">
+                <bool>true</bool>
+               </property>
+               <property name="textInteractionFlags">
+                <set>Qt::TextInteractionFlag::TextBrowserInteraction</set>
+               </property>
+              </widget>
+             </item>
+             <item row="1" column="0">
+              <widget class="QLabel" name="labelEuLwaRefreshToken">
+               <property name="text">
+                <string>Refresh Token</string>
+               </property>
+              </widget>
+             </item>
+             <item row="1" column="1">
+              <widget class="QLineEdit" name="lineEditEuLwaRefreshToken">
+               <property name="echoMode">
+                <enum>QLineEdit::EchoMode::Password</enum>
+               </property>
+               <property name="placeholderText">
+                <string>Atzr|...</string>
+               </property>
+              </widget>
+             </item>
+             <item row="2" column="0">
+              <widget class="QLabel" name="labelEuSellerId">
+               <property name="text">
+                <string>Seller ID</string>
+               </property>
+              </widget>
+             </item>
+             <item row="2" column="1">
+              <widget class="QLineEdit" name="lineEditEuSellerId">
+               <property name="placeholderText">
+                <string>A1RKKUPIHCS9HS</string>
+               </property>
+              </widget>
+             </item>
+            </layout>
+           </widget>
+          </item>
+          <item>
+           <widget class="QGroupBox" name="groupBoxNa">
+            <property name="title">
+             <string>North America</string>
+            </property>
+            <layout class="QFormLayout" name="formLayoutNa">
+             <item row="0" column="0" colspan="2">
+              <widget class="QLabel" name="labelNaUrl">
+               <property name="text">
+                <string>&lt;a href=&quot;https://sellercentral.amazon.com/sw/AccountInfo/MerchantToken/step/MerchantToken&quot;&gt;https://sellercentral.amazon.com/sw/AccountInfo/MerchantToken/step/MerchantToken&lt;/a&gt;</string>
+               </property>
+               <property name="textFormat">
+                <enum>Qt::TextFormat::RichText</enum>
+               </property>
+               <property name="openExternalLinks">
+                <bool>true</bool>
+               </property>
+               <property name="textInteractionFlags">
+                <set>Qt::TextInteractionFlag::TextBrowserInteraction</set>
+               </property>
+              </widget>
+             </item>
+             <item row="1" column="0">
+              <widget class="QLabel" name="labelNaLwaRefreshToken">
+               <property name="text">
+                <string>Refresh Token</string>
+               </property>
+              </widget>
+             </item>
+             <item row="1" column="1">
+              <widget class="QLineEdit" name="lineEditNaLwaRefreshToken">
+               <property name="echoMode">
+                <enum>QLineEdit::EchoMode::Password</enum>
+               </property>
+               <property name="placeholderText">
+                <string>Atzr|...</string>
+               </property>
+              </widget>
+             </item>
+             <item row="2" column="0">
+              <widget class="QLabel" name="labelNaSellerId">
+               <property name="text">
+                <string>Seller ID</string>
+               </property>
+              </widget>
+             </item>
+             <item row="2" column="1">
+              <widget class="QLineEdit" name="lineEditNaSellerId">
+               <property name="placeholderText">
+                <string>A2EUQ1WTGCTBG2</string>
+               </property>
+              </widget>
+             </item>
+            </layout>
+           </widget>
+          </item>
+          <item>
+           <widget class="QGroupBox" name="groupBoxJp">
+            <property name="title">
+             <string>Japan</string>
+            </property>
+            <layout class="QFormLayout" name="formLayoutJp">
+             <item row="0" column="0" colspan="2">
+              <widget class="QLabel" name="labelJpUrl">
+               <property name="text">
+                <string>&lt;a href=&quot;https://sellercentral.amazon.co.jp/sw/AccountInfo/MerchantToken/step/MerchantToken&quot;&gt;https://sellercentral.amazon.co.jp/sw/AccountInfo/MerchantToken/step/MerchantToken&lt;/a&gt;</string>
+               </property>
+               <property name="textFormat">
+                <enum>Qt::TextFormat::RichText</enum>
+               </property>
+               <property name="openExternalLinks">
+                <bool>true</bool>
+               </property>
+               <property name="textInteractionFlags">
+                <set>Qt::TextInteractionFlag::TextBrowserInteraction</set>
+               </property>
+              </widget>
+             </item>
+             <item row="1" column="0">
+              <widget class="QLabel" name="labelJpLwaRefreshToken">
+               <property name="text">
+                <string>Refresh Token</string>
+               </property>
+              </widget>
+             </item>
+             <item row="1" column="1">
+              <widget class="QLineEdit" name="lineEditJpLwaRefreshToken">
+               <property name="echoMode">
+                <enum>QLineEdit::EchoMode::Password</enum>
+               </property>
+               <property name="placeholderText">
+                <string>Atzr|...</string>
+               </property>
+              </widget>
+             </item>
+             <item row="2" column="0">
+              <widget class="QLabel" name="labelJpSellerId">
+               <property name="text">
+                <string>Seller ID</string>
+               </property>
+              </widget>
+             </item>
+             <item row="2" column="1">
+              <widget class="QLineEdit" name="lineEditJpSellerId">
+               <property name="placeholderText">
+                <string>A1VC38T7YXB528</string>
+               </property>
+              </widget>
+             </item>
+            </layout>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <spacer name="verticalSpacerAmazon">
+         <property name="orientation">
+          <enum>Qt::Orientation::Vertical</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>20</width>
+           <height>40</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+      </layout>
+     </widget>
+     <!-- ═══════════════════ TEMU PAGE ═══════════════════ -->
+     <widget class="QWidget" name="pageTemu">
+      <attribute name="label">
+       <string>Temu</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="verticalLayoutTemu">
+       <item>
+        <widget class="QGroupBox" name="groupBoxTemuCredentials">
+         <property name="title">
+          <string>App Credentials</string>
+         </property>
+         <layout class="QFormLayout" name="formLayoutTemuCredentials">
+          <item row="0" column="0" colspan="2">
+           <widget class="QLabel" name="labelTemuUrl">
+            <property name="text">
+             <string>&lt;a href=&quot;https://partner-eu.temu.com&quot;&gt;https://partner-eu.temu.com&lt;/a&gt;</string>
+            </property>
+            <property name="textFormat">
+             <enum>Qt::TextFormat::RichText</enum>
+            </property>
+            <property name="openExternalLinks">
+             <bool>true</bool>
+            </property>
+            <property name="textInteractionFlags">
+             <set>Qt::TextInteractionFlag::TextBrowserInteraction</set>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="labelTemuAppKey">
+            <property name="text">
+             <string>App Key</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QLineEdit" name="lineEditTemuAppKey">
+            <property name="echoMode">
+             <enum>QLineEdit::EchoMode::PasswordEchoOnEdit</enum>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="0">
+           <widget class="QLabel" name="labelTemuAppSecret">
+            <property name="text">
+             <string>App Secret</string>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="1">
+           <widget class="QLineEdit" name="lineEditTemuAppSecret">
+            <property name="echoMode">
+             <enum>QLineEdit::EchoMode::Password</enum>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="groupBoxTemuStores">
+         <property name="title">
+          <string>Stores</string>
+         </property>
+         <layout class="QVBoxLayout" name="verticalLayoutTemuStores">
+          <item>
+           <widget class="QTableView" name="tableViewTemuStores">
+            <property name="selectionMode">
+             <enum>QAbstractItemView::SelectionMode::SingleSelection</enum>
+            </property>
+            <property name="selectionBehavior">
+             <enum>QAbstractItemView::SelectionBehavior::SelectRows</enum>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="horizontalLayoutTemuStoreButtons">
+            <item>
+             <spacer name="horizontalSpacerTemuStores">
+              <property name="orientation">
+               <enum>Qt::Orientation::Horizontal</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>40</width>
+                <height>20</height>
+               </size>
+              </property>
+             </spacer>
+            </item>
+            <item>
+             <widget class="QPushButton" name="buttonAddTemuStore">
+              <property name="text">
+               <string>Add</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="buttonRemoveTemuStore">
+              <property name="text">
+               <string>Remove</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <spacer name="verticalSpacerTemu">
+         <property name="orientation">
+          <enum>Qt::Orientation::Vertical</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>20</width>
+           <height>40</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+      </layout>
+     </widget>
+     <!-- ═══════════════════ GENERAL PAGE ═══════════════════ -->
+     <widget class="QWidget" name="pageGeneral">
+      <attribute name="label">
+       <string>General</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="verticalLayoutGeneral">
+       <item>
+        <widget class="QGroupBox" name="groupBoxOpenAi">
+         <property name="title">
+          <string>OpenAI</string>
+         </property>
+         <layout class="QFormLayout" name="formLayoutOpenAi">
+          <item row="0" column="0">
+           <widget class="QLabel" name="labelOpenAiKey">
+            <property name="text">
+             <string>API Key</string>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QLineEdit" name="lineEditOpenAiKey">
+            <property name="echoMode">
+             <enum>QLineEdit::EchoMode::PasswordEchoOnEdit</enum>
+            </property>
+            <property name="placeholderText">
+             <string>sk-proj-...</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="groupBoxImgbb">
+         <property name="title">
+          <string>ImgBB Image Hosting</string>
+         </property>
+         <layout class="QFormLayout" name="formLayoutImgbb">
+          <item row="0" column="0">
+           <widget class="QLabel" name="labelImgbbApiKey">
+            <property name="text">
+             <string>API Key</string>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QLineEdit" name="lineEditImgbbApiKey">
+            <property name="echoMode">
+             <enum>QLineEdit::EchoMode::Password</enum>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="groupBoxAiTools">
+         <property name="title">
+          <string>AI CLI Tools</string>
+         </property>
+         <layout class="QVBoxLayout" name="verticalLayoutAiTools">
+          <item>
+           <widget class="QTableView" name="tableViewCliTools">
+            <property name="selectionMode">
+             <enum>QAbstractItemView::SelectionMode::SingleSelection</enum>
+            </property>
+            <property name="selectionBehavior">
+             <enum>QAbstractItemView::SelectionBehavior::SelectRows</enum>
+            </property>
+            <property name="editTriggers">
+             <set>QAbstractItemView::EditTrigger::NoEditTriggers</set>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="horizontalLayoutCliRefresh">
+            <item>
+             <spacer name="horizontalSpacerCliRefresh">
+              <property name="orientation">
+               <enum>Qt::Orientation::Horizontal</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>40</width>
+                <height>20</height>
+               </size>
+              </property>
+             </spacer>
+            </item>
+            <item>
+             <widget class="QPushButton" name="buttonRefreshCliTools">
+              <property name="text">
+               <string>Refresh</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <spacer name="verticalSpacerGeneral">
+         <property name="orientation">
+          <enum>Qt::Orientation::Vertical</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>20</width>
+           <height>40</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+      </layout>
+     </widget>
     </widget>
-   </item>
-   <item>
-    <widget class="QGroupBox" name="groupBoxLwa">
-     <property name="title">
-      <string>Login with Amazon (LWA)</string>
-     </property>
-     <layout class="QFormLayout" name="formLayoutLwa">
-      <item row="0" column="0" colspan="2">
-       <widget class="QLabel" name="labelLwaUrl">
-        <property name="text">
-         <string>&lt;a href=&quot;https://solutionproviderportal.amazon.com/sellingpartner/developerconsole#&quot;&gt;https://solutionproviderportal.amazon.com/sellingpartner/developerconsole#&lt;/a&gt;</string>
-        </property>
-        <property name="textFormat">
-         <enum>Qt::TextFormat::RichText</enum>
-        </property>
-        <property name="openExternalLinks">
-         <bool>true</bool>
-        </property>
-        <property name="textInteractionFlags">
-         <set>Qt::TextInteractionFlag::TextBrowserInteraction</set>
-        </property>
-       </widget>
-      </item>
-      <item row="1" column="0">
-       <widget class="QLabel" name="labelLwaClientId">
-        <property name="text">
-         <string>Client ID</string>
-        </property>
-       </widget>
-      </item>
-      <item row="1" column="1">
-       <widget class="QLineEdit" name="lineEditLwaClientId">
-        <property name="echoMode">
-         <enum>QLineEdit::EchoMode::PasswordEchoOnEdit</enum>
-        </property>
-        <property name="placeholderText">
-         <string>amzn1.application-oa2-client....</string>
-        </property>
-       </widget>
-      </item>
-      <item row="2" column="0">
-       <widget class="QLabel" name="labelLwaClientSecret">
-        <property name="text">
-         <string>Client Secret</string>
-        </property>
-       </widget>
-      </item>
-      <item row="2" column="1">
-       <widget class="QLineEdit" name="lineEditLwaClientSecret">
-        <property name="echoMode">
-         <enum>QLineEdit::EchoMode::Password</enum>
-        </property>
-       </widget>
-      </item>
-     </layout>
-    </widget>
-   </item>
-   <item>
-    <widget class="QGroupBox" name="groupBoxMarketplace">
-     <property name="title">
-      <string>Marketplace</string>
-     </property>
-     <layout class="QVBoxLayout" name="verticalLayoutMarketplace">
-      <item>
-       <widget class="QGroupBox" name="groupBoxEu">
-        <property name="title">
-         <string>Europe</string>
-        </property>
-        <layout class="QFormLayout" name="formLayoutEu">
-         <item row="0" column="0" colspan="2">
-          <widget class="QLabel" name="labelEuUrl">
-           <property name="text">
-            <string>&lt;a href=&quot;https://sellercentral.amazon.co.uk/sw/AccountInfo/MerchantToken/step/MerchantToken&quot;&gt;https://sellercentral.amazon.co.uk/sw/AccountInfo/MerchantToken/step/MerchantToken&lt;/a&gt;</string>
-           </property>
-           <property name="textFormat">
-            <enum>Qt::TextFormat::RichText</enum>
-           </property>
-           <property name="openExternalLinks">
-            <bool>true</bool>
-           </property>
-           <property name="textInteractionFlags">
-            <set>Qt::TextInteractionFlag::TextBrowserInteraction</set>
-           </property>
-          </widget>
-         </item>
-         <item row="1" column="0">
-          <widget class="QLabel" name="labelEuLwaRefreshToken">
-           <property name="text">
-            <string>Refresh Token</string>
-           </property>
-          </widget>
-         </item>
-         <item row="1" column="1">
-          <widget class="QLineEdit" name="lineEditEuLwaRefreshToken">
-           <property name="echoMode">
-            <enum>QLineEdit::EchoMode::Password</enum>
-           </property>
-           <property name="placeholderText">
-            <string>Atzr|...</string>
-           </property>
-          </widget>
-         </item>
-         <item row="2" column="0">
-          <widget class="QLabel" name="labelEuSellerId">
-           <property name="text">
-            <string>Seller ID</string>
-           </property>
-          </widget>
-         </item>
-         <item row="2" column="1">
-          <widget class="QLineEdit" name="lineEditEuSellerId">
-           <property name="placeholderText">
-            <string>A1RKKUPIHCS9HS</string>
-           </property>
-          </widget>
-         </item>
-        </layout>
-       </widget>
-      </item>
-      <item>
-       <widget class="QGroupBox" name="groupBoxNa">
-        <property name="title">
-         <string>North America</string>
-        </property>
-        <layout class="QFormLayout" name="formLayoutNa">
-         <item row="0" column="0" colspan="2">
-          <widget class="QLabel" name="labelNaUrl">
-           <property name="text">
-            <string>&lt;a href=&quot;https://sellercentral.amazon.com/sw/AccountInfo/MerchantToken/step/MerchantToken&quot;&gt;https://sellercentral.amazon.com/sw/AccountInfo/MerchantToken/step/MerchantToken&lt;/a&gt;</string>
-           </property>
-           <property name="textFormat">
-            <enum>Qt::TextFormat::RichText</enum>
-           </property>
-           <property name="openExternalLinks">
-            <bool>true</bool>
-           </property>
-           <property name="textInteractionFlags">
-            <set>Qt::TextInteractionFlag::TextBrowserInteraction</set>
-           </property>
-          </widget>
-         </item>
-         <item row="1" column="0">
-          <widget class="QLabel" name="labelNaLwaRefreshToken">
-           <property name="text">
-            <string>Refresh Token</string>
-           </property>
-          </widget>
-         </item>
-         <item row="1" column="1">
-          <widget class="QLineEdit" name="lineEditNaLwaRefreshToken">
-           <property name="echoMode">
-            <enum>QLineEdit::EchoMode::Password</enum>
-           </property>
-           <property name="placeholderText">
-            <string>Atzr|...</string>
-           </property>
-          </widget>
-         </item>
-         <item row="2" column="0">
-          <widget class="QLabel" name="labelNaSellerId">
-           <property name="text">
-            <string>Seller ID</string>
-           </property>
-          </widget>
-         </item>
-         <item row="2" column="1">
-          <widget class="QLineEdit" name="lineEditNaSellerId">
-           <property name="placeholderText">
-            <string>A2EUQ1WTGCTBG2</string>
-           </property>
-          </widget>
-         </item>
-        </layout>
-       </widget>
-      </item>
-      <item>
-       <widget class="QGroupBox" name="groupBoxJp">
-        <property name="title">
-         <string>Japan</string>
-        </property>
-        <layout class="QFormLayout" name="formLayoutJp">
-         <item row="0" column="0" colspan="2">
-          <widget class="QLabel" name="labelJpUrl">
-           <property name="text">
-            <string>&lt;a href=&quot;https://sellercentral.amazon.co.jp/sw/AccountInfo/MerchantToken/step/MerchantToken&quot;&gt;https://sellercentral.amazon.co.jp/sw/AccountInfo/MerchantToken/step/MerchantToken&lt;/a&gt;</string>
-           </property>
-           <property name="textFormat">
-            <enum>Qt::TextFormat::RichText</enum>
-           </property>
-           <property name="openExternalLinks">
-            <bool>true</bool>
-           </property>
-           <property name="textInteractionFlags">
-            <set>Qt::TextInteractionFlag::TextBrowserInteraction</set>
-           </property>
-          </widget>
-         </item>
-         <item row="1" column="0">
-          <widget class="QLabel" name="labelJpLwaRefreshToken">
-           <property name="text">
-            <string>Refresh Token</string>
-           </property>
-          </widget>
-         </item>
-         <item row="1" column="1">
-          <widget class="QLineEdit" name="lineEditJpLwaRefreshToken">
-           <property name="echoMode">
-            <enum>QLineEdit::EchoMode::Password</enum>
-           </property>
-           <property name="placeholderText">
-            <string>Atzr|...</string>
-           </property>
-          </widget>
-         </item>
-         <item row="2" column="0">
-          <widget class="QLabel" name="labelJpSellerId">
-           <property name="text">
-            <string>Seller ID</string>
-           </property>
-          </widget>
-         </item>
-         <item row="2" column="1">
-          <widget class="QLineEdit" name="lineEditJpSellerId">
-           <property name="placeholderText">
-            <string>A1VC38T7YXB528</string>
-           </property>
-          </widget>
-         </item>
-        </layout>
-       </widget>
-      </item>
-     </layout>
-    </widget>
-   </item>
-   <item>
-    <widget class="QGroupBox" name="groupBoxImgbb">
-     <property name="title">
-      <string>ImgBB Image Hosting</string>
-     </property>
-     <layout class="QFormLayout" name="formLayoutImgbb">
-      <item row="0" column="0">
-       <widget class="QLabel" name="labelImgbbApiKey">
-        <property name="text">
-         <string>API Key</string>
-        </property>
-       </widget>
-      </item>
-      <item row="0" column="1">
-       <widget class="QLineEdit" name="lineEditImgbbApiKey">
-        <property name="echoMode">
-         <enum>QLineEdit::EchoMode::Password</enum>
-        </property>
-       </widget>
-      </item>
-     </layout>
-    </widget>
-   </item>
-   <item>
-    <widget class="QGroupBox" name="groupBoxAiTools">
-     <property name="title">
-      <string>AI CLI Tools</string>
-     </property>
-     <layout class="QVBoxLayout" name="verticalLayoutAiTools">
-      <item>
-       <widget class="QTableView" name="tableViewCliTools">
-        <property name="selectionMode">
-         <enum>QAbstractItemView::SelectionMode::SingleSelection</enum>
-        </property>
-        <property name="selectionBehavior">
-         <enum>QAbstractItemView::SelectionBehavior::SelectRows</enum>
-        </property>
-        <property name="editTriggers">
-         <set>QAbstractItemView::EditTrigger::NoEditTriggers</set>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <layout class="QHBoxLayout" name="horizontalLayoutCliRefresh">
-        <item>
-         <spacer name="horizontalSpacerCliRefresh">
-          <property name="orientation">
-           <enum>Qt::Orientation::Horizontal</enum>
-          </property>
-          <property name="sizeHint" stdset="0">
-           <size>
-            <width>40</width>
-            <height>20</height>
-           </size>
-          </property>
-         </spacer>
-        </item>
-        <item>
-         <widget class="QPushButton" name="buttonRefreshCliTools">
-          <property name="text">
-           <string>Refresh</string>
-          </property>
-         </widget>
-        </item>
-       </layout>
-      </item>
-     </layout>
-    </widget>
-   </item>
-   <item>
-    <spacer name="verticalSpacer">
-     <property name="orientation">
-      <enum>Qt::Orientation::Vertical</enum>
-     </property>
-     <property name="sizeHint" stdset="0">
-      <size>
-       <width>20</width>
-       <height>40</height>
-      </size>
-     </property>
-    </spacer>
    </item>
   </layout>
  </widget>

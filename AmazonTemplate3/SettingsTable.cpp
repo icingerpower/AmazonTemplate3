@@ -15,6 +15,9 @@ const QString SettingsTable::KEY_NA_SELLER_ID         = "AmazonApi/na/sellerId";
 const QString SettingsTable::KEY_JP_SELLER_ID         = "AmazonApi/jp/sellerId";
 const QString SettingsTable::KEY_IMGBB_API_KEY        = "Imgbb/apiKey";
 
+const QString SettingsTable::KEY_TEMU_APP_KEY          = "TemuApi/appKey";
+const QString SettingsTable::KEY_TEMU_APP_SECRET       = "TemuApi/appSecret";
+
 const QList<SettingsTable::Entry> SettingsTable::ENTRIES = {
     {"OpenAI API Key",        KEY_OPENAI_API_KEY,        true},
     {"LWA Client ID",         KEY_LWA_CLIENT_ID,         true},
@@ -26,6 +29,8 @@ const QList<SettingsTable::Entry> SettingsTable::ENTRIES = {
     {"N. America – Seller ID",KEY_NA_SELLER_ID,          false},
     {"Japan – Seller ID",     KEY_JP_SELLER_ID,          false},
     {"ImgBB API Key",          KEY_IMGBB_API_KEY,         true},
+    {"Temu App Key",           KEY_TEMU_APP_KEY,          true},
+    {"Temu App Secret",        KEY_TEMU_APP_SECRET,       true},
 };
 
 SettingsTable::SettingsTable(QObject *parent)

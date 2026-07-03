@@ -5,6 +5,7 @@
 #include <QWidget>
 
 #include "AbstractCli.h"
+#include "TemuStoreModel.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class PaneSettings; }
@@ -22,6 +23,7 @@ public:
 private:
     Ui::PaneSettings    *ui;
     QList<AbstractCli *> m_availableClis;
+    TemuStoreModel      *m_temuStoreModel = nullptr;
 
     void _connectSlots();
     void _loadSettings();

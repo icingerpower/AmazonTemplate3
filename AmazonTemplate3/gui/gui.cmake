@@ -12,6 +12,16 @@ SET(GUI_FILES
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneWarnings.cpp
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneWarnings.h
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneWarnings.ui
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneMarketplaces.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneMarketplaces.h
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneMarketplaces.ui
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PanePricing.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PanePricing.h
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PanePricing.ui
+    ${CMAKE_CURRENT_LIST_DIR}/panes/TableCurrencyRates.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/panes/TableCurrencyRates.h
+    ${CMAKE_CURRENT_LIST_DIR}/panes/TablePricing.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/panes/TablePricing.h
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneStore.cpp
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneStore.h
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneStore.ui

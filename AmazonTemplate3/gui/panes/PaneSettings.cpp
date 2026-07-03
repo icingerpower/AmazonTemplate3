@@ -1,6 +1,7 @@
 #include "PaneSettings.h"
 #include "ui_PaneSettings.h"
 #include "SettingsTable.h"
+#include "TemuStoreModel.h"
 #include "OpenAi2.h"
 #include "AbstractCli.h"
 
@@ -68,6 +69,14 @@ void PaneSettings::_loadSettings()
 
     ui->lineEditImgbbApiKey->setText(st->value(SettingsTable::KEY_IMGBB_API_KEY));
 
+    ui->lineEditTemuAppKey->setText(st->value(SettingsTable::KEY_TEMU_APP_KEY));
+    ui->lineEditTemuAppSecret->setText(st->value(SettingsTable::KEY_TEMU_APP_SECRET));
+
+    m_temuStoreModel = new TemuStoreModel(this);
+    ui->tableViewTemuStores->setModel(m_temuStoreModel);
+    ui->tableViewTemuStores->horizontalHeader()->setStretchLastSection(true);
+    ui->tableViewTemuStores->verticalHeader()->hide();
+
     const QString openAiKey = st->value(SettingsTable::KEY_OPENAI_API_KEY);
     if (!openAiKey.isEmpty()) {
         OpenAi2::instance()->init(openAiKey);
@@ -109,4 +118,18 @@ void PaneSettings::_connectSlots()
 
     connect(ui->lineEditImgbbApiKey, &QLineEdit::textChanged,
             this, [st](const QString &v){ st->setValue(SettingsTable::KEY_IMGBB_API_KEY, v); });
+
+    connect(ui->lineEditTemuAppKey, &QLineEdit::textChanged,
+            this, [st](const QString &v){ st->setValue(SettingsTable::KEY_TEMU_APP_KEY, v); });
+    connect(ui->lineEditTemuAppSecret, &QLineEdit::textChanged,
+            this, [st](const QString &v){ st->setValue(SettingsTable::KEY_TEMU_APP_SECRET, v); });
+
+    connect(ui->buttonAddTemuStore, &QPushButton::clicked,
+            this, [this]() { m_temuStoreModel->addStore(); });
+    connect(ui->buttonRemoveTemuStore, &QPushButton::clicked,
+            this, [this]() {
+                const QModelIndex idx = ui->tableViewTemuStores->currentIndex();
+                if (idx.isValid())
+                    m_temuStoreModel->removeStore(idx.row());
+            });
 }

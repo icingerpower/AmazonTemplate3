@@ -3,6 +3,8 @@
 #include "panes/PaneGenTemplate.h"
 #include "panes/PaneSizing.h"
 #include "panes/PaneWarnings.h"
+#include "panes/PaneMarketplaces.h"
+#include "panes/PanePricing.h"
 #include "panes/PaneStore.h"
 #include "panes/PaneSettings.h"
 #include "AbstractCli.h"
@@ -47,6 +49,12 @@ MainWindow::MainWindow(QWidget *parent)
     paneWarnings->setWorkingDir(WorkingDirectoryManager::instance()->workingDir());
     paneWarnings->setAvailableClis(m_availableClis);
     ui->tabWidget->addTab(paneWarnings, tr("Warnings"));
+
+    ui->tabWidget->addTab(new PaneMarketplaces(this), tr("Marketplaces"));
+
+    auto *panePricing = new PanePricing(this);
+    panePricing->setAvailableClis(m_availableClis);
+    ui->tabWidget->addTab(panePricing, tr("Pricing"));
 
     auto *paneStore = new PaneStore(this);
     paneStore->setWorkingDir(WorkingDirectoryManager::instance()->workingDir());

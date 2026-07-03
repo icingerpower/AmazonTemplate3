@@ -10,6 +10,7 @@ include(../../common/utils/utils.cmake)
 
 include(fillers/fillers.cmake)
 include(sizecategories/sizecategories.cmake)
+include(marketplaces/marketplaces.cmake)
 
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core Widgets Network)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Widgets Network)
@@ -44,6 +45,12 @@ add_library(AmazonTemplate3Lib STATIC
   apis/AmazonAplusApi.cpp
   apis/AmazonWarningsApi.h
   apis/AmazonWarningsApi.cpp
+  apis/AmazonInventoryApi.h
+  apis/AmazonInventoryApi.cpp
+  apis/AmazonPricingApi.h
+  apis/AmazonPricingApi.cpp
+  apis/TemuInventoryApi.h
+  apis/TemuInventoryApi.cpp
   apis/TreeSizingAsins.h
   apis/TreeSizingAsins.cpp
   TableProductWarnings.h
@@ -96,6 +103,7 @@ add_library(AmazonTemplate3Lib STATIC
   AiFailureTable.cpp
   ${FILLER_FILES}
   ${SIZECATEGORY_FILES}
+  ${MARKETPLACE_FILES}
 )
 
 target_link_libraries(AmazonTemplate3Lib PRIVATE
@@ -119,6 +127,8 @@ target_compile_definitions(AmazonTemplate3Lib PRIVATE AMAZONTEMPLATE3LIB_LIBRARY
 # xlsxdocument.h but don't install it; the compat/ dir provides the stub.
 target_include_directories(AmazonTemplate3Lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
     PUBLIC ${CMAKE_SOURCE_DIR}/compat
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/apis
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/marketplaces
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../AmazonTemplate3)
 
 # Library variant for unit tests (exposes protected hooks)
@@ -134,6 +144,12 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   apis/AmazonAplusApi.cpp
   apis/AmazonWarningsApi.h
   apis/AmazonWarningsApi.cpp
+  apis/AmazonInventoryApi.h
+  apis/AmazonInventoryApi.cpp
+  apis/AmazonPricingApi.h
+  apis/AmazonPricingApi.cpp
+  apis/TemuInventoryApi.h
+  apis/TemuInventoryApi.cpp
   apis/TreeSizingAsins.h
   apis/TreeSizingAsins.cpp
   TableProductWarnings.h
@@ -180,6 +196,7 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   AiFailureTable.cpp
   ${FILLER_FILES}
   ${SIZECATEGORY_FILES}
+  ${MARKETPLACE_FILES}
 )
 
 target_link_libraries(AmazonTemplate3Lib_Tests PUBLIC
@@ -200,4 +217,6 @@ target_compile_definitions(AmazonTemplate3Lib_Tests PUBLIC
 
 target_include_directories(AmazonTemplate3Lib_Tests PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
     PUBLIC ${CMAKE_SOURCE_DIR}/compat
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/apis
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/marketplaces
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../AmazonTemplate3)

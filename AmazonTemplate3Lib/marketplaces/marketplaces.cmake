@@ -1,0 +1,14 @@
+set(MARKETPLACE_FILES
+    ${CMAKE_CURRENT_LIST_DIR}/AbstractInventorySource.h
+    ${CMAKE_CURRENT_LIST_DIR}/AbstractInventorySource.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/AbstractInventorySourceFactory.h
+    ${CMAKE_CURRENT_LIST_DIR}/AbstractInventorySourceFactory.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/AbstractTargetMarketplace.h
+    ${CMAKE_CURRENT_LIST_DIR}/AbstractTargetMarketplace.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/AbstractTargetMarketplaceFactory.h
+    ${CMAKE_CURRENT_LIST_DIR}/AbstractTargetMarketplaceFactory.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/TableMarketplaceProducts.h
+    ${CMAKE_CURRENT_LIST_DIR}/TableMarketplaceProducts.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/TableMarketplaceOrders.h
+    ${CMAKE_CURRENT_LIST_DIR}/TableMarketplaceOrders.cpp
+)
