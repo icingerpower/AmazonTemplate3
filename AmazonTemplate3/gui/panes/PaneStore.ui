@@ -59,7 +59,7 @@
             <bool>false</bool>
            </property>
            <property name="toolTip">
-            <string>Add a custom category node as sibling of the selected node</string>
+            <string>Add a custom category node as child of the selected node</string>
            </property>
            <property name="text">
             <string>Add category</string>

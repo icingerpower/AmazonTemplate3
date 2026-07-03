@@ -9,6 +9,7 @@
 #include <QHash>
 #include <QByteArray>
 #include <QDateTime>
+#include <QJsonArray>
 
 #include <QCoro/QCoroTask>
 
@@ -78,6 +79,16 @@ public:
                                              QString attributeId,
                                              QString value,
                                              bool* success);
+
+    // PATCH a structured attribute on a listing via the Listings Items API.
+    // attrValues is the pre-built JSON array (one entry per locale/marketplace_id).
+    // Sets *success = true on HTTP 200/202. GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> patchListingAttributeJson(QString marketplaceId,
+                                                QString sku,
+                                                QString productType,
+                                                QString attributeId,
+                                                QJsonArray attrValues,
+                                                bool* success);
 
     QString lastError() const { return m_lastError; }
     void    clearLastError()  { m_lastError.clear(); }

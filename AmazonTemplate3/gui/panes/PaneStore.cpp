@@ -337,6 +337,7 @@ void PaneStore::_loadFromDisk(const QString &marketplaceId)
         item.inventory = obj.value(QStringLiteral("inventory")).toInt(0);
         for (const QJsonValue &mpv : obj.value(QStringLiteral("existsIn")).toArray())
             item.existsInMarketplaces.insert(mpv.toString());
+        item.manuallyMoved = obj.value(QStringLiteral("manuallyMoved")).toBool(false);
         items.append(item);
     }
     _applyItems(items);
@@ -373,6 +374,8 @@ void PaneStore::_saveToDisk(const QString &marketplaceId,
                 mpArr.append(mpId);
             obj[QStringLiteral("existsIn")] = mpArr;
         }
+        if (item.manuallyMoved)
+            obj[QStringLiteral("manuallyMoved")] = true;
         arr.append(obj);
     }
 
@@ -709,6 +712,7 @@ void PaneStore::_onMoveProducts()
         if (destDepth >= 1 && destPath.size() > 1) item.category = normalize(destPath[1]);
         if (destDepth >= 2 && destPath.size() > 2) item.gender   = normalize(destPath[2]);
         if (destDepth >= 3 && destPath.size() > 3) item.age      = normalize(destPath[3]);
+        item.manuallyMoved = true;
     }
 
     // Rebuild.
@@ -843,7 +847,7 @@ void PaneStore::_onAddCategory()
     const QModelIndex current = ui->treeViewBrandCategory->currentIndex();
     if (!current.isValid()) return;
 
-    // New node is a sibling of the selected node (same parent).
+    // New node is a child of the selected node.
     auto namePath = [&](QModelIndex idx) -> QStringList {
         QStringList parts;
         while (idx.isValid()) {
@@ -854,18 +858,15 @@ void PaneStore::_onAddCategory()
     };
 
     const QStringList selectedPath = namePath(current);
-    // Parent path = all but the last element.
-    const QStringList parentPath =
-        selectedPath.mid(0, selectedPath.size() - 1);
 
     bool ok = false;
     const QString name = QInputDialog::getText(
         this, tr("Add category"),
-        tr("New node name (sibling of \"%1\"):").arg(selectedPath.last()),
+        tr("New node name (under \"%1\"):").arg(selectedPath.last()),
         QLineEdit::Normal, {}, &ok);
     if (!ok || name.trimmed().isEmpty()) return;
 
-    QStringList newPath = parentPath;
+    QStringList newPath = selectedPath;
     newPath << name.trimmed();
 
     if (m_customPaths.contains(newPath)) {
@@ -1126,14 +1127,42 @@ QCoro::Task<void> PaneStore::_onRetrieve()
 
         co_await _catalogApi()->fetchListingAttributes(marketplaceId, item.sku, &item, sameRegionMpIds);
 
-        // If brand came back empty, preserve whatever was stored on disk so a transient
-        // API failure doesn't erase brand data we previously fetched successfully.
-        if (item.brand.isEmpty()) {
+        // If the user manually moved this item, keep their placement regardless of what
+        // the API returns — only update fields that don't affect tree position.
+        const AmazonCatalogApi::StoreItem &prev = m_asinToItem.value(asin);
+        if (prev.manuallyMoved) {
+            item.brand         = prev.brand;
+            item.category      = prev.category;
+            item.gender        = prev.gender;
+            item.age           = prev.age;
+            item.manuallyMoved = true;
+        }
+
+        // If the whole call came back empty (API error / rate-limit), restore all
+        // previously-cached fields so the item stays correctly categorised.
+        if (!item.manuallyMoved
+                && item.brand.isEmpty() && item.category.isEmpty() && item.title.isEmpty()) {
+            if (!prev.brand.isEmpty()) {
+                ++emptyBrandCount;
+                item.brand    = prev.brand;
+                item.category = prev.category;
+                item.gender   = prev.gender;
+                item.age      = prev.age;
+                item.color    = prev.color;
+                item.sizeValue = prev.sizeValue;
+                item.title    = prev.title;
+                item.mainImageUrl = prev.mainImageUrl;
+                item.createdDate  = prev.createdDate;
+                item.existsInMarketplaces = prev.existsInMarketplaces;
+                if (emptyBrandCount <= 5)
+                    appendLog(tr("  ⚠ [%1/%2] %3 — API returned nothing, kept cached data (brand=%4)")
+                              .arg(i + 1).arg(total).arg(item.sku, item.brand));
+            }
+        } else if (!item.manuallyMoved && item.brand.isEmpty()) {
+            // Brand alone missing — partial API response.
             ++emptyBrandCount;
-            const AmazonCatalogApi::StoreItem &prev = m_asinToItem.value(asin);
             if (!prev.brand.isEmpty())
                 item.brand = prev.brand;
-            // Log first few empty-brand items so the user can diagnose root cause.
             if (emptyBrandCount <= 5)
                 appendLog(tr("  ⚠ [%1/%2] %3 — brand empty from API (title=%4, kept prev=%5)")
                           .arg(i + 1).arg(total).arg(item.sku, item.title, item.brand));

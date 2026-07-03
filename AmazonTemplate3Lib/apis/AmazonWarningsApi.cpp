@@ -1708,3 +1708,103 @@ QCoro::Task<void> AmazonWarningsApi::patchListingAttribute(QString marketplaceId
                << ":" << m_lastError;
     co_return;
 }
+
+// ---------------------------------------------------------------------------
+// patchListingAttributeJson — like patchListingAttribute but takes a pre-built
+// attribute value array (used for structured GPSR attributes).
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonWarningsApi::patchListingAttributeJson(QString marketplaceId,
+                                                               QString sku,
+                                                               QString productType,
+                                                               QString attributeId,
+                                                               QJsonArray attrValues,
+                                                               bool* success)
+{
+    *success = false;
+
+    const QString sellerId = sellerIdForMarketplace(marketplaceId);
+    if (sellerId.isEmpty()) {
+        m_lastError = QStringLiteral("No seller ID configured for marketplace %1").arg(marketplaceId);
+        qWarning() << "AmazonWarningsApi:" << m_lastError;
+        co_return;
+    }
+
+    if (attrValues.isEmpty()) {
+        m_lastError = QStringLiteral("Empty attribute value array for SKU %1 / attr %2").arg(sku, attributeId);
+        co_return;
+    }
+
+    const QJsonObject patch{
+        {QStringLiteral("op"),    QStringLiteral("replace")},
+        {QStringLiteral("path"),  QStringLiteral("/attributes/") + attributeId},
+        {QStringLiteral("value"), attrValues}
+    };
+
+    const QJsonObject bodyObj{
+        {QStringLiteral("productType"), productType},
+        {QStringLiteral("patches"),     QJsonArray{patch}}
+    };
+    const QByteArray jsonBody = QJsonDocument(bodyObj).toJson(QJsonDocument::Compact);
+
+    const QString endpoint = endpointForMarketplace(marketplaceId);
+    const QString urlPath  = QStringLiteral("/listings/2021-08-01/items/%1/%2").arg(sellerId, sku);
+
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("marketplaceIds"), marketplaceId);
+
+    QUrl url;
+    url.setScheme(QStringLiteral("https"));
+    url.setHost(endpoint);
+    url.setPath(urlPath);
+    url.setQuery(query);
+
+    QString token;
+    co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
+    if (token.isEmpty()) {
+        m_lastError = QStringLiteral("No access token for marketplace %1").arg(marketplaceId);
+        co_return;
+    }
+
+    QNetworkRequest req(url);
+    req.setRawHeader("x-amz-access-token", token.toUtf8());
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    req.setRawHeader("accept", "application/json");
+
+    qDebug() << "AmazonWarningsApi: PATCH" << url.toString()
+             << "body:" << jsonBody.left(200);
+    QNetworkReply* reply = _nam()->sendCustomRequest(req, "PATCH", jsonBody);
+    co_await qCoro(reply).waitForFinished();
+
+    const QByteArray data = reply->readAll();
+    const int httpStatus  = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    reply->deleteLater();
+
+    qDebug() << "AmazonWarningsApi: PATCH" << urlPath
+             << "HTTP" << httpStatus
+             << "response:" << QString::fromUtf8(data.left(300));
+
+    if (httpStatus == 200 || httpStatus == 202) {
+        const QJsonObject respObj     = QJsonDocument::fromJson(data).object();
+        const QString     listingStat = respObj.value(QStringLiteral("status")).toString();
+        if (listingStat == QStringLiteral("INVALID")) {
+            const QJsonArray issues = respObj.value(QStringLiteral("issues")).toArray();
+            QStringList msgs;
+            for (const QJsonValue &v : issues)
+                msgs.append(v.toObject().value(QStringLiteral("message")).toString());
+            m_lastError = QStringLiteral("Amazon INVALID for SKU %1 / attr %2: %3")
+                              .arg(sku, attributeId, msgs.join(QStringLiteral("; ")));
+            qWarning() << "AmazonWarningsApi: PATCH INVALID for" << sku << "/" << attributeId
+                       << "issues:" << msgs;
+            co_return; // *success remains false
+        }
+        *success = true;
+        co_return;
+    }
+
+    m_lastError = QStringLiteral("HTTP %1 for SKU %2 / attr %3: %4")
+                      .arg(httpStatus).arg(sku, attributeId, QString::fromUtf8(data.left(300)));
+    qWarning() << "AmazonWarningsApi: PATCH failed for" << sku << "/" << attributeId
+               << ":" << m_lastError;
+    co_return;
+}
