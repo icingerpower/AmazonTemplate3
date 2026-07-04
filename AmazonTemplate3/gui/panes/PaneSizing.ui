@@ -442,6 +442,16 @@
                </property>
               </widget>
              </item>
+             <item>
+              <widget class="QPushButton" name="buttonCheckStatus">
+               <property name="text">
+                <string>Check status</string>
+               </property>
+               <property name="toolTip">
+                <string>Read-only: current listing status, issues and relationships per marketplace + apparel_size schema rules. No submission.</string>
+               </property>
+              </widget>
+             </item>
             </layout>
            </item>
            <item>

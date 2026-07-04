@@ -1611,8 +1611,9 @@ QCoro::Task<void> AmazonCatalogApi::checkListing(QString marketplaceId, QString 
         QStringList statusFlags;
         for (const QJsonValue &sv : s0.value(QStringLiteral("status")).toArray())
             statusFlags << sv.toString();
-        out->status   = statusFlags.join(QStringLiteral(","));
-        out->itemName = s0.value(QStringLiteral("itemName")).toString();
+        out->status      = statusFlags.join(QStringLiteral(","));
+        out->itemName    = s0.value(QStringLiteral("itemName")).toString();
+        out->productType = s0.value(QStringLiteral("productType")).toString();
     }
 
     // issues → human-readable list
@@ -1647,6 +1648,174 @@ QCoro::Task<void> AmazonCatalogApi::checkListing(QString marketplaceId, QString 
                 out->variationTheme = theme.value(QStringLiteral("theme")).toString();
         }
     }
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
+// fetchApparelSizeSchemaInfo — Product Type Definitions API schema inspection
+// ---------------------------------------------------------------------------
+
+// Depth-first search for the schema node describing property `key` (looks
+// inside every "properties" object at any depth).
+static QJsonObject findSchemaProperty(const QJsonValue &node, const QString &key)
+{
+    if (node.isObject()) {
+        const QJsonObject o = node.toObject();
+        const QJsonObject props = o.value(QStringLiteral("properties")).toObject();
+        if (props.contains(key))
+            return props.value(key).toObject();
+        for (auto it = o.constBegin(); it != o.constEnd(); ++it) {
+            const QJsonObject r = findSchemaProperty(it.value(), key);
+            if (!r.isEmpty()) return r;
+        }
+    } else if (node.isArray()) {
+        for (const QJsonValue &v : node.toArray()) {
+            const QJsonObject r = findSchemaProperty(v, key);
+            if (!r.isEmpty()) return r;
+        }
+    }
+    return {};
+}
+
+// Collects every enum/enumNames pair found anywhere under `node` as
+// value → display-name entries.
+static void collectEnumPairs(const QJsonValue &node, QMap<QString, QString> *out)
+{
+    if (node.isObject()) {
+        const QJsonObject o = node.toObject();
+        const QJsonArray en    = o.value(QStringLiteral("enum")).toArray();
+        const QJsonArray names = o.value(QStringLiteral("enumNames")).toArray();
+        for (int i = 0; i < en.size(); ++i)
+            out->insert(en.at(i).toVariant().toString(),
+                        i < names.size() ? names.at(i).toString() : QString());
+        for (auto it = o.constBegin(); it != o.constEnd(); ++it) {
+            if (it.key() == QLatin1String("enum") || it.key() == QLatin1String("enumNames"))
+                continue;
+            collectEnumPairs(it.value(), out);
+        }
+    } else if (node.isArray()) {
+        for (const QJsonValue &v : node.toArray())
+            collectEnumPairs(v, out);
+    }
+}
+
+QCoro::Task<void> AmazonCatalogApi::_fetchPtSchema(QString marketplaceId,
+                                                   QString productType,
+                                                   QByteArray* out)
+{
+    out->clear();
+    if (productType.isEmpty()) co_return;
+
+    const QString cacheKey = productType + QLatin1Char(':') + marketplaceId;
+    if (m_ptSchemaCache.contains(cacheKey)) {
+        *out = m_ptSchemaCache.value(cacheKey);
+        co_return;
+    }
+
+    QString token;
+    co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
+    if (token.isEmpty()) co_return;
+
+    // Step 1 — product type definition → presigned schema URL
+    QUrl url;
+    url.setScheme(QStringLiteral("https"));
+    url.setHost(endpointForMarketplace(marketplaceId));
+    url.setPath(QStringLiteral("/definitions/2020-09-01/productTypes/%1").arg(productType));
+    QUrlQuery q;
+    q.addQueryItem(QStringLiteral("marketplaceIds"), marketplaceId);
+    q.addQueryItem(QStringLiteral("requirements"),   QStringLiteral("LISTING"));
+    url.setQuery(q);
+
+    QNetworkRequest req(url);
+    req.setRawHeader("x-amz-access-token", token.toUtf8());
+    req.setRawHeader("accept", "application/json");
+    QNetworkReply* reply = _nam()->get(req);
+    co_await qCoro(reply).waitForFinished();
+    const int st = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QByteArray data = reply->readAll();
+    reply->deleteLater();
+    if (st != 200) {
+        qWarning() << "_fetchPtSchema: definitions HTTP" << st
+                   << "for" << productType << ":" << data.left(200);
+        co_return;
+    }
+
+    const QString schemaUrl = QJsonDocument::fromJson(data).object()
+        .value(QStringLiteral("schema")).toObject()
+        .value(QStringLiteral("link")).toObject()
+        .value(QStringLiteral("resource")).toString();
+    if (schemaUrl.isEmpty()) co_return;
+
+    // Step 2 — download the schema (presigned S3 URL, no auth headers)
+    QNetworkReply* sReply = _nam()->get(QNetworkRequest(QUrl(schemaUrl)));
+    co_await qCoro(sReply).waitForFinished();
+    const int sSt = sReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QByteArray schemaData = sReply->readAll();
+    sReply->deleteLater();
+    if (sSt != 200 || schemaData.isEmpty()) {
+        qWarning() << "_fetchPtSchema: schema download HTTP" << sSt;
+        co_return;
+    }
+    m_ptSchemaCache.insert(cacheKey, schemaData);
+    *out = schemaData;
+    co_return;
+}
+
+QCoro::Task<void> AmazonCatalogApi::fetchProductTypeSchemaProps(
+    QString marketplaceId, QString productType, QSet<QString>* propsOut)
+{
+    propsOut->clear();
+    QByteArray schemaData;
+    co_await _fetchPtSchema(marketplaceId, productType, &schemaData);
+    if (schemaData.isEmpty()) co_return;
+
+    const QJsonObject root  = QJsonDocument::fromJson(schemaData).object();
+    const QJsonObject props = root.value(QStringLiteral("properties")).toObject();
+    for (auto it = props.constBegin(); it != props.constEnd(); ++it)
+        propsOut->insert(it.key());
+    co_return;
+}
+
+QCoro::Task<void> AmazonCatalogApi::fetchApparelSizeSchemaInfo(
+    QString marketplaceId, QString productType,
+    QStringList* sizeSystems, QStringList* sizeClasses, QString* dumpPath)
+{
+    sizeSystems->clear();
+    sizeClasses->clear();
+    if (dumpPath) dumpPath->clear();
+
+    QByteArray schemaData;
+    co_await _fetchPtSchema(marketplaceId, productType, &schemaData);
+    if (schemaData.isEmpty()) co_return;
+    const QJsonObject root = QJsonDocument::fromJson(schemaData).object();
+
+    // Dump the apparel_size subtree + full schema for manual inspection.
+    const QJsonObject apparelSizeNode = findSchemaProperty(root, QStringLiteral("apparel_size"));
+    if (dumpPath) {
+        *dumpPath = QStringLiteral("/tmp/sp-api-schema-%1-%2.json").arg(productType, marketplaceId);
+        QFile f(*dumpPath);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            f.write("// apparel_size subtree:\n");
+            f.write(QJsonDocument(apparelSizeNode).toJson(QJsonDocument::Indented));
+            f.write("\n// full schema:\n");
+            f.write(schemaData);
+        }
+    }
+    if (apparelSizeNode.isEmpty()) {
+        qWarning() << "fetchApparelSizeSchemaInfo: no apparel_size in schema for"
+                   << productType << marketplaceId;
+        co_return;
+    }
+
+    QMap<QString, QString> sysPairs, clsPairs;
+    collectEnumPairs(findSchemaProperty(apparelSizeNode, QStringLiteral("size_system")), &sysPairs);
+    collectEnumPairs(findSchemaProperty(apparelSizeNode, QStringLiteral("size_class")),  &clsPairs);
+    for (auto it = sysPairs.constBegin(); it != sysPairs.constEnd(); ++it)
+        *sizeSystems << (it.value().isEmpty() ? it.key()
+                                              : QStringLiteral("%1 (%2)").arg(it.key(), it.value()));
+    for (auto it = clsPairs.constBegin(); it != clsPairs.constEnd(); ++it)
+        *sizeClasses << (it.value().isEmpty() ? it.key()
+                                              : QStringLiteral("%1 (%2)").arg(it.key(), it.value()));
     co_return;
 }
 

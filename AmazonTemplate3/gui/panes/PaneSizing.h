@@ -102,6 +102,7 @@ private slots:
     void onFixParentsClicked();
     void onFixImagesClicked();
     void onFixLogClicked();
+    void onCheckStatusClicked();
     void onBrowseBrokenTemplateClicked();
     void onBrokenAttrMarketChanged(int index);
     // Shows a pre-flight confirmation dialog for parent-fix runs.
@@ -164,7 +165,10 @@ private:
     QCoro::Task<void> _loadBrokenChildData(bool forceRefresh = false);
     void _appendFixLog(const QString &asin, const QString &marketplace, const QString &details);
     // Runs the parent/image fix workflow on the Broken child table.
-    QCoro::Task<void> _runBrokenChildFix(bool fixParents, bool fixImages);
+    // checkOnly: read-only diagnostic — settled listing state, issues,
+    // relationships and apparel_size schema rules; NO submission.
+    QCoro::Task<void> _runBrokenChildFix(bool fixParents, bool fixImages,
+                                         bool checkOnly = false);
     void _refreshTemplateCombo();
     QDir _resolveProductDir(const QString &asin, const QString &title);
     void _saveProductSettings();

@@ -300,6 +300,8 @@ PaneSizing::PaneSizing(QWidget *parent)
             this, &PaneSizing::onFixImagesClicked);
     connect(ui->buttonFixLog, &QPushButton::clicked,
             this, &PaneSizing::onFixLogClicked);
+    connect(ui->buttonCheckStatus, &QPushButton::clicked,
+            this, &PaneSizing::onCheckStatusClicked);
     connect(ui->buttonBrowseBrokenTemplate, &QPushButton::clicked,
             this, &PaneSizing::onBrowseBrokenTemplateClicked);
     connect(ui->comboBoxBrokenAttrMarket,
@@ -7699,6 +7701,11 @@ void PaneSizing::onFixImagesClicked()
     _runBrokenChildFix(false, true);
 }
 
+void PaneSizing::onCheckStatusClicked()
+{
+    _runBrokenChildFix(true, false, /*checkOnly*/ true);
+}
+
 void PaneSizing::_appendFixLog(const QString &asin, const QString &marketplace,
                                const QString &details)
 {
@@ -7747,6 +7754,29 @@ void PaneSizing::onFixLogClicked()
     layout->addWidget(btnBox);
 
     dlg->show();
+}
+
+// Default listing language tag per marketplace — required by simple localized
+// attributes such as APPAREL's `size` ({value, language_tag, marketplace_id}).
+static QString langTagForMarketplace(const QString &mpId)
+{
+    static const QHash<QString, QString> kTags{
+        {QStringLiteral("A1PA6795UKMFR9"), QStringLiteral("de_DE")},
+        {QStringLiteral("A13V1IB3VIYZZH"), QStringLiteral("fr_FR")},
+        {QStringLiteral("A1RKKUPIHCS9HS"), QStringLiteral("es_ES")},
+        {QStringLiteral("APJ6JRA9NG5V4"),  QStringLiteral("it_IT")},
+        {QStringLiteral("AMEN7PMS3EDWL"),  QStringLiteral("nl_BE")},
+        {QStringLiteral("A1805IZSGTT6HS"), QStringLiteral("nl_NL")},
+        {QStringLiteral("A2NODRKZP88ZB9"), QStringLiteral("sv_SE")},
+        {QStringLiteral("A1C3SOZRARQ6R3"), QStringLiteral("pl_PL")},
+        {QStringLiteral("A28R8C7NBKEWEA"), QStringLiteral("en_IE")},
+        {QStringLiteral("A1F83G8C2ARO7P"), QStringLiteral("en_GB")},
+        {QStringLiteral("ATVPDKIKX0DER"),  QStringLiteral("en_US")},
+        {QStringLiteral("A2EUQ1WTGCTBG2"), QStringLiteral("en_CA")},
+        {QStringLiteral("A1AM78C64UM0Y8"), QStringLiteral("es_MX")},
+        {QStringLiteral("A1VC38T7YXB528"), QStringLiteral("ja_JP")},
+    };
+    return kTags.value(mpId, QStringLiteral("en_US"));
 }
 
 // Recursively replaces every "marketplace_id" field in a copied attribute value
@@ -7818,6 +7848,35 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
         refSizeSystem.isEmpty() ? QStringLiteral("(none)") : refSizeSystem,
         refSizeClass.isEmpty()  ? QStringLiteral("(none)") : refSizeClass));
 
+    // ── Schema-driven attribute selection ───────────────────────────────────
+    // Attribute names DIFFER by product type: APPAREL uses `size` (simple
+    // {value, language_tag}) + `color`, while DRESS-like types use the
+    // `apparel_size` composite + `color_name`/`color_map`. Sending the wrong
+    // set is silently IGNORED by Amazon (feed warning 90000900) — the root
+    // cause of "accepted but nothing stored". Use the listings' ACTUAL product
+    // type on THIS marketplace, and let its schema pick the attribute names.
+    QString actualPt;
+    for (const VariationTemplateEntry &e : tplEntries) {
+        if (e.isParent || e.sku.isEmpty()) continue;
+        AmazonCatalogApi::ListingCheck cc;
+        co_await m_api->checkListing(mpId, e.sku, &cc);
+        if (!cc.productType.isEmpty()) { actualPt = cc.productType; break; }
+    }
+    if (actualPt.isEmpty()) actualPt = productType;
+    QSet<QString> ptProps;
+    co_await m_api->fetchProductTypeSchemaProps(mpId, actualPt, &ptProps);
+    const bool hasApparelSize = ptProps.contains(QStringLiteral("apparel_size"));
+    const bool hasSimpleSize  = ptProps.contains(QStringLiteral("size"));
+    const bool hasColorName   = ptProps.contains(QStringLiteral("color_name"));
+    const bool hasColor       = ptProps.contains(QStringLiteral("color"));
+    const QString langTag     = langTagForMarketplace(mpId);
+    logOut->append(tr("%1 productType=%2 → size attr: %3, color attr: %4").arg(
+        mpCode, actualPt,
+        hasApparelSize ? QStringLiteral("apparel_size") :
+        hasSimpleSize  ? QStringLiteral("size") : QStringLiteral("(NONE IN SCHEMA!)"),
+        hasColorName   ? QStringLiteral("color_name") :
+        hasColor       ? QStringLiteral("color") : QStringLiteral("(NONE IN SCHEMA!)")));
+
     int messageId = 1;
     for (const VariationTemplateEntry &e : tplEntries) {
         if (e.sku.isEmpty()) continue;
@@ -7868,6 +7927,24 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
             }
             return noLang.isEmpty() ? any : noLang;
         };
+        // Canonicalize age_range_description to Amazon's English enum value.
+        // Listings often store only the localized display name ("Erwachsener",
+        // "Adulte"…) — pushing that back verbatim causes 100720 "invalid language"
+        // and can flip apparel_size conditional validation (90248 keys on
+        // age_range_description.value).
+        auto canonicalAge = [](const QString &v) -> QString {
+            static const QHash<QString, QString> kMap{
+                {QStringLiteral("erwachsener"), QStringLiteral("Adult")},
+                {QStringLiteral("erwachsene"),  QStringLiteral("Adult")},
+                {QStringLiteral("adulte"),      QStringLiteral("Adult")},
+                {QStringLiteral("adulto"),      QStringLiteral("Adult")},
+                {QStringLiteral("adulta"),      QStringLiteral("Adult")},
+                {QStringLiteral("volwassene"),  QStringLiteral("Adult")},
+                {QStringLiteral("volwassenen"), QStringLiteral("Adult")},
+                {QStringLiteral("adult"),       QStringLiteral("Adult")},
+            };
+            return kMap.value(v.trimmed().toLower(), v);
+        };
 
         // Product identifier — mirrors external_product_id(+type) flat file columns.
         if (!e.gtin.isEmpty() && !e.gtinType.isEmpty()) {
@@ -7906,6 +7983,7 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
                 QStringLiteral("condition_type"),
             };
             for (const QString &k : kParentCopyKeys) {
+                if (!ptProps.contains(k)) continue; // not defined by this schema
                 const QJsonValue v = rawOr(k, parentAttrsFallback);
                 if (usable(v)) addPatch(k, v);
             }
@@ -7914,7 +7992,7 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
             // apparel_size already stored on the parent (e.g. DE) cannot be removed via
             // feed. The only way to overwrite it is a `replace` with a COMPLETE valid
             // composite — done below when the parent already carries an apparel_size.
-            if (localAttrs.contains(QStringLiteral("apparel_size"))) {
+            if (hasApparelSize && localAttrs.contains(QStringLiteral("apparel_size"))) {
                 const QJsonArray pSize = localAttrs.value(QStringLiteral("apparel_size")).toArray();
                 QJsonObject pObj = pSize.isEmpty() ? QJsonObject{} : pSize.first().toObject();
                 // Ensure the composite is complete & valid so it stops failing
@@ -7950,13 +8028,17 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
                     e.sku, QString::fromUtf8(QJsonDocument(pObj).toJson(QJsonDocument::Compact))));
             }
 
-            // Only gender / age_range are safe top-level descriptors on the parent,
-            // and they must be English canonical values (invalid-language otherwise).
+            // Only gender / age_range are safe top-level descriptors on the parent
+            // (when the schema defines them), and they must be English canonical
+            // values (invalid-language otherwise).
             for (const QString &k : {QStringLiteral("target_gender"),
                                      QStringLiteral("age_range_description")}) {
+                if (!ptProps.contains(k)) continue;
                 QString v = englishScalar(localAttrs, k);
                 if (v.isEmpty()) v = englishScalar(parentAttrsFallback, k);
                 if (v.isEmpty()) v = familyAttrFallback.value(k);
+                if (k == QLatin1String("age_range_description"))
+                    v = canonicalAge(v);
                 if (!v.isEmpty()) addPatch(k, simpleVal(v));
             }
         } else {
@@ -7966,104 +8048,101 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
                          {QStringLiteral("parent_sku"),              parentSku},
                          {QStringLiteral("marketplace_id"),          mpId}}});
 
-            // department — required on children too (per the working flat file).
-            // Copy the raw value: the child's local listing carries the correct
-            // language_tag for this marketplace; parent fallback swaps marketplace_id.
-            {
+            // department — only when the schema defines it (APPAREL does not).
+            if (ptProps.contains(QStringLiteral("department"))) {
                 const QJsonValue dept = rawOr(QStringLiteral("department"), parentAttrsFallback);
                 if (usable(dept)) addPatch(QStringLiteral("department"), dept);
             }
 
-            // Color — theme attribute; child-specific, no family fallback.
-            QJsonValue colorV = rawOr(QStringLiteral("color_name"), {});
-            if (!usable(colorV) && !e.color.isEmpty())
-                colorV = simpleVal(e.color);
-            if (usable(colorV)) {
-                addPatch(QStringLiteral("color_name"), colorV);
-                const QJsonValue mapV = rawOr(QStringLiteral("color_map"), {});
-                addPatch(QStringLiteral("color_map"), usable(mapV) ? mapV : colorV);
-            } else {
-                logOut->append(tr("⚠ %1: no color available — theme attribute missing!").arg(e.sku));
+            // Color — theme attribute; the schema decides the attribute name.
+            if (hasColorName) {
+                QJsonValue colorV = rawOr(QStringLiteral("color_name"), {});
+                if (!usable(colorV) && !e.color.isEmpty())
+                    colorV = simpleVal(e.color);
+                if (usable(colorV)) {
+                    addPatch(QStringLiteral("color_name"), colorV);
+                    const QJsonValue mapV = rawOr(QStringLiteral("color_map"), {});
+                    addPatch(QStringLiteral("color_map"), usable(mapV) ? mapV : colorV);
+                } else {
+                    logOut->append(tr("⚠ %1: no color available — theme attribute missing!").arg(e.sku));
+                }
+            } else if (hasColor) {
+                // Simple `color` ({value, language_tag}). Prefer the child's own
+                // stored value on this marketplace (correct language); only fall
+                // back to the collected color when nothing is stored locally.
+                QJsonValue colorV = rawOr(QStringLiteral("color"), {});
+                if (!usable(colorV) && !e.color.isEmpty())
+                    colorV = QJsonArray{QJsonObject{
+                        {QStringLiteral("value"),          e.color},
+                        {QStringLiteral("language_tag"),   langTag},
+                        {QStringLiteral("marketplace_id"), mpId}}};
+                if (usable(colorV))
+                    addPatch(QStringLiteral("color"), colorV);
+                else
+                    logOut->append(tr("⚠ %1: no color available — theme attribute missing!").arg(e.sku));
             }
 
-            // apparel_size is a COMPOSITE attribute:
-            //   [{ size, size_system, size_class, marketplace_id }]
-            // NOT a flat {value:…}, and NOT accompanied by separate top-level
-            // apparel_size_system / apparel_size_class / apparel_body_type /
-            // apparel_height_type attributes (Amazon merges those into the composite
-            // and then rejects it — errors 99022, 90004401, 90248, 100893).
-            //
-            // size_system / size_class are REGIONAL — they must come from the target
-            // marketplace, never from UK or another region. Use the child's own local
-            // composite first, then the region reference derived from sibling children
-            // on THIS marketplace (pre-scan above). The .size value is per-child and
-            // converted to this country's numbering. body_type/height_type = "regular"
-            // for women's clothing (per the working flat file).
+            // ukAttrs: English age/gender source (not used for sizing values).
             static const QString kUkMpId = QStringLiteral("A1F83G8C2ARO7P");
-            const QJsonArray localSizeArr = localAttrs.value(QStringLiteral("apparel_size")).toArray();
-
-            // ukAttrs is still needed for English age/gender values (not for sizing).
             QJsonObject ukAttrs;
             if (mpId != kUkMpId)
                 co_await m_api->fetchListingAttributes(kUkMpId, e.sku, &ukAttrs);
 
-            QJsonObject sizeObj;
-            if (!localSizeArr.isEmpty()) {
-                const QJsonObject o = localSizeArr.first().toObject();
-                for (const QString &k : {QStringLiteral("size_system"),
-                                         QStringLiteral("size_class")}) {
-                    if (o.contains(k)) sizeObj.insert(k, o.value(k));
-                }
-            }
-            // Fill any still-missing system/class from the marketplace region reference.
-            if (!sizeObj.contains(QStringLiteral("size_system")) && !refSizeSystem.isEmpty())
-                sizeObj.insert(QStringLiteral("size_system"), refSizeSystem);
-            if (!sizeObj.contains(QStringLiteral("size_class")) && !refSizeClass.isEmpty())
-                sizeObj.insert(QStringLiteral("size_class"), refSizeClass);
-            // body_type / height_type default to "regular" for women's clothing.
-            sizeObj.insert(QStringLiteral("body_type"),   QStringLiteral("regular"));
-            sizeObj.insert(QStringLiteral("height_type"), QStringLiteral("regular"));
+            // The child's size in THIS country's numbering (bare, e.g. "38").
+            QString bareSize = e.size;
+            if (!bareSize.isEmpty() && !e.sizeSource.isEmpty() && e.sizeSource != mpCode)
+                bareSize = FillerSize::convertSize(bareSize, e.sizeSource, mpCode);
+            if (bareSize.startsWith(QStringLiteral("numeric_")))
+                bareSize = bareSize.mid(8);
 
-            // Size VALUE: the child's own local size on this marketplace (already in
-            // this region's numbering), else the collected size converted to mpCode.
-            QString sizeVal;
-            if (!localSizeArr.isEmpty())
-                sizeVal = localSizeArr.first().toObject().value(QStringLiteral("size")).toString();
-            if (sizeVal.isEmpty()) {
-                QString sz = e.size, szSrc = e.sizeSource;
-                if (!sz.isEmpty() && !szSrc.isEmpty() && szSrc != mpCode)
-                    sz = FillerSize::convertSize(sz, szSrc, mpCode);
-                sizeVal = sz;
-            }
+            if (hasApparelSize) {
+                // apparel_size is a COMPOSITE: [{size, size_system, size_class, …}].
+                // size_system / size_class are REGIONAL — child's own local composite
+                // first, then the region reference from sibling children (pre-scan).
+                // Canonical numeric size value is "numeric_<n>" (proven on IT).
+                // body_type/height_type = "regular" for women's clothing.
+                const QJsonArray localSizeArr = localAttrs.value(QStringLiteral("apparel_size")).toArray();
 
-            // Amazon's canonical numeric size value is "numeric_<n>" (e.g.
-            // "numeric_38"), NOT the bare display number. Proven by the IT feed:
-            // a child sent "numeric_48" linked, while siblings sent bare "42"/"44"
-            // were rejected with 100893 "Provide [size]". Normalize bare numeric
-            // sizes to that form when size_class is numeric.
-            if (!sizeVal.isEmpty()) {
-                const QString sc = sizeObj.value(QStringLiteral("size_class")).toString();
-                QString bare = sizeVal;
-                if (bare.startsWith(QStringLiteral("numeric_")))
-                    bare = bare.mid(8);
-                bool isNumeric = false;
-                bare.toDouble(&isNumeric);
-                if (isNumeric && (sc.compare(QStringLiteral("numeric"), Qt::CaseInsensitive) == 0
-                                  || sc.isEmpty())) {
-                    sizeVal = QStringLiteral("numeric_") + bare;
-                    // A numeric_<n> size implies size_class "numeric" — supply it when
-                    // no regional source had it (ES/IT feeds already accepted this pair).
-                    if (sc.isEmpty())
-                        sizeObj.insert(QStringLiteral("size_class"), QStringLiteral("numeric"));
+                QJsonObject sizeObj;
+                if (!localSizeArr.isEmpty()) {
+                    const QJsonObject o = localSizeArr.first().toObject();
+                    for (const QString &k : {QStringLiteral("size_system"),
+                                             QStringLiteral("size_class")}) {
+                        if (o.contains(k)) sizeObj.insert(k, o.value(k));
+                    }
                 }
-                sizeObj.insert(QStringLiteral("size"), sizeVal);
-            }
-            if (!sizeObj.isEmpty()) {
-                sizeObj.insert(QStringLiteral("marketplace_id"), mpId);
-                addPatch(QStringLiteral("apparel_size"), QJsonArray{sizeObj});
-            }
-            // Log the exact composite so the next run confirms which sub-fields made it.
-            {
+                if (!sizeObj.contains(QStringLiteral("size_system")) && !refSizeSystem.isEmpty())
+                    sizeObj.insert(QStringLiteral("size_system"), refSizeSystem);
+                if (!sizeObj.contains(QStringLiteral("size_class")) && !refSizeClass.isEmpty())
+                    sizeObj.insert(QStringLiteral("size_class"), refSizeClass);
+                sizeObj.insert(QStringLiteral("body_type"),   QStringLiteral("regular"));
+                sizeObj.insert(QStringLiteral("height_type"), QStringLiteral("regular"));
+
+                QString sizeVal;
+                if (!localSizeArr.isEmpty())
+                    sizeVal = localSizeArr.first().toObject().value(QStringLiteral("size")).toString();
+                if (sizeVal.isEmpty())
+                    sizeVal = bareSize;
+
+                if (!sizeVal.isEmpty()) {
+                    const QString sc = sizeObj.value(QStringLiteral("size_class")).toString();
+                    QString bare = sizeVal;
+                    if (bare.startsWith(QStringLiteral("numeric_")))
+                        bare = bare.mid(8);
+                    bool isNumeric = false;
+                    bare.toDouble(&isNumeric);
+                    if (isNumeric && (sc.compare(QStringLiteral("numeric"), Qt::CaseInsensitive) == 0
+                                      || sc.isEmpty())) {
+                        sizeVal = QStringLiteral("numeric_") + bare;
+                        if (sc.isEmpty())
+                            sizeObj.insert(QStringLiteral("size_class"), QStringLiteral("numeric"));
+                    }
+                    sizeObj.insert(QStringLiteral("size"), sizeVal);
+                }
+                if (!sizeObj.isEmpty()) {
+                    sizeObj.insert(QStringLiteral("marketplace_id"), mpId);
+                    addPatch(QStringLiteral("apparel_size"), QJsonArray{sizeObj});
+                }
                 QStringList miss;
                 if (!sizeObj.contains(QStringLiteral("size")))        miss << QStringLiteral("size");
                 if (!sizeObj.contains(QStringLiteral("size_system"))) miss << QStringLiteral("size_system");
@@ -8073,17 +8152,39 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
                          QString::fromUtf8(QJsonDocument(sizeObj).toJson(QJsonDocument::Compact)),
                          miss.isEmpty() ? QString()
                                         : QStringLiteral("  ⚠ MISSING: ") + miss.join(QStringLiteral(","))));
+            } else if (hasSimpleSize) {
+                // Simple `size`: [{value, language_tag, marketplace_id}] — free text,
+                // language_tag REQUIRED. Prefer the child's own stored value (already
+                // the right language); else the converted bare size for this country.
+                QJsonValue sizeV = rawOr(QStringLiteral("size"), {});
+                if (!usable(sizeV) && !bareSize.isEmpty())
+                    sizeV = QJsonArray{QJsonObject{
+                        {QStringLiteral("value"),          bareSize},
+                        {QStringLiteral("language_tag"),   langTag},
+                        {QStringLiteral("marketplace_id"), mpId}}};
+                if (usable(sizeV)) {
+                    addPatch(QStringLiteral("size"), sizeV);
+                    logOut->append(tr("%1 size=%2").arg(
+                        e.sku,
+                        QString::fromUtf8(QJsonDocument(sizeV.toArray()).toJson(QJsonDocument::Compact))));
+                } else {
+                    logOut->append(tr("⚠ %1: no size available — theme attribute missing!").arg(e.sku));
+                }
+            } else {
+                logOut->append(tr("⚠ %1: schema has neither apparel_size nor size!").arg(e.sku));
             }
 
-            // target_gender / age_range_description: top-level scalars and inputs the
-            // apparel_size schema conditions on. Must be English canonical values —
-            // localized values (e.g. "Erwachsener") are rejected as invalid language.
+            // target_gender / age_range_description — only when the schema defines
+            // them. Must be English canonical values (localized values rejected).
             auto topLevelEnglish = [&](const QString &key, const QString &own) {
+                if (!ptProps.contains(key)) return;
                 QString v = englishScalar(localAttrs, key);
                 if (v.isEmpty()) v = englishScalar(ukAttrs, key);
                 if (v.isEmpty()) v = englishScalar(parentAttrsFallback, key);
                 if (v.isEmpty()) v = own;
                 if (v.isEmpty()) v = familyAttrFallback.value(key);
+                if (key == QLatin1String("age_range_description"))
+                    v = canonicalAge(v);
                 if (!v.isEmpty()) addPatch(key, simpleVal(v));
             };
             topLevelEnglish(QStringLiteral("target_gender"),         e.gender);
@@ -8100,7 +8201,7 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
             {QStringLiteral("messageId"),     messageId++},
             {QStringLiteral("sku"),           e.sku},
             {QStringLiteral("operationType"), QStringLiteral("PATCH")},
-            {QStringLiteral("productType"),   productType},
+            {QStringLiteral("productType"),   actualPt},
             {QStringLiteral("patches"),       patches},
         });
     }
@@ -8471,7 +8572,8 @@ void PaneSizing::_generateParentFlatFile(const QString &marketplaceCode,
     qDebug() << "_generateParentFlatFile: saved" << filePath;
 }
 
-QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages)
+QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages,
+                                                 bool checkOnly)
 {
     if (!m_brokenChildTable) co_return;
 
@@ -8781,6 +8883,135 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
     if (m_productType.isEmpty()) {
         appendLog(tr("No product type — aborting."));
         if (statusLabelPtr) statusLabelPtr->setText(tr("Aborted."));
+        if (closeBtnPtr)    closeBtnPtr->setEnabled(true);
+        co_return;
+    }
+
+    // ── 5e1. Check-only mode: read-only settled-state diagnostic ────────────
+    // Reports, per broken marketplace: the apparel_size schema rules (allowed
+    // size_system/size_class enum values), the parent's and each child's stored
+    // apparel_size composite, listing status, relationships and issues.
+    // Performs NO submission, so it never resets Amazon's propagation clock.
+    if (checkOnly) {
+        QString parentSku;
+        for (const auto &t : targets) {
+            const auto &row = m_brokenChildTable->rows().at(t.rowIdx);
+            if (!row.parentAsin.isEmpty()) {
+                parentSku = asinToSku.value(row.parentAsin);
+                if (!parentSku.isEmpty()) break;
+            }
+        }
+        QStringList mpIds;
+        for (const auto &t : targets) {
+            const QString mpId = m_brokenChildTable->marketplaceAt(t.mktIdx).id;
+            if (!mpIds.contains(mpId)) mpIds << mpId;
+        }
+        QList<QPair<QString, QString>> childSkuAsin; // (sku, asin)
+        {
+            QSet<QString> seen;
+            for (const auto &t : targets) {
+                const auto &row = m_brokenChildTable->rows().at(t.rowIdx);
+                const QString sku = asinToSku.value(row.asin);
+                if (sku.isEmpty() || seen.contains(sku)) continue;
+                seen.insert(sku);
+                childSkuAsin.append(qMakePair(sku, row.asin));
+            }
+        }
+
+        int step = 0;
+        if (progressBarPtr) progressBarPtr->setRange(0, mpIds.size());
+        for (const QString &mpId : mpIds) {
+            QString mpCode = mpId;
+            for (int i = 0; i < m_brokenChildTable->marketplaceCount(); ++i) {
+                const auto &s = m_brokenChildTable->marketplaceAt(i);
+                if (s.id == mpId) { mpCode = s.code; break; }
+            }
+            appendLog(tr("═══ %1 — status check (read-only) ═══").arg(mpCode));
+            if (statusLabelPtr) statusLabelPtr->setText(tr("Checking %1…").arg(mpCode));
+
+            QString actualPt; // the listings' REAL product type on this marketplace
+
+            if (!parentSku.isEmpty()) {
+                AmazonCatalogApi::ListingCheck pc;
+                co_await m_api->checkListing(mpId, parentSku, &pc);
+                actualPt = pc.productType;
+                QJsonObject pAttrs;
+                co_await m_api->fetchListingAttributes(mpId, parentSku, &pAttrs);
+                const QJsonArray ps = pAttrs.value(QStringLiteral("apparel_size")).toArray();
+                appendLog(tr("  parent %1: %2 productType=%3 status=[%4] linked children=%5 theme=%6")
+                              .arg(parentSku,
+                                   pc.exists ? tr("exists") : tr("NOT LISTED"),
+                                   pc.productType.isEmpty() ? tr("(none)") : pc.productType,
+                                   pc.status)
+                              .arg(pc.childSkus.size())
+                              .arg(pc.variationTheme.isEmpty() ? tr("(none)") : pc.variationTheme));
+                appendLog(tr("    stored apparel_size: %1").arg(
+                    ps.isEmpty() ? tr("(none)")
+                                 : QString::fromUtf8(QJsonDocument(ps).toJson(QJsonDocument::Compact))));
+                for (const QString &iss : pc.issues)
+                    appendLog(QStringLiteral("    ") + iss);
+            }
+
+            for (const auto &cs : childSkuAsin) {
+                AmazonCatalogApi::ListingCheck cc;
+                co_await m_api->checkListing(mpId, cs.first, &cc);
+                if (actualPt.isEmpty()) actualPt = cc.productType;
+                QJsonObject cAttrs;
+                co_await m_api->fetchListingAttributes(mpId, cs.first, &cAttrs);
+                const QJsonArray csz = cAttrs.value(QStringLiteral("apparel_size")).toArray();
+                const QJsonArray simpleSz = cAttrs.value(QStringLiteral("size")).toArray();
+                const bool linked = !parentSku.isEmpty() && cc.parentSku == parentSku;
+                appendLog(tr("  %1 (%2): parent=%3%4 productType=%5 status=[%6]")
+                              .arg(cs.first, cs.second,
+                                   cc.parentSku.isEmpty() ? tr("(none)") : cc.parentSku,
+                                   linked ? QStringLiteral(" ✓") : QString(),
+                                   cc.productType.isEmpty() ? tr("(none)") : cc.productType,
+                                   cc.status));
+                appendLog(tr("    stored apparel_size: %1 | size: %2").arg(
+                    csz.isEmpty() ? tr("(none)")
+                                  : QString::fromUtf8(QJsonDocument(csz).toJson(QJsonDocument::Compact)),
+                    simpleSz.isEmpty() ? tr("(none)")
+                                       : QString::fromUtf8(QJsonDocument(simpleSz).toJson(QJsonDocument::Compact))));
+                for (const QString &iss : cc.issues)
+                    appendLog(QStringLiteral("    ") + iss);
+            }
+
+            // Schema of the listings' ACTUAL product type: which attribute names
+            // exist here (size vs apparel_size), and the apparel_size enums if any.
+            {
+                const QString ptForSchema = actualPt.isEmpty() ? m_productType : actualPt;
+                QSet<QString> ptProps;
+                co_await m_api->fetchProductTypeSchemaProps(mpId, ptForSchema, &ptProps);
+                QStringList sizingProps;
+                for (const QString &p : {QStringLiteral("size"), QStringLiteral("apparel_size"),
+                                         QStringLiteral("color"), QStringLiteral("color_name"),
+                                         QStringLiteral("color_map"),
+                                         QStringLiteral("special_size_type")}) {
+                    if (ptProps.contains(p)) sizingProps << p;
+                }
+                appendLog(tr("  schema (%1): %2 top-level attrs; sizing-related: %3")
+                              .arg(ptForSchema)
+                              .arg(ptProps.size())
+                              .arg(sizingProps.isEmpty() ? tr("(none)")
+                                                         : sizingProps.join(QStringLiteral(", "))));
+                if (ptProps.contains(QStringLiteral("apparel_size"))) {
+                    QStringList sysEnums, clsEnums;
+                    QString schemaDump;
+                    co_await m_api->fetchApparelSizeSchemaInfo(mpId, ptForSchema,
+                                                               &sysEnums, &clsEnums, &schemaDump);
+                    appendLog(tr("  apparel_size.size_system allowed: %1").arg(
+                        sysEnums.isEmpty() ? tr("(none found)") : sysEnums.join(QStringLiteral(", "))));
+                    appendLog(tr("  apparel_size.size_class allowed: %1").arg(
+                        clsEnums.isEmpty() ? tr("(none found)") : clsEnums.join(QStringLiteral(", "))));
+                    if (!schemaDump.isEmpty())
+                        appendLog(tr("  schema dump: %1").arg(schemaDump));
+                }
+            }
+            ++step;
+            if (progressBarPtr) progressBarPtr->setValue(step);
+        }
+        appendLog(tr("Check complete — nothing was submitted."));
+        if (statusLabelPtr) statusLabelPtr->setText(tr("Done (read-only)."));
         if (closeBtnPtr)    closeBtnPtr->setEnabled(true);
         co_return;
     }

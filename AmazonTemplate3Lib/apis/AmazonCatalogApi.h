@@ -224,6 +224,8 @@ public:
         bool        exists = false;   // false on HTTP 404 (SKU not listed on this marketplace)
         QString     status;           // summaries[].status joined: "BUYABLE", "DISCOVERABLE", …
         QString     itemName;         // summaries[].itemName
+        QString     productType;      // summaries[].productType — the listing's ACTUAL product
+                                      // type on this marketplace (may differ per marketplace!)
         QStringList issues;           // "[severity code] message (attributeNames)"
         QString     parentSku;        // relationships VARIATION parentSkus[0] (when SKU is a child)
         QStringList childSkus;        // relationships VARIATION childSkus (when SKU is a parent)
@@ -237,6 +239,27 @@ public:
     // GCC 13 ICE workaround: params by value.
     QCoro::Task<void> checkListing(QString marketplaceId, QString sku,
                                    ListingCheck* out);
+
+    // Fetches the Product Type Definitions schema for productType on marketplaceId,
+    // dumps it to /tmp (path in *dumpPath) and extracts the allowed enum values of
+    // apparel_size.size_system / .size_class as "value (display name)" strings.
+    // This is the AUTHORITATIVE source for which size_system codes a marketplace
+    // accepts — listing read-backs can contain stale/invalid internal codes.
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> fetchApparelSizeSchemaInfo(QString marketplaceId,
+                                                 QString productType,
+                                                 QStringList* sizeSystems,
+                                                 QStringList* sizeClasses,
+                                                 QString* dumpPath);
+
+    // Top-level attribute names defined by the product type schema on this
+    // marketplace (cached). Attribute names DIFFER between product types:
+    // e.g. APPAREL uses `size`/`color`, DRESS-like types use `apparel_size`/
+    // `color_name`. Empty set on fetch failure.
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> fetchProductTypeSchemaProps(QString marketplaceId,
+                                                  QString productType,
+                                                  QSet<QString>* propsOut);
 
     // Builds and uploads a JSON_LISTINGS_FEED variation relationship feed via the Feeds API.
     // Fetches nothing — all data is passed in. Polls until DONE (3 min max).
@@ -376,6 +399,14 @@ public:
 #endif
 
 private:
+    // Product type schema cache: "productType:marketplaceId" → raw schema JSON.
+    QHash<QString, QByteArray> m_ptSchemaCache;
+
+    // Downloads (or serves from cache) the raw product type schema JSON.
+    // Empty *out on failure. GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> _fetchPtSchema(QString marketplaceId, QString productType,
+                                     QByteArray* out);
+
     // Per-marketplace endpoint lookup
     static QString endpointForMarketplace(const QString& marketplaceId);
 
