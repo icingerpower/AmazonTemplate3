@@ -34,6 +34,7 @@ public:
         qint64 skuId = 0;
         int quantity = 0;
         QString temuStoreToken;
+        QString temuStoreCountry; // e.g. "FR"
         QString temuProxyHost;
         int temuProxyPort = 0;
         QString temuProxyUser;

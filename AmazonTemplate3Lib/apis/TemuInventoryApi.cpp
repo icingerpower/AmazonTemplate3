@@ -179,7 +179,16 @@ QCoro::Task<void> TemuInventoryApi::_postRequest(const QString &method, const QJ
         co_return;
     }
 
-    *resultOut = responseVal.value(QStringLiteral("result")).toObject();
+    // Some endpoints (bg.logistics.companies.get) return "result" as an
+    // array — wrap it so callers can read it under the "result" key.
+    const QJsonValue resultVal = responseVal.value(QStringLiteral("result"));
+    if (resultVal.isArray()) {
+        QJsonObject wrap;
+        wrap.insert(QStringLiteral("result"), resultVal.toArray());
+        *resultOut = wrap;
+    } else {
+        *resultOut = resultVal.toObject();
+    }
     qDebug() << "Temu API success. Result keys:" << resultOut->keys();
     co_return;
 }
@@ -615,20 +624,21 @@ QCoro::Task<QList<TemuInventoryApi::TemuOrder>> TemuInventoryApi::fetchUnshipped
                 order.quantity = itemObj.value(QStringLiteral("quantity")).toInt();
                 if (order.quantity <= 0) order.quantity = itemObj.value(QStringLiteral("goodsCount")).toInt();
 
-                // Find product details
+                // shipment.v2.confirm expects the order-level goodsId/skuId
+                // (productList's productId/productSkuId are different IDs and
+                // trigger 20006 "The order and Order item ID do not match").
+                order.goodsId = itemObj.value(QStringLiteral("goodsId")).toVariant().toLongLong();
+                order.skuId = itemObj.value(QStringLiteral("skuId")).toVariant().toLongLong();
+
                 QJsonArray prodList = itemObj.value(QStringLiteral("productList")).toArray();
                 if (!prodList.isEmpty()) {
                     QJsonObject prodObj = prodList.first().toObject();
-                    order.goodsId = prodObj.value(QStringLiteral("productId")).toVariant().toLongLong();
-                    order.skuId = prodObj.value(QStringLiteral("productSkuId")).toVariant().toLongLong();
+                    if (order.goodsId == 0)
+                        order.goodsId = prodObj.value(QStringLiteral("productId")).toVariant().toLongLong();
+                    if (order.skuId == 0)
+                        order.skuId = prodObj.value(QStringLiteral("productSkuId")).toVariant().toLongLong();
                     order.sku = prodObj.value(QStringLiteral("extCode")).toString();
                     if (order.sku.isEmpty()) order.sku = prodObj.value(QStringLiteral("skuExtCode")).toString();
-                }
-                if (order.goodsId == 0) {
-                    order.goodsId = itemObj.value(QStringLiteral("goodsId")).toVariant().toLongLong();
-                }
-                if (order.skuId == 0) {
-                    order.skuId = itemObj.value(QStringLiteral("skuId")).toVariant().toLongLong();
                 }
                 if (order.sku.isEmpty()) {
                     order.sku = itemObj.value(QStringLiteral("skuExtCode")).toString();
@@ -650,53 +660,111 @@ QCoro::Task<QList<TemuInventoryApi::TemuOrder>> TemuInventoryApi::fetchUnshipped
 
 QCoro::Task<QJsonArray> TemuInventoryApi::fetchLogisticsCompanies()
 {
-    QJsonObject businessParams;
-    QJsonObject result;
-    co_await _postRequest(QStringLiteral("bg.shiporder.logistics.get"), businessParams, &result);
-    
-    if (!m_lastError.isEmpty()) {
-        qWarning() << "Temu fetchLogisticsCompanies error:" << m_lastError;
-        co_return {};
+    // bg.shiporder.logistics.get does not exist on the EU gateway (3000003).
+    // bg.logistics.companies.get requires an int regionId and returns
+    // result: [{logisticsServiceProviderId, logisticsServiceProviderName,
+    // logisticsBrandName}]. Provider IDs are globally consistent, so merge
+    // the lists of the regions that carry the carriers we care about
+    // (swiship/Amazon variants live in 69/76/90/98; EU nationals in 13/20/32).
+    static const int kRegionIds[] = {13, 20, 32, 69, 76, 90, 98};
+
+    QJsonArray merged;
+    QSet<qint64> seen;
+    QString firstError;
+    for (int regionId : kRegionIds) {
+        m_lastError.clear();
+        QJsonObject businessParams;
+        businessParams.insert(QStringLiteral("regionId"), regionId);
+        QJsonObject result;
+        co_await _postRequest(QStringLiteral("bg.logistics.companies.get"), businessParams, &result);
+        if (!m_lastError.isEmpty()) {
+            if (firstError.isEmpty()) firstError = m_lastError;
+            continue;
+        }
+        const QJsonArray list = result.value(QStringLiteral("result")).toArray();
+        for (const QJsonValue &v : list) {
+            const QJsonObject c = v.toObject();
+            const qint64 id = c.value(QStringLiteral("logisticsServiceProviderId")).toVariant().toLongLong();
+            if (id == 0 || seen.contains(id))
+                continue;
+            seen.insert(id);
+            merged.append(c);
+        }
     }
-    
-    if (result.contains(QStringLiteral("result"))) {
-        co_return result.value(QStringLiteral("result")).toArray();
-    }
-    co_return result.value(QStringLiteral("data")).toArray();
+
+    m_lastError.clear();
+    if (merged.isEmpty() && !firstError.isEmpty())
+        m_lastError = firstError;
+    co_return merged;
 }
 
 QCoro::Task<bool> TemuInventoryApi::shipOrder(const QString &parentOrderSn, const QString &orderSn,
                                               qint64 goodsId, qint64 skuId, int quantity,
-                                              const QString &trackingNumber, const QString &carrierName)
+                                              const QString &trackingNumber, const QString &carrierName,
+                                              const QString &countryCode,
+                                              std::function<void(const QString&)> onProgress)
 {
     m_lastError.clear();
 
     // 1. Find matched carrier ID
     qint64 carrierId = 0;
+    QString matchedName;
+    QStringList availableNames;
+    QList<QPair<QString, qint64>> carriers; // name → providerId
     QJsonArray companies = co_await fetchLogisticsCompanies();
     for (const QJsonValue &cVal : companies) {
         QJsonObject cObj = cVal.toObject();
-        qint64 id = cObj.value(QStringLiteral("expressCompanyId")).toVariant().toLongLong();
-        if (id == 0) id = cObj.value(QStringLiteral("shipId")).toVariant().toLongLong();
-        QString name = cObj.value(QStringLiteral("expressCompanyName")).toString();
-        if (name.isEmpty()) name = cObj.value(QStringLiteral("shipName")).toString();
-        
-        if (!name.isEmpty() && !carrierName.isEmpty() &&
+        qint64 id = cObj.value(QStringLiteral("logisticsServiceProviderId")).toVariant().toLongLong();
+        QString name = cObj.value(QStringLiteral("logisticsBrandName")).toString();
+        if (name.isEmpty()) name = cObj.value(QStringLiteral("logisticsServiceProviderName")).toString();
+        if (id == 0 || name.isEmpty())
+            continue;
+        availableNames.append(name);
+        carriers.append({name, id});
+
+        if (carrierId == 0 && !carrierName.isEmpty() &&
             (name.compare(carrierName, Qt::CaseInsensitive) == 0 ||
              name.contains(carrierName, Qt::CaseInsensitive) ||
              carrierName.contains(name, Qt::CaseInsensitive))) {
             carrierId = id;
-            qDebug() << "Temu shipOrder: matched carrier" << carrierName << "to Temu carrier" << name << "ID" << carrierId;
-            break;
+            matchedName = name;
         }
     }
 
-    if (carrierId == 0 && !companies.isEmpty()) {
-        // Fallback to first carrier
-        QJsonObject first = companies.first().toObject();
-        carrierId = first.value(QStringLiteral("expressCompanyId")).toVariant().toLongLong();
-        if (carrierId == 0) carrierId = first.value(QStringLiteral("shipId")).toVariant().toLongLong();
-        qWarning() << "Temu shipOrder: carrier" << carrierName << "not matched. Falling back to ID" << carrierId;
+    // Amazon MCF ships as "Amazon Logistics"; on Temu the matching carrier is
+    // "swiship(CC)" (Swiship is Amazon's MCF tracking site), else "Amazon
+    // shiping(CC)" / "Amazon Shipping (CC)".
+    if (carrierId == 0 && carrierName.contains(QLatin1String("amazon"), Qt::CaseInsensitive)
+        && !countryCode.isEmpty()) {
+        const QString ccTag = QStringLiteral("(%1)").arg(countryCode.toLower());
+        for (const auto &[name, id] : carriers) {
+            const QString nl = name.toLower();
+            if (nl.contains(QLatin1String("swiship")) && nl.contains(ccTag)) {
+                carrierId = id; matchedName = name; break;
+            }
+        }
+        if (carrierId == 0) {
+            for (const auto &[name, id] : carriers) {
+                const QString nl = name.toLower();
+                if (nl.contains(QLatin1String("amazon")) && nl.contains(ccTag)) {
+                    carrierId = id; matchedName = name; break;
+                }
+            }
+        }
+    }
+
+    if (carrierId != 0) {
+        if (onProgress)
+            onProgress(QStringLiteral("Carrier '%1' matched to Temu carrier '%2' (ID %3)")
+                           .arg(carrierName, matchedName).arg(carrierId));
+    } else {
+        // No match — refuse rather than shipping with a wrong carrier.
+        m_lastError = companies.isEmpty()
+            ? QStringLiteral("Temu returned no logistics companies (%1)").arg(m_lastError)
+            : QStringLiteral("Carrier '%1' not found among Temu carriers: %2")
+                  .arg(carrierName, availableNames.join(QStringLiteral(", ")));
+        qWarning() << "Temu shipOrder:" << m_lastError;
+        co_return false;
     }
 
     // 2. Build SendRequest item

@@ -59,6 +59,7 @@ public:
     QCoro::Task<QJsonObject> getFulfillmentOrder(const QString &sellerFulfillmentOrderId);
 
     QString lastError() const { return m_lastError; }
+    void clearLastError() { m_lastError.clear(); }
 
 private:
     QString m_lwaClientId;

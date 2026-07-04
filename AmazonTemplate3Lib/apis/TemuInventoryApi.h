@@ -44,9 +44,13 @@ public:
     };
     QCoro::Task<QList<TemuOrder>> fetchUnshippedOrders();
     QCoro::Task<QJsonArray> fetchLogisticsCompanies();
+    // countryCode (e.g. "FR") disambiguates country-specific Temu carriers
+    // like swiship(FR) when the source carrier is "Amazon Logistics".
     QCoro::Task<bool> shipOrder(const QString &parentOrderSn, const QString &orderSn,
                                 qint64 goodsId, qint64 skuId, int quantity,
-                                const QString &trackingNumber, const QString &carrierName);
+                                const QString &trackingNumber, const QString &carrierName,
+                                const QString &countryCode = {},
+                                std::function<void(const QString&)> onProgress = {});
 
     QString lastError() const { return m_lastError; }
 

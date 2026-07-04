@@ -638,27 +638,12 @@ QCoro::Task<void> PaneMarketplaces::_onLoadOrders()
         }
     }
 
-    // 2. Fetch Amazon outbound fulfillment orders
-    QJsonArray amazonOrders;
-    if (!allTemuOrders.isEmpty()) {
-        if (!dlgPtr) { setEnabled(true); co_return; }
-        setStatus(tr("Fetching Amazon outbound orders…"));
-        appendLog(tr("→ Requesting Amazon MCF orders from last 30 days…"));
-
-        // Query starting from 30 days ago
-        QDateTime queryStart = QDateTime::currentDateTimeUtc().addDays(-30);
-        amazonOrders = co_await _api()->fetchFulfillmentOrders(queryStart);
-        if (!dlgPtr) { setEnabled(true); co_return; }
-
-        if (!_api()->lastError().isEmpty()) {
-            appendLog(tr("  ✗ Failed to retrieve Amazon outbound orders: %1").arg(_api()->lastError()));
-        } else {
-            appendLog(tr("  ✓ Retrieved %1 Amazon outbound order(s)").arg(amazonOrders.size()));
-        }
-    }
-
-    // 3. Match orders and fetch tracking
-    setStatus(tr("Matching orders and fetching tracking details…"));
+    // 2. For each Temu order, fetch the corresponding Amazon MCF order directly.
+    // Amazon sellerFulfillmentOrderId convention: "temu-" + parentOrderSn.
+    // We bypass fetchFulfillmentOrders (the list endpoint requires the
+    // "Multi-Channel Fulfillment" SP-API role which is often missing from EU tokens).
+    setStatus(tr("Fetching Amazon MCF tracking details…"));
+    bool mcfRoleErrorLogged = false;
     for (const auto &tOrder : allTemuOrders) {
         if (!dlgPtr) { setEnabled(true); co_return; }
 
@@ -667,73 +652,70 @@ QCoro::Task<void> PaneMarketplaces::_onLoadOrders()
         if (row.targetStore.isEmpty()) row.targetStore = orderToStoreMap.value(tOrder.orderSn).label;
         row.parentOrderSn = tOrder.parentOrderSn;
         row.orderSn = tOrder.orderSn;
-        row.targetOrderId = tOrder.orderSn; // Target Order ID column
+        row.targetOrderId = tOrder.orderSn;
         row.goodsId = tOrder.goodsId;
         row.skuId = tOrder.skuId;
         row.quantity = tOrder.quantity;
-        
+
         TemuStore ts = orderToStoreMap.value(tOrder.parentOrderSn);
         if (ts.label.isEmpty()) ts = orderToStoreMap.value(tOrder.orderSn);
         row.temuStoreToken = ts.token;
+        row.temuStoreCountry = ts.country;
         row.temuProxyHost = ts.proxyHost;
         row.temuProxyPort = ts.proxyPort;
         row.temuProxyUser = ts.proxyUser;
         row.temuProxyPass = ts.proxyPassword;
 
-        // Try to find matching Amazon order
-        QJsonObject matchedAmazonOrder;
-        QString matchedFulfillmentId;
-        for (const QJsonValue &amVal : amazonOrders) {
-            QJsonObject amObj = amVal.toObject();
-            QString sellerOrderId = amObj.value(QStringLiteral("sellerFulfillmentOrderId")).toString();
-            if (sellerOrderId.contains(tOrder.parentOrderSn, Qt::CaseInsensitive) ||
-                sellerOrderId.contains(tOrder.orderSn, Qt::CaseInsensitive) ||
-                tOrder.parentOrderSn.contains(sellerOrderId, Qt::CaseInsensitive) ||
-                tOrder.orderSn.contains(sellerOrderId, Qt::CaseInsensitive)) {
-                matchedAmazonOrder = amObj;
-                matchedFulfillmentId = sellerOrderId;
-                break;
-            }
-        }
+        const QString fulfillmentId = QStringLiteral("temu-") + tOrder.parentOrderSn;
+        appendLog(tr("→ Temu order %1 — fetching Amazon MCF order %2").arg(tOrder.orderSn, fulfillmentId));
 
-        if (!matchedFulfillmentId.isEmpty()) {
-            appendLog(tr("→ Matched Temu order %1 with Amazon outbound order %2").arg(tOrder.orderSn, matchedFulfillmentId));
-            
-            // Get detailed order to extract tracking number
-            QJsonObject detailedOrder = co_await _api()->getFulfillmentOrder(matchedFulfillmentId);
-            if (!dlgPtr) { setEnabled(true); co_return; }
+        _api()->clearLastError();
+        QJsonObject detailedOrder = co_await _api()->getFulfillmentOrder(fulfillmentId);
+        if (!dlgPtr) { setEnabled(true); co_return; }
 
-            QString trackingNumber;
-            QString carrierCode;
-            QJsonArray shipments = detailedOrder.value(QStringLiteral("fulfillmentShipments")).toArray();
-            for (const QJsonValue &shipVal : shipments) {
-                QJsonObject shipObj = shipVal.toObject();
-                QJsonArray packages = shipObj.value(QStringLiteral("fulfillmentShipmentPackage")).toArray();
-                if (packages.isEmpty()) packages = shipObj.value(QStringLiteral("fulfillmentShipmentPackages")).toArray();
-                
-                for (const QJsonValue &pkgVal : packages) {
-                    QJsonObject pkgObj = pkgVal.toObject();
-                    trackingNumber = pkgObj.value(QStringLiteral("trackingNumber")).toString();
-                    carrierCode = pkgObj.value(QStringLiteral("carrierCode")).toString();
-                    if (!trackingNumber.isEmpty()) break;
-                }
-                if (!trackingNumber.isEmpty()) break;
-            }
-
-            row.source = QStringLiteral("Amazon (%1)").arg(carrierCode.isEmpty() ? QStringLiteral("FBA") : carrierCode);
-            row.sourceOrderId = matchedFulfillmentId; // Source Order ID column
-            row.trackingNumber = trackingNumber;
-
-            if (trackingNumber.isEmpty()) {
-                appendLog(tr("  ⚠ No tracking number generated yet."));
+        if (!_api()->lastError().isEmpty()) {
+            const QString err = _api()->lastError();
+            const bool is403 = err.contains(QLatin1String("403"));
+            if (!is403) {
+                appendLog(tr("  ✗ %1").arg(err));
+            } else if (!mcfRoleErrorLogged) {
+                appendLog(tr("  ✗ %1").arg(err));
+                mcfRoleErrorLogged = true;
             } else {
-                appendLog(tr("  ✓ Found tracking number: %1").arg(trackingNumber));
+                appendLog(tr("  ✗ MCF 403 — see message above"));
             }
-        } else {
-            appendLog(tr("→ No matching Amazon outbound order found for Temu order %1").arg(tOrder.orderSn));
             row.source = tr("None");
             row.sourceOrderId = QString();
             row.trackingNumber = QString();
+            orderRows.append(row);
+            continue;
+        }
+
+        QString trackingNumber;
+        QString carrierCode;
+        QJsonArray shipments = detailedOrder.value(QStringLiteral("fulfillmentShipments")).toArray();
+        for (const QJsonValue &shipVal : shipments) {
+            QJsonObject shipObj = shipVal.toObject();
+            QJsonArray packages = shipObj.value(QStringLiteral("fulfillmentShipmentPackage")).toArray();
+            if (packages.isEmpty())
+                packages = shipObj.value(QStringLiteral("fulfillmentShipmentPackages")).toArray();
+            for (const QJsonValue &pkgVal : packages) {
+                QJsonObject pkgObj = pkgVal.toObject();
+                trackingNumber = pkgObj.value(QStringLiteral("trackingNumber")).toString();
+                carrierCode = pkgObj.value(QStringLiteral("carrierCode")).toString();
+                if (!trackingNumber.isEmpty()) break;
+            }
+            if (!trackingNumber.isEmpty()) break;
+        }
+
+        row.source = QStringLiteral("Amazon (%1)").arg(carrierCode.isEmpty() ? QStringLiteral("FBA") : carrierCode);
+        row.sourceOrderId = fulfillmentId;
+        row.trackingNumber = trackingNumber;
+
+        if (trackingNumber.isEmpty()) {
+            appendLog(tr("  ⚠ No tracking number yet for %1.").arg(fulfillmentId));
+        } else {
+            appendLog(tr("  ✓ Tracking number: %1").arg(trackingNumber));
         }
 
         orderRows.append(row);
@@ -838,11 +820,12 @@ QCoro::Task<void> PaneMarketplaces::_onSyncOrders()
 
         bool ok = co_await temuApi.shipOrder(order.parentOrderSn, order.orderSn,
                                              order.goodsId, order.skuId, order.quantity,
-                                             order.trackingNumber, carrier);
+                                             order.trackingNumber, carrier, order.temuStoreCountry,
+                                             [appendLog](const QString &msg) { appendLog(QStringLiteral("  ") + msg); });
         if (!dlgPtr) { setEnabled(true); co_return; }
 
         if (ok) {
-            appendLog(tr("  ✓ Successfully shipped order %1 on Temu."));
+            appendLog(tr("  ✓ Successfully shipped order %1 on Temu.").arg(order.orderSn));
             successCount++;
         } else {
             appendLog(tr("  ✗ Failed to ship order %1 on Temu: %2").arg(order.orderSn, temuApi.lastError()));

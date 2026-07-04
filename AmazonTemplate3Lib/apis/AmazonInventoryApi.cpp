@@ -581,54 +581,17 @@ QCoro::Task<QJsonArray> AmazonInventoryApi::fetchFulfillmentOrders(const QDateTi
         }
 
         if (status != 200) {
-            if (status == 403) {
-                qWarning() << "AmazonInventoryApi::fetchFulfillmentOrders: MCF API returned 403 (Unauthorized). "
-                           << "Attempting fallback to standard Orders API...";
-                m_lastError.clear();
-
-                QUrl fallbackUrl(QStringLiteral("https://%1/orders/v0/orders").arg(kEuEndpoint));
-                QUrlQuery fallbackQuery;
-                fallbackQuery.addQueryItem(QStringLiteral("CreatedAfter"), startDateTime.toString(Qt::ISODate));
-                fallbackQuery.addQueryItem(QStringLiteral("MarketplaceIds"), m_marketplaceId);
-                fallbackUrl.setQuery(fallbackQuery);
-
-                QNetworkRequest fallbackReq(fallbackUrl);
-                fallbackReq.setRawHeader("x-amz-access-token", token.toUtf8());
-                fallbackReq.setRawHeader("Accept", "application/json");
-
-                QNetworkReply *fallbackReply = _nam()->get(fallbackReq);
-                co_await qCoro(fallbackReply).waitForFinished();
-
-                const int fallbackStatus = fallbackReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-                const QByteArray fallbackData = fallbackReply->readAll();
-                fallbackReply->deleteLater();
-
-                if (fallbackStatus == 200) {
-                    QJsonObject fallbackObj = QJsonDocument::fromJson(fallbackData).object();
-                    QJsonArray fallbackOrders = fallbackObj.value(QStringLiteral("payload")).toObject()
-                                                            .value(QStringLiteral("orders")).toArray();
-                    
-                    QJsonArray mappedOrders;
-                    for (const QJsonValue &oVal : fallbackOrders) {
-                        QJsonObject oObj = oVal.toObject();
-                        QJsonObject mObj;
-                        QString sellerOrderId = oObj.value(QStringLiteral("sellerOrderId")).toString();
-                        if (sellerOrderId.isEmpty()) {
-                            sellerOrderId = oObj.value(QStringLiteral("amazonOrderId")).toString();
-                        }
-                        mObj.insert(QStringLiteral("sellerFulfillmentOrderId"), sellerOrderId);
-                        mObj.insert(QStringLiteral("displayableOrderId"), sellerOrderId);
-                        mObj.insert(QStringLiteral("fulfillmentOrderStatus"), oObj.value(QStringLiteral("orderStatus")));
-                        mappedOrders.append(mObj);
-                    }
-                    co_return mappedOrders;
-                } else {
-                    qWarning() << "AmazonInventoryApi::fetchFulfillmentOrders fallback failed with status" << fallbackStatus;
-                }
-            }
-
             const QString body = QString::fromUtf8(data.left(800));
-            m_lastError = QStringLiteral("HTTP %1 — %2").arg(status).arg(body);
+            if (status == 403) {
+                m_lastError = QStringLiteral(
+                    "MCF Outbound API returned 403 — the refresh token lacks the "
+                    "'Amazon Fulfillment' SP-API role. Fix: 1) check the 'Amazon Fulfillment' "
+                    "role in the developer profile AND the app's role list in "
+                    "solutionproviderportal.amazon.com, 2) re-authorise the app for the EU "
+                    "region to get a new refresh token, 3) update it in Settings.");
+            } else {
+                m_lastError = QStringLiteral("HTTP %1 — %2").arg(status).arg(body);
+            }
             qWarning() << "AmazonInventoryApi::fetchFulfillmentOrders: HTTP" << status
                        << "Response:" << body;
             co_return {};
@@ -686,7 +649,16 @@ QCoro::Task<QJsonObject> AmazonInventoryApi::getFulfillmentOrder(const QString &
 
         if (status != 200) {
             const QString body = QString::fromUtf8(data.left(800));
-            m_lastError = QStringLiteral("HTTP %1 — %2").arg(status).arg(body);
+            if (status == 403) {
+                m_lastError = QStringLiteral(
+                    "MCF Outbound API returned 403 — the refresh token lacks the "
+                    "'Amazon Fulfillment' SP-API role. Fix: 1) check the 'Amazon Fulfillment' "
+                    "role in the developer profile AND the app's role list in "
+                    "solutionproviderportal.amazon.com, 2) re-authorise the app for the EU "
+                    "region to get a new refresh token, 3) update it in Settings.");
+            } else {
+                m_lastError = QStringLiteral("HTTP %1 — %2").arg(status).arg(body);
+            }
             qWarning() << "AmazonInventoryApi::getFulfillmentOrder: HTTP" << status
                        << "Response:" << body;
             co_return {};
