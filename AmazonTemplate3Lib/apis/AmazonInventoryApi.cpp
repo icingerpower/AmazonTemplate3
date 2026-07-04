@@ -142,8 +142,13 @@ QCoro::Task<void> AmazonInventoryApi::_getAccessToken(QString *out)
 // ---------------------------------------------------------------------------
 
 QCoro::Task<void> AmazonInventoryApi::fetchFbaInventory(QStringList skus,
-                                                        QList<InventorySummary> *out)
+                                                        QList<InventorySummary> *out,
+                                                        std::function<void(const QString &)> onProgress)
 {
+    auto progress = [&onProgress](const QString &msg) {
+        if (onProgress) onProgress(msg);
+    };
+
     if (skus.isEmpty())
         co_return;
 
@@ -156,65 +161,85 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventory(QStringList skus,
         co_return;
     }
 
-    QUrl url(QStringLiteral("https://%1/fba/inventory/v1/summaries").arg(kEuEndpoint));
-    QUrlQuery query;
-    query.addQueryItem("details", "true");
-    query.addQueryItem("granularityType", "Marketplace");
-    query.addQueryItem("granularityId", m_marketplaceId);
-    for (const QString &sku : skus)
-        query.addQueryItem("sellerSkus", sku);
-    url.setQuery(query);
+    static const int kChunk = 50; // API limit per call
+    for (int start = 0; start < skus.size(); start += kChunk) {
+        const QStringList chunk = skus.mid(start, kChunk);
 
-    for (int attempt = 0; attempt < 3; ++attempt) {
-        QNetworkRequest req(url);
-        req.setRawHeader("x-amz-access-token", token.toUtf8());
-        req.setRawHeader("Accept", "application/json");
+        QUrl url(QStringLiteral("https://%1/fba/inventory/v1/summaries").arg(kEuEndpoint));
+        QUrlQuery query;
+        query.addQueryItem("details", "true");
+        query.addQueryItem("granularityType", "Marketplace");
+        query.addQueryItem("granularityId", m_marketplaceId);
+        query.addQueryItem("marketplaceIds", m_marketplaceId); // required by the API
+        for (const QString &sku : chunk)
+            query.addQueryItem("sellerSkus", sku);
+        url.setQuery(query);
 
-        QNetworkReply *reply = _nam()->get(req);
-        co_await qCoro(reply).waitForFinished();
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            QNetworkRequest req(url);
+            req.setRawHeader("x-amz-access-token", token.toUtf8());
+            req.setRawHeader("Accept", "application/json");
 
-        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        const QByteArray data = reply->readAll();
-        reply->deleteLater();
+            QNetworkReply *reply = _nam()->get(req);
+            co_await qCoro(reply).waitForFinished();
 
-        if (status == 429) {
-            qWarning() << "AmazonInventoryApi::fetchFbaInventory: 429 throttled, attempt"
-                       << (attempt + 1);
-            if (attempt < 2) {
-                QTimer timer;
-                timer.setSingleShot(true);
-                timer.start(2000);
-                co_await qCoro(&timer).waitForTimeout();
-                continue;
+            const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            const QByteArray data = reply->readAll();
+            reply->deleteLater();
+
+            if (status == 429) {
+                qWarning() << "AmazonInventoryApi::fetchFbaInventory: 429 throttled, attempt"
+                           << (attempt + 1);
+                if (attempt < 2) {
+                    QTimer timer;
+                    timer.setSingleShot(true);
+                    timer.start(2000);
+                    co_await qCoro(&timer).waitForTimeout();
+                    continue;
+                }
+                m_lastError = QStringLiteral("FBA inventory throttled (429)");
+                co_return;
             }
-            m_lastError = QStringLiteral("FBA inventory throttled (429)");
-            co_return;
-        }
 
-        if (status != 200) {
-            const QString body = QString::fromUtf8(data.left(800));
-            m_lastError = QStringLiteral("HTTP %1 — %2").arg(status).arg(body);
-            qWarning() << "AmazonInventoryApi::fetchFbaInventory: HTTP" << status
-                       << "Response:" << body;
-            co_return;
-        }
+            if (status != 200) {
+                const QString body = QString::fromUtf8(data.left(800));
+                m_lastError = QStringLiteral("HTTP %1 — %2").arg(status).arg(body);
+                qWarning() << "AmazonInventoryApi::fetchFbaInventory: HTTP" << status
+                           << "Response:" << body;
+                co_return;
+            }
 
-        const QJsonDocument doc = QJsonDocument::fromJson(data);
-        const QJsonObject payload = doc.object().value("payload").toObject();
-        const QJsonArray summaries = payload.value("inventorySummaries").toArray();
-        for (const QJsonValue &v : summaries) {
-            const QJsonObject o = v.toObject();
-            InventorySummary s;
-            s.sku  = o.value("sellerSku").toString();
-            s.asin = o.value("asin").toString();
-            const QJsonObject det = o.value("inventoryDetails").toObject();
-            s.available = det.value("fulfillableQuantity").toInt();
-            s.inbound   = det.value("inboundWorkingQuantity").toInt()
-                        + det.value("inboundShippedQuantity").toInt()
-                        + det.value("inboundReceivingQuantity").toInt();
-            out->append(s);
+            const QJsonDocument doc = QJsonDocument::fromJson(data);
+            const QJsonObject payload = doc.object().value("payload").toObject();
+            const QJsonArray summaries = payload.value("inventorySummaries").toArray();
+            for (const QJsonValue &v : summaries) {
+                const QJsonObject o = v.toObject();
+                InventorySummary s;
+                s.sku  = o.value("sellerSku").toString();
+                s.asin = o.value("asin").toString();
+                const QJsonObject det = o.value("inventoryDetails").toObject();
+                const QJsonObject res = det.value("reservedQuantity").toObject();
+                const int fulfillable = det.value("fulfillableQuantity").toInt();
+                const int fcTransfer  = res.value("pendingTransshipmentQuantity").toInt();
+                const int custOrders  = res.value("pendingCustomerOrderQuantity").toInt();
+                const int fcProcessing = res.value("fcProcessingQuantity").toInt();
+                const int researching = det.value("researchingQuantity").toObject()
+                                           .value("totalResearchingQuantity").toInt();
+                // FC-transfer units stay sellable (they're only moving between
+                // fulfillment centres), so count them as available.
+                s.available = fulfillable + fcTransfer;
+                s.inbound   = det.value("inboundWorkingQuantity").toInt()
+                            + det.value("inboundShippedQuantity").toInt()
+                            + det.value("inboundReceivingQuantity").toInt();
+                if (fcTransfer > 0 || custOrders > 0 || fcProcessing > 0 || researching > 0)
+                    progress(QStringLiteral("    %1: fulfillable %2 + FC transfer %3 = %4 "
+                                            "(customer orders %5, FC processing %6, researching %7)")
+                             .arg(s.sku).arg(fulfillable).arg(fcTransfer).arg(s.available)
+                             .arg(custOrders).arg(fcProcessing).arg(researching));
+                out->append(s);
+            }
+            break; // chunk done
         }
-        co_return;
     }
     co_return;
 }
@@ -315,6 +340,34 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventoryReport(
             }
             if (ps == QStringLiteral("FATAL") || ps == QStringLiteral("CANCELLED")) {
                 progress(QStringLiteral("  Report returned %1").arg(ps));
+                // FATAL reports usually carry an error document explaining why
+                // (e.g. generation quota exceeded) — fetch and log it.
+                const QString errDocId = reportObj.value(QStringLiteral("reportDocumentId")).toString();
+                if (!errDocId.isEmpty()) {
+                    QUrl errDocUrl(QStringLiteral("https://%1/reports/2021-06-30/documents/%2")
+                                   .arg(kEuEndpoint, errDocId));
+                    QNetworkRequest errDocReq(errDocUrl);
+                    errDocReq.setRawHeader("x-amz-access-token", token.toUtf8());
+                    errDocReq.setRawHeader("Accept", "application/json");
+                    QNetworkReply *errDocReply = _nam()->get(errDocReq);
+                    co_await qCoro(errDocReply).waitForFinished();
+                    const QJsonObject errDocObj = QJsonDocument::fromJson(errDocReply->readAll()).object();
+                    errDocReply->deleteLater();
+                    const QString errUrl = errDocObj.value(QStringLiteral("url")).toString();
+                    if (!errUrl.isEmpty()) {
+                        QUrl errDlUrl(errUrl);
+                        QNetworkRequest errDlReq(errDlUrl);
+                        QNetworkReply *errDlReply = _nam()->get(errDlReq);
+                        co_await qCoro(errDlReply).waitForFinished();
+                        QByteArray errContent = errDlReply->readAll();
+                        errDlReply->deleteLater();
+                        if (errDocObj.value(QStringLiteral("compressionAlgorithm")).toString()
+                                .compare(QStringLiteral("GZIP"), Qt::CaseInsensitive) == 0)
+                            errContent = gunzip(errContent);
+                        progress(QStringLiteral("  FATAL details: %1")
+                                 .arg(QString::fromUtf8(errContent.left(400))));
+                    }
+                }
                 m_lastError = QStringLiteral("Report ended with status: %1").arg(ps);
                 shouldRetry = (ps == QStringLiteral("FATAL")); // CANCELLED is final
                 break;
@@ -393,6 +446,14 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventoryReport(
     if (skuCol < 0) skuCol = headers.indexOf(QStringLiteral("seller-sku"));
     const int asinCol = headers.indexOf(QStringLiteral("asin"));
     const int qtyCol  = headers.indexOf(QStringLiteral("afn-fulfillable-quantity"));
+    // Full quantity breakdown, for the Inbound column and diagnostics.
+    const int warehouseCol   = headers.indexOf(QStringLiteral("afn-warehouse-quantity"));
+    const int reservedCol    = headers.indexOf(QStringLiteral("afn-reserved-quantity"));
+    const int unsellableCol  = headers.indexOf(QStringLiteral("afn-unsellable-quantity"));
+    const int researchingCol = headers.indexOf(QStringLiteral("afn-researching-quantity"));
+    const int inbWorkingCol  = headers.indexOf(QStringLiteral("afn-inbound-working-quantity"));
+    const int inbShippedCol  = headers.indexOf(QStringLiteral("afn-inbound-shipped-quantity"));
+    const int inbReceivingCol = headers.indexOf(QStringLiteral("afn-inbound-receiving-quantity"));
 
     if (skuCol < 0 || asinCol < 0) {
         m_lastError = QStringLiteral("Report TSV: unexpected column layout (headers: %1)")
@@ -400,7 +461,11 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventoryReport(
         co_return;
     }
 
-    const QSet<QString> filterSet(filterSkus.begin(), filterSkus.end());
+    // Case-insensitive filter: the whitelist may come from Temu SKU listings
+    // whose casing can differ from the Amazon seller SKU.
+    QSet<QString> filterSet;
+    for (const QString &s : filterSkus)
+        filterSet.insert(s.toLower());
     const int maxCol = qMax(skuCol, qMax(asinCol, qtyCol));
 
     for (int i = 1; i < lines.size(); ++i) {
@@ -408,13 +473,30 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventoryReport(
         if (cols.size() <= maxCol) continue;
 
         const QString sku = cols[skuCol].trimmed();
-        if (!filterSet.isEmpty() && !filterSet.contains(sku)) continue;
+        if (!filterSet.isEmpty() && !filterSet.contains(sku.toLower())) continue;
+
+        auto colInt = [&cols](int c) {
+            return (c >= 0 && c < cols.size()) ? cols[c].trimmed().toInt() : 0;
+        };
 
         InventorySummary s;
         s.sku       = sku;
         s.asin      = cols[asinCol].trimmed();
-        s.available = (qtyCol >= 0 && qtyCol < cols.size()) ? cols[qtyCol].trimmed().toInt() : 0;
-        s.inbound   = 0; // not available in this report type
+        s.available = colInt(qtyCol);
+        s.inbound   = colInt(inbWorkingCol) + colInt(inbShippedCol) + colInt(inbReceivingCol);
+
+        // Diagnostic: Seller Central's "On-hand" is afn-warehouse-quantity,
+        // which includes reserved/unsellable/researching units. When nothing
+        // is fulfillable but on-hand stock exists, show where the units are.
+        const int warehouse = colInt(warehouseCol);
+        if (s.available == 0 && (warehouse > 0 || s.inbound > 0)) {
+            progress(QStringLiteral("  ℹ %1: fulfillable 0 — on-hand %2 (reserved %3, "
+                                    "unsellable %4, researching %5), inbound %6 "
+                                    "(reserved = pending orders / FC transfer / FC processing)")
+                     .arg(sku).arg(warehouse)
+                     .arg(colInt(reservedCol)).arg(colInt(unsellableCol))
+                     .arg(colInt(researchingCol)).arg(s.inbound));
+        }
         out->append(s);
     }
     progress(QStringLiteral("  Parsed %1 row(s) from report (%2 total rows)")
@@ -425,9 +507,9 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventoryReport(
     // from "present but the SKU string differs".
     QSet<QString> foundSkus;
     for (const auto &s : *out)
-        foundSkus.insert(s.sku);
+        foundSkus.insert(s.sku.toLower());
     for (const QString &wanted : filterSkus) {
-        if (foundSkus.contains(wanted)) continue;
+        if (foundSkus.contains(wanted.toLower())) continue;
         QString nearMiss;
         for (int i = 1; i < lines.size(); ++i) {
             const QStringList cols = lines[i].split(QLatin1Char('\t'));
@@ -445,6 +527,50 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventoryReport(
         else
             progress(QStringLiteral("  ⚠ %1: not matched exactly, but report has similar SKU \"%2\"")
                      .arg(wanted, nearMiss));
+    }
+
+    // Live cross-check: the MYI report lags reality — notably during FC
+    // transfers every afn-* column reads 0 while Seller Central shows stock.
+    // Re-verify every whitelist SKU the report shows as 0 or missing against
+    // the live FBA Inventory API and prefer its numbers.
+    if (!filterSkus.isEmpty()) {
+        QHash<QString, int> idxBySkuLower;
+        for (int i = 0; i < out->size(); ++i)
+            idxBySkuLower.insert(out->at(i).sku.toLower(), i);
+
+        QStringList toCheck;
+        for (const QString &wanted : filterSkus) {
+            const auto it = idxBySkuLower.constFind(wanted.toLower());
+            if (it == idxBySkuLower.constEnd() || out->at(it.value()).available == 0)
+                toCheck.append(wanted);
+        }
+
+        if (!toCheck.isEmpty()) {
+            progress(QStringLiteral("  Cross-checking %1 zero/missing SKU(s) against the live FBA Inventory API…")
+                     .arg(toCheck.size()));
+            const QString savedError = m_lastError;
+            m_lastError.clear();
+            QList<InventorySummary> live;
+            co_await fetchFbaInventory(toCheck, &live, onProgress);
+            for (const auto &ls : live) {
+                const auto it = idxBySkuLower.constFind(ls.sku.toLower());
+                if (it == idxBySkuLower.constEnd()) {
+                    if (ls.available > 0 || ls.inbound > 0) {
+                        progress(QStringLiteral("  ℹ %1: not in report — live API says avail %2, inbound %3 (using live)")
+                                 .arg(ls.sku).arg(ls.available).arg(ls.inbound));
+                        out->append(ls);
+                    }
+                } else if (ls.available != out->at(it.value()).available) {
+                    InventorySummary &s = (*out)[it.value()];
+                    progress(QStringLiteral("  ℹ %1: report said avail %2, live API says %3 (using live)")
+                             .arg(ls.sku).arg(s.available).arg(ls.available));
+                    s.available = ls.available;
+                    s.inbound   = qMax(s.inbound, ls.inbound);
+                }
+            }
+            // A cross-check failure must not fail the whole report load.
+            m_lastError = savedError;
+        }
     }
     co_return;
 }
@@ -604,6 +730,61 @@ QCoro::Task<QJsonArray> AmazonInventoryApi::fetchFulfillmentOrders(const QDateTi
     }
 
     co_return {};
+}
+
+QCoro::Task<bool> AmazonInventoryApi::createFulfillmentOrder(const QJsonObject &payload)
+{
+    m_lastError.clear();
+    QString token;
+    co_await _getAccessToken(&token);
+    if (token.isEmpty()) {
+        if (m_lastError.isEmpty())
+            m_lastError = QStringLiteral("No LWA access token available");
+        qWarning() << "AmazonInventoryApi::createFulfillmentOrder:" << m_lastError;
+        co_return false;
+    }
+
+    QUrl url(QStringLiteral("https://%1/fba/outbound/2020-07-01/fulfillmentOrders").arg(kEuEndpoint));
+    const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
+
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        QNetworkRequest req(url);
+        req.setRawHeader("x-amz-access-token", token.toUtf8());
+        req.setRawHeader("Accept", "application/json");
+        req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+        QNetworkReply *reply = _nam()->post(req, body);
+        co_await qCoro(reply).waitForFinished();
+
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray data = reply->readAll();
+        reply->deleteLater();
+
+        if (status == 429) {
+            qWarning() << "AmazonInventoryApi::createFulfillmentOrder: 429 throttled, attempt"
+                       << (attempt + 1);
+            if (attempt < 2) {
+                QTimer timer;
+                timer.setSingleShot(true);
+                timer.start(2000);
+                co_await qCoro(&timer).waitForTimeout();
+                continue;
+            }
+            m_lastError = QStringLiteral("Create fulfillment order throttled (429)");
+            co_return false;
+        }
+
+        if (status != 200) {
+            const QString respBody = QString::fromUtf8(data.left(800));
+            m_lastError = QStringLiteral("HTTP %1 — %2").arg(status).arg(respBody);
+            qWarning() << "AmazonInventoryApi::createFulfillmentOrder: HTTP" << status
+                       << "Response:" << respBody;
+            co_return false;
+        }
+
+        co_return true;
+    }
+    co_return false;
 }
 
 QCoro::Task<QJsonObject> AmazonInventoryApi::getFulfillmentOrder(const QString &sellerFulfillmentOrderId)

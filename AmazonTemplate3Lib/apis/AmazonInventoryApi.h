@@ -34,10 +34,13 @@ public:
                                 const QString &marketplaceId,
                                 QObject *parent = nullptr);
 
-    // Fetch FBA inventory summaries for up to 50 SKUs in one call.
+    // Fetch FBA inventory summaries via the live FBA Inventory API (fresher
+    // than the MYI report, which lags during FC transfers). Chunked by 50 SKUs.
+    // available = fulfillable + FC-transfer (pendingTransshipment) units.
     // Results written into *out (appended). Output param avoids GCC 13 ICE.
     QCoro::Task<void> fetchFbaInventory(QStringList skus,
-                                        QList<InventorySummary> *out);
+                                        QList<InventorySummary> *out,
+                                        std::function<void(const QString &)> onProgress = nullptr);
 
     // Fetch FBA inventory for all active FBA SKUs via the Reports API.
     // Slower but more reliable than the direct inventory endpoint.
@@ -57,6 +60,9 @@ public:
     // MCF Outbound fulfillment orders
     QCoro::Task<QJsonArray> fetchFulfillmentOrders(const QDateTime &startDateTime);
     QCoro::Task<QJsonObject> getFulfillmentOrder(const QString &sellerFulfillmentOrderId);
+    // Create an MCF outbound order. payload = CreateFulfillmentOrderRequest
+    // (sellerFulfillmentOrderId, destinationAddress, items…). True on success.
+    QCoro::Task<bool> createFulfillmentOrder(const QJsonObject &payload);
 
     QString lastError() const { return m_lastError; }
     void clearLastError() { m_lastError.clear(); }

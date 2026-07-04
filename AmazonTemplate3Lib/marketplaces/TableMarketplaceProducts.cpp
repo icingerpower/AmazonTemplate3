@@ -1,5 +1,8 @@
 #include "TableMarketplaceProducts.h"
 
+#include <QBrush>
+#include <QColor>
+
 namespace {
 constexpr int kInfiniteDays = 999;
 }
@@ -20,9 +23,20 @@ TableMarketplaceProducts::TableMarketplaceProducts(const QStringList &skus,
 
 int TableMarketplaceProducts::_rowForSku(const QString &sku) const
 {
+    // Case-insensitive: Amazon seller-SKU casing can differ from the Temu
+    // skuSn casing the rows were built from.
     for (int i = 0; i < m_rows.size(); ++i)
-        if (m_rows.at(i).sku == sku) return i;
+        if (m_rows.at(i).sku.compare(sku, Qt::CaseInsensitive) == 0) return i;
     return -1;
+}
+
+QStringList TableMarketplaceProducts::skus() const
+{
+    QStringList out;
+    out.reserve(m_rows.size());
+    for (const Row &r : m_rows)
+        out.append(r.sku);
+    return out;
 }
 
 int TableMarketplaceProducts::_storeIndex(const QString &storeId) const
@@ -36,6 +50,49 @@ int TableMarketplaceProducts::amazonQtyForSku(const QString &sku) const
 {
     const int row = _rowForSku(sku);
     return (row >= 0) ? m_rows.at(row).available : -1;
+}
+
+int TableMarketplaceProducts::estDaysForSku(const QString &sku) const
+{
+    const int row = _rowForSku(sku);
+    return (row >= 0) ? m_rows.at(row).estDays : -1;
+}
+
+void TableMarketplaceProducts::setSyncParams(int pctToTarget, int maxTarget, int minDays)
+{
+    if (m_pctToTarget == pctToTarget && m_maxTarget == maxTarget && m_minDays == minDays)
+        return;
+    m_pctToTarget = pctToTarget;
+    m_maxTarget   = maxTarget;
+    m_minDays     = minDays;
+    if (!m_rows.isEmpty() && !m_stores.isEmpty())
+        emit dataChanged(index(0, k_fixedCols),
+                         index(m_rows.size() - 1, columnCount() - 1));
+}
+
+int TableMarketplaceProducts::_targetQty(const Row &r) const
+{
+    if (r.available < 0)
+        return -1;
+    double corrected = r.available;
+    // estDays == kInfiniteDays means no sales: the correction factor
+    // (estDays − minDays) / estDays tends to 1, so leave the stock uncorrected.
+    if (m_minDays > 0 && r.estDays >= 0 && r.estDays < kInfiniteDays) {
+        if (r.estDays <= m_minDays)
+            corrected = 0;
+        else
+            corrected = r.available * double(r.estDays - m_minDays) / r.estDays;
+    }
+    int target = static_cast<int>(corrected * m_pctToTarget / 100.0);
+    if (m_maxTarget > 0 && target > m_maxTarget)
+        target = m_maxTarget;
+    return target;
+}
+
+int TableMarketplaceProducts::targetQtyForSku(const QString &sku) const
+{
+    const int row = _rowForSku(sku);
+    return (row >= 0) ? _targetQty(m_rows.at(row)) : -1;
 }
 
 void TableMarketplaceProducts::_recalcEstDays(Row &row) const
@@ -63,7 +120,8 @@ void TableMarketplaceProducts::applyInventory(
         r.available = s.available;
         r.inbound   = s.inbound;
         _recalcEstDays(r);
-        emit dataChanged(index(row, 0), index(row, k_fixedCols - 1));
+        // Full row: the per-store Sync Qty columns depend on available/estDays.
+        emit dataChanged(index(row, 0), index(row, columnCount() - 1));
     }
 }
 
@@ -74,7 +132,7 @@ void TableMarketplaceProducts::applySales(const QString &sku, int units90d)
     Row &r = m_rows[row];
     r.sales90d = units90d;
     _recalcEstDays(r);
-    emit dataChanged(index(row, 0), index(row, k_fixedCols - 1));
+    emit dataChanged(index(row, 0), index(row, columnCount() - 1));
 }
 
 void TableMarketplaceProducts::applyStoreInventory(const QString &storeId,
@@ -82,12 +140,17 @@ void TableMarketplaceProducts::applyStoreInventory(const QString &storeId,
 {
     const int si = _storeIndex(storeId);
     if (si < 0) return;
-    const int col = k_fixedCols + si * 2; // Qty column for this store
+    QHash<QString,int> lower;
+    for (auto it = qtyBySku.begin(); it != qtyBySku.end(); ++it)
+        lower.insert(it.key().toLower(), it.value());
+    const int col = k_fixedCols + si * 3; // Qty column for this store
     for (int i = 0; i < m_rows.size(); ++i) {
         Row &r = m_rows[i];
-        if (!qtyBySku.contains(r.sku)) continue;
-        r.storeQty[storeId] = qtyBySku.value(r.sku);
-        emit dataChanged(index(i, col), index(i, col));
+        const auto it = lower.constFind(r.sku.toLower());
+        if (it == lower.constEnd()) continue;
+        r.storeQty[storeId] = it.value();
+        // Qty + Sync Qty: the Sync Qty foreground colour depends on storeQty.
+        emit dataChanged(index(i, col), index(i, col + 1));
     }
 }
 
@@ -96,11 +159,15 @@ void TableMarketplaceProducts::applyStoreSales(const QString &storeId,
 {
     const int si = _storeIndex(storeId);
     if (si < 0) return;
-    const int col = k_fixedCols + si * 2 + 1; // Sales column for this store
+    QHash<QString,int> lower;
+    for (auto it = salesBySku.begin(); it != salesBySku.end(); ++it)
+        lower.insert(it.key().toLower(), it.value());
+    const int col = k_fixedCols + si * 3 + 2; // Sales column for this store
     for (int i = 0; i < m_rows.size(); ++i) {
         Row &r = m_rows[i];
-        if (!salesBySku.contains(r.sku)) continue;
-        r.storeSales[storeId] = salesBySku.value(r.sku);
+        const auto it = lower.constFind(r.sku.toLower());
+        if (it == lower.constEnd()) continue;
+        r.storeSales[storeId] = it.value();
         emit dataChanged(index(i, col), index(i, col));
     }
 }
@@ -112,18 +179,34 @@ int TableMarketplaceProducts::rowCount(const QModelIndex &parent) const
 
 int TableMarketplaceProducts::columnCount(const QModelIndex &parent) const
 {
-    return parent.isValid() ? 0 : k_fixedCols + m_stores.size() * 2;
+    return parent.isValid() ? 0 : k_fixedCols + m_stores.size() * 3;
 }
 
 QVariant TableMarketplaceProducts::data(const QModelIndex &index, int role) const
 {
     if (!index.isValid() || index.row() < 0 || index.row() >= m_rows.size())
         return {};
-    if (role != Qt::DisplayRole && role != Qt::EditRole)
-        return {};
 
     const Row &r = m_rows.at(index.row());
     const int col = index.column();
+
+    // Sync Qty cell in dark red when syncing would DECREASE the store's stock.
+    if (role == Qt::BackgroundRole) {
+        if (col >= k_fixedCols && (col - k_fixedCols) % 3 == 1) {
+            const int storeIdx = (col - k_fixedCols) / 3;
+            if (storeIdx < m_stores.size()) {
+                const QString &sid = m_stores.at(storeIdx).id;
+                const int target   = _targetQty(r);
+                const int storeQty = r.storeQty.value(sid, -1);
+                if (target >= 0 && storeQty >= 0 && target < storeQty)
+                    return QBrush(QColor(139, 0, 0)); // dark red
+            }
+        }
+        return {};
+    }
+
+    if (role != Qt::DisplayRole && role != Qt::EditRole)
+        return {};
 
     auto numOrDash = [](int v) -> QVariant {
         return v < 0 ? QVariant(QStringLiteral("-")) : QVariant(QString::number(v));
@@ -143,14 +226,18 @@ QVariant TableMarketplaceProducts::data(const QModelIndex &index, int role) cons
     default: break;
     }
 
-    // Dynamic store columns
+    // Dynamic store columns: Qty / Sync Qty / Sales 90d
     if (col >= k_fixedCols) {
-        const int storeIdx = (col - k_fixedCols) / 2;
-        const bool isSales = (col - k_fixedCols) % 2 == 1;
+        const int storeIdx = (col - k_fixedCols) / 3;
+        const int sub      = (col - k_fixedCols) % 3;
         if (storeIdx >= m_stores.size()) return {};
         const QString &sid = m_stores.at(storeIdx).id;
-        const int val = isSales ? r.storeSales.value(sid, -1)
-                                : r.storeQty.value(sid, -1);
+        int val = -1;
+        switch (sub) {
+        case 0: val = r.storeQty.value(sid, -1);   break;
+        case 1: val = _targetQty(r);               break;
+        case 2: val = r.storeSales.value(sid, -1); break;
+        }
         return numOrDash(val);
     }
     return {};
@@ -173,12 +260,15 @@ QVariant TableMarketplaceProducts::headerData(int section, Qt::Orientation orien
     }
 
     if (section >= k_fixedCols) {
-        const int storeIdx = (section - k_fixedCols) / 2;
-        const bool isSales = (section - k_fixedCols) % 2 == 1;
+        const int storeIdx = (section - k_fixedCols) / 3;
+        const int sub      = (section - k_fixedCols) % 3;
         if (storeIdx < m_stores.size()) {
             const QString &lbl = m_stores.at(storeIdx).label;
-            return isSales ? lbl + QStringLiteral(" Sales 90d")
-                           : lbl + QStringLiteral(" Qty");
+            switch (sub) {
+            case 0: return lbl + QStringLiteral(" Qty");
+            case 1: return lbl + QStringLiteral(" Sync Qty");
+            case 2: return lbl + QStringLiteral(" Sales 90d");
+            }
         }
     }
     return {};

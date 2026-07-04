@@ -42,8 +42,22 @@ public:
     void applyStoreInventory(const QString &storeId, const QHash<QString,int> &qtyBySku);
     void applyStoreSales    (const QString &storeId, const QHash<QString,int> &salesBySku);
 
+    // All SKUs shown in the table (row order).
+    QStringList skus() const;
+
     // Returns the Amazon FBA available qty for a SKU, or -1 if not yet loaded.
     int amazonQtyForSku(const QString &sku) const;
+    // Estimated days of inventory (from ColEstDays), or -1 if unknown.
+    int estDaysForSku(const QString &sku) const;
+
+    // Sync parameters used to compute the per-SKU "Sync Qty" columns.
+    // minDays > 0: only count units beyond that many days of inventory —
+    // corrected = available × (estDays − minDays) / estDays (0 if estDays ≤ minDays).
+    // Then target = corrected × pct / 100, capped at maxTarget (0 = no cap).
+    void setSyncParams(int pctToTarget, int maxTarget, int minDays);
+
+    // The quantity "Sync" would upload for this SKU, or -1 if Amazon qty unknown.
+    int targetQtyForSku(const QString &sku) const;
 
     int rowCount   (const QModelIndex &parent = {}) const override;
     int columnCount(const QModelIndex &parent = {}) const override;
@@ -67,9 +81,14 @@ private:
     QList<Row>              m_rows;
     QList<MarketplaceStore> m_stores;
 
+    int m_pctToTarget = 100;
+    int m_maxTarget   = 0;
+    int m_minDays     = 0;
+
     int  _rowForSku   (const QString &sku)     const;
     int  _storeIndex  (const QString &storeId) const;
     void _recalcEstDays(Row &row) const;
+    int  _targetQty   (const Row &row) const;
 };
 
 #endif // TABLEMARKETPLACEPRODUCTS_H

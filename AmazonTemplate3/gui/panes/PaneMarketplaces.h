@@ -35,13 +35,16 @@ private:
     QCoro::Task<void>  m_loadOrdersTask;
     QCoro::Task<void>  m_syncOrdersTask;
     QCoro::Task<void>  m_syncInventoryTask;
+    QCoro::Task<void>  m_shipByAmzTask;
     QPointer<QDialog>  m_progressDlg; // survives tab switches; null when not loading
 
     AmazonInventoryApi *_api();
+    void                _invalidateAmazonCacheForSku(const QString &sku);
     QCoro::Task<void>   _onLoad();
     QCoro::Task<void>   _onLoadOrders();
     QCoro::Task<void>   _onSyncOrders();
     QCoro::Task<void>   _onSyncInventory();
+    QCoro::Task<void>   _onShipByAmazon();
 };
 
 #endif // PANEMARKETPLACES_H

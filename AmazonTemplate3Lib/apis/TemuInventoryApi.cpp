@@ -272,12 +272,18 @@ QCoro::Task<void> TemuInventoryApi::fetchInventory(QStringList skus, QHash<QStri
     if (!m_lastError.isEmpty())
         co_return;
 
-    for (const QString &s : skus) {
-        const auto it = stocks.constFind(s.toLower());
-        if (it == stocks.constEnd())
-            continue;
-        out->insert(s, it->stock);
-        qDebug() << "Temu fetchInventory: matched SKU" << s << "stock" << it->stock;
+    if (skus.isEmpty()) {
+        // No filter: return every SKU listed in this store (original casing).
+        for (const auto &info : stocks)
+            out->insert(info.skuSn, info.stock);
+    } else {
+        for (const QString &s : skus) {
+            const auto it = stocks.constFind(s.toLower());
+            if (it == stocks.constEnd())
+                continue;
+            out->insert(s, it->stock);
+            qDebug() << "Temu fetchInventory: matched SKU" << s << "stock" << it->stock;
+        }
     }
 
     qDebug() << "Temu fetchInventory finished. Final inventory map:" << *out;
@@ -656,6 +662,18 @@ QCoro::Task<QList<TemuInventoryApi::TemuOrder>> TemuInventoryApi::fetchUnshipped
     }
 
     co_return out;
+}
+
+QCoro::Task<void> TemuInventoryApi::fetchOrderAddress(const QString &parentOrderSn, QJsonObject *out)
+{
+    *out = QJsonObject();
+    QJsonObject params;
+    params.insert(QStringLiteral("parentOrderSn"), parentOrderSn);
+    QJsonObject result;
+    co_await _postRequest(QStringLiteral("bg.order.shippinginfo.v2.get"), params, &result);
+    if (m_lastError.isEmpty())
+        *out = result;
+    co_return;
 }
 
 QCoro::Task<QJsonArray> TemuInventoryApi::fetchLogisticsCompanies()

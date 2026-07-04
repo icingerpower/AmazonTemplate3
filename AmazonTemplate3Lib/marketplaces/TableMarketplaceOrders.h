@@ -30,6 +30,7 @@ public:
         // Hidden fulfillment fields for sync
         QString parentOrderSn;
         QString orderSn;
+        QString sku;            // seller SKU (Temu extCode = Amazon SKU)
         qint64 goodsId = 0;
         qint64 skuId = 0;
         int quantity = 0;

@@ -21,7 +21,8 @@ public:
                               QString proxyHost, int proxyPort, QString proxyUser, QString proxyPassword,
                               QObject *parent = nullptr);
 
-    // SKU → available quantity
+    // SKU → available quantity. Empty `skus` = no filter: return every SKU
+    // listed in the store (keys use the store's original skuSn casing).
     QCoro::Task<void> fetchInventory(QStringList skus, QHash<QString,int> *out);
 
     // SKU → units sold over `days` calendar days
@@ -43,6 +44,10 @@ public:
         QString sku;
     };
     QCoro::Task<QList<TemuOrder>> fetchUnshippedOrders();
+    // Shipping address of an order (bg.order.shippinginfo.v2.get):
+    // receiptName, addressLine1/2, regionName1 (country) / 2 (region) /
+    // 3 (city), postCode, mobile.
+    QCoro::Task<void> fetchOrderAddress(const QString &parentOrderSn, QJsonObject *out);
     QCoro::Task<QJsonArray> fetchLogisticsCompanies();
     // countryCode (e.g. "FR") disambiguates country-specific Temu carriers
     // like swiship(FR) when the source carrier is "Amazon Logistics".
