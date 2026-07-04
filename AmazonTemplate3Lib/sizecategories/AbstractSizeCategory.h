@@ -55,6 +55,8 @@ public:
     QStandardItemModel*  buildTable(const QString &keyFrom, const QString &keyTo,
                                     const QMap<QString,MeasurementInput> &measurements,
                                     QObject *parent = nullptr)                        const;
+    QStandardItemModel*  buildOneSizeTable(const QMap<QString,MeasurementInput> &measurements,
+                                           QObject *parent = nullptr)                const;
     QImage               renderImage(QStandardItemModel *model)                       const;
 
     QList<QPair<QString,QImage>> renderGroupImages(

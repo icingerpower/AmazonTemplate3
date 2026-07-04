@@ -16,7 +16,7 @@ public:
 
     void    setCategory(const AbstractSizeCategory *cat);
 
-    QString mode()           const;   // "numbers" / "letters" / "height"
+    QString mode()           const;   // "numbers" / "letters" / "height" / "one_size"
     QString from()           const;
     QString to()             const;
     bool    isRangeSelected() const;  // both from and to have a valid selection
@@ -38,6 +38,7 @@ private:
     QRadioButton *m_radioNumbers;
     QRadioButton *m_radioLetters;
     QRadioButton *m_radioHeight;
+    QRadioButton *m_radioOneSize;
     QComboBox    *m_numFrom, *m_numTo;
     QComboBox    *m_letFrom, *m_letTo;
     QComboBox    *m_hgtFrom, *m_hgtTo;

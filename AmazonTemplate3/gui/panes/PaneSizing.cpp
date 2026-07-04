@@ -1076,10 +1076,36 @@ bool PaneSizing::_rebuildSizeTable()
     if (!cat)
         return false;
 
-    const bool useLetters = ui->sizeRangeMain->mode() == QLatin1String("letters");
-    const bool useHeight  = ui->sizeRangeMain->mode() == QLatin1String("height");
+    const QString sizeMode = ui->sizeRangeMain->mode();
+    const bool useLetters  = (sizeMode == QLatin1String("letters"));
+    const bool useHeight   = (sizeMode == QLatin1String("height"));
+    const bool useOneSize  = (sizeMode == QLatin1String("one_size"));
     QString keyFrom, keyTo;
     QStringList letterHeaders;
+
+    if (useOneSize) {
+        QMap<QString, MeasurementInput> measurements;
+        for (const auto &w : m_measurementWidgets)
+            measurements[w.fieldId] = {w.refSpinBox->value(), w.stepSpinBox->value(),
+                                       w.rangeSpinBox ? w.rangeSpinBox->value() : 0.0};
+        try {
+            ui->tableViewSizing->setModel(nullptr);
+            delete m_sizeTableModel;
+            m_sizeTableModel = cat->buildOneSizeTable(measurements, this);
+            ui->tableViewSizing->setModel(m_sizeTableModel);
+            ui->tableViewSizing->resizeColumnsToContents();
+            ui->tableViewSizing->setEditTriggers(QAbstractItemView::NoEditTriggers);
+            ui->buttonMakeEditable->setChecked(false);
+            const QImage img = cat->renderImage(m_sizeTableModel);
+            ui->labelGeneratedImage->setPixmap(QPixmap::fromImage(img));
+            ui->labelGeneratedImage->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+            m_generatedSuccessfully = true;
+            return true;
+        } catch (const std::exception &e) {
+            QMessageBox::warning(this, tr("Generation failed"), QString::fromUtf8(e.what()));
+            return false;
+        }
+    }
 
     if (useLetters) {
         const QString lFrom = ui->sizeRangeMain->from();
@@ -4581,14 +4607,15 @@ void PaneSizing::_renderAndSaveChart(const AbstractSizeCategory *cat,
     }
 
     // Temporarily remove non-target group rows (high→low to keep indices stable).
-    // In letter mode the country-group rows were already removed from the model by
-    // _rebuildSizeTable (only "Size" + measurement rows remain), so groupRow no longer
+    // In letter/one_size mode the country-group rows were already removed from the model
+    // by _rebuildSizeTable (only "Size" + measurement rows remain), so groupRow no longer
     // maps to real model rows — skip the filtering entirely.
     // Also skip when the category requires all groups to be visible together (e.g. shoes).
-    const bool lettersMode = ui->sizeRangeMain->mode() == QLatin1String("letters");
+    const bool lettersMode  = ui->sizeRangeMain->mode() == QLatin1String("letters");
+    const bool oneSizeMode  = ui->sizeRangeMain->mode() == QLatin1String("one_size");
     using RowData = QList<QStandardItem *>;
     QList<QPair<int, RowData>> removedGroupRows;
-    if (!lettersMode && groupRow >= 0 && groupRow < groupCount) {
+    if (!lettersMode && !oneSizeMode && groupRow >= 0 && groupRow < groupCount) {
         for (int i = groupCount - 1; i >= 0; --i) {
             if (i == groupRow) continue;
             RowData rowItems;
@@ -4601,7 +4628,30 @@ void PaneSizing::_renderAndSaveChart(const AbstractSizeCategory *cat,
         }
     }
 
+    // For one_size mode: temporarily replace the "One size" cell with its translation.
+    // "One size" is in item(0,1) — the savedLabels mechanism only covers column 0.
+    // For English charts translatedLabels is empty, so the cell keeps its English text.
+    static const QHash<QString, QString> kOneSizeTr = {
+        {"French",   "Taille unique"}, {"German",   "Einheitsgröße"}, {"Spanish", "Talla única"},
+        {"Italian",  "Taglia unica"},  {"Dutch",    "Eén maat"},      {"Japanese", "フリーサイズ"},
+        {"Polish",   "Jeden rozmiar"}, {"Swedish",  "En storlek"},    {"Turkish",  "Tek beden"},
+    };
+    QString savedOneSizeCell;
+    if (oneSizeMode && !translatedLabels.isEmpty()) {
+        auto *it01 = m_sizeTableModel->item(0, 1);
+        if (it01) {
+            savedOneSizeCell = it01->text();
+            it01->setText(kOneSizeTr.value(displayLang, QStringLiteral("One size")));
+        }
+    }
+
     const QImage img = cat->renderImage(m_sizeTableModel);
+
+    // Restore "One size" cell
+    if (!savedOneSizeCell.isEmpty()) {
+        auto *it01 = m_sizeTableModel->item(0, 1);
+        if (it01) it01->setText(savedOneSizeCell);
+    }
 
     // Restore removed group rows (low→high to preserve original positions)
     for (auto &[origIdx, rowItems] : removedGroupRows) {
@@ -5346,15 +5396,17 @@ void PaneSizing::onAplusGenerateSelected()
     lay->addWidget(splitter, 1);
 
     auto *table = new QTableWidget(splitter);
-    table->setColumnCount(4);
-    table->setHorizontalHeaderLabels({tr("Image"), tr("Desktop"), tr("Mobile"), tr("Extra instructions")});
+    table->setColumnCount(5);
+    table->setHorizontalHeaderLabels({tr("Image"), tr("Desktop"), tr("Mobile"), tr("Extra instructions"), tr("Count")});
     table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
     table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Fixed);
     table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
     table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    table->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Fixed);
     table->setColumnWidth(0, 180);
     table->setColumnWidth(1, 80);
     table->setColumnWidth(2, 80);
+    table->setColumnWidth(4, 65);
     table->verticalHeader()->setVisible(false);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -5413,6 +5465,13 @@ void PaneSizing::onAplusGenerateSelected()
         instrEdit->setPlaceholderText(tr("Optional extra prompt…"));
         instrEdit->setFrame(false);
         table->setCellWidget(row, 3, instrEdit);
+
+        auto *countSpin = new QSpinBox(table);
+        countSpin->setRange(1, 10);
+        countSpin->setValue(1);
+        countSpin->setFrame(false);
+        countSpin->setAlignment(Qt::AlignCenter);
+        table->setCellWidget(row, 4, countSpin);
 
         elementIds << e.id;
         imagePaths << imgPath;
@@ -5485,7 +5544,7 @@ void PaneSizing::onAplusGenerateSelected()
         return;
 
     // Collect per-slot desktop/mobile selections
-    struct SlotSel { QString elemId; bool desktop; bool mobile; QString extraInstr; };
+    struct SlotSel { QString elemId; bool desktop; bool mobile; QString extraInstr; int count; };
     QList<SlotSel> selections;
     for (int r = 0; r < table->rowCount(); ++r) {
         const bool d = table->item(r, 1)->checkState() == Qt::Checked;
@@ -5493,8 +5552,11 @@ void PaneSizing::onAplusGenerateSelected()
         QString extra;
         if (auto *le = qobject_cast<QLineEdit *>(table->cellWidget(r, 3)))
             extra = le->text().trimmed();
+        int count = 1;
+        if (auto *sp = qobject_cast<QSpinBox *>(table->cellWidget(r, 4)))
+            count = sp->value();
         if (d || m)
-            selections.append({elementIds.at(r), d, m, extra});
+            selections.append({elementIds.at(r), d, m, extra, count});
     }
 
     if (selections.isEmpty()) {
@@ -5560,6 +5622,11 @@ void PaneSizing::onAplusGenerateSelected()
         const QString displayName = spec.displayName;
         const bool    doDesktop   = sel.desktop;
         const bool    doMobile    = sel.mobile;
+        const int     genCount    = sel.count;
+
+    for (int attempt = 0; attempt < genCount; ++attempt) {
+        const QString attemptSuffix = genCount > 1
+            ? tr(" (%1/%2)").arg(attempt + 1).arg(genCount) : QString{};
 
         const QDir elemDir(m_aplusContent->dir().filePath(elemId));
         elemDir.mkpath(QStringLiteral("."));
@@ -5579,7 +5646,7 @@ void PaneSizing::onAplusGenerateSelected()
 
         if (doDesktop) {
             CliTask dt;
-            dt.label   = tr("Desktop image — %1").arg(displayName);
+            dt.label   = tr("Desktop image — %1%2").arg(displayName, attemptSuffix);
             dt.prompt  = spec.desktopPrompt;
             if (!sel.extraInstr.isEmpty())
                 dt.prompt += QStringLiteral("\n\nAdditional instruction: ") + sel.extraInstr;
@@ -5630,7 +5697,7 @@ void PaneSizing::onAplusGenerateSelected()
 
         if (doMobile) {
             CliTask mt;
-            mt.label   = tr("Mobile image — %1").arg(displayName);
+            mt.label   = tr("Mobile image — %1%2").arg(displayName, attemptSuffix);
             mt.prompt  = spec.mobilePrompt;
             if (!sel.extraInstr.isEmpty())
                 mt.prompt += QStringLiteral("\n\nAdditional instruction: ") + sel.extraInstr;
@@ -5686,7 +5753,8 @@ void PaneSizing::onAplusGenerateSelected()
             };
             tasks.append(mt);
         }
-    }
+    } // end attempt loop
+    } // end finalSels loop
 
     // --- Progress dialog ---
     auto *progressDlg = new QDialog(this);
@@ -7715,14 +7783,40 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
 {
     *messagesOut = QJsonArray{};
 
-    static const QStringList kFamilyKeys{
-        QStringLiteral("apparel_size_system"),
-        QStringLiteral("apparel_size_class"),
-        QStringLiteral("target_gender"),
-        QStringLiteral("age_range_description"),
-        QStringLiteral("apparel_body_type"),
-        QStringLiteral("apparel_height_type"),
-    };
+    // ── Pre-scan THIS marketplace's own listings ────────────────────────────
+    // Size systems are REGIONAL (IT ≠ FR/ES ≠ DE/NL/SE/PL ≠ UK ≠ US/CA), so
+    // size_system / size_class must come from the TARGET marketplace itself —
+    // never borrowed from UK or another region's parent. We derive a reference
+    // from any CHILD that already has a composite on this marketplace, and cache
+    // each SKU's local attributes so the build loop below doesn't re-fetch.
+    QHash<QString, QJsonObject> localBySku;
+    QString refSizeSystem, refSizeClass;
+    QJsonObject parentLocalSizeObj; // parent's composite on THIS marketplace
+    for (const VariationTemplateEntry &e : tplEntries) {
+        if (e.sku.isEmpty()) continue;
+        QJsonObject la;
+        co_await m_api->fetchListingAttributes(mpId, e.sku, &la);
+        localBySku.insert(e.sku, la);
+        const QJsonArray sizeArr = la.value(QStringLiteral("apparel_size")).toArray();
+        if (sizeArr.isEmpty()) continue;
+        const QJsonObject o = sizeArr.first().toObject();
+        if (e.isParent) { parentLocalSizeObj = o; continue; } // children preferred
+        if (refSizeSystem.isEmpty() && o.contains(QStringLiteral("size_system")))
+            refSizeSystem = o.value(QStringLiteral("size_system")).toString();
+        if (refSizeClass.isEmpty() && o.contains(QStringLiteral("size_class")))
+            refSizeClass = o.value(QStringLiteral("size_class")).toString();
+    }
+    // Fallback: the parent's composite on this SAME marketplace. Even when it is
+    // partially corrupted (missing size/size_class), its size_system sub-field is
+    // still regional data stored on this marketplace — not borrowed from elsewhere.
+    if (refSizeSystem.isEmpty() && parentLocalSizeObj.contains(QStringLiteral("size_system")))
+        refSizeSystem = parentLocalSizeObj.value(QStringLiteral("size_system")).toString();
+    if (refSizeClass.isEmpty() && parentLocalSizeObj.contains(QStringLiteral("size_class")))
+        refSizeClass = parentLocalSizeObj.value(QStringLiteral("size_class")).toString();
+    logOut->append(tr("%1 region reference: size_system=%2 size_class=%3").arg(
+        mpCode,
+        refSizeSystem.isEmpty() ? QStringLiteral("(none)") : refSizeSystem,
+        refSizeClass.isEmpty()  ? QStringLiteral("(none)") : refSizeClass));
 
     int messageId = 1;
     for (const VariationTemplateEntry &e : tplEntries) {
@@ -7730,8 +7824,7 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
 
         // The SKU's own listing on the TARGET marketplace is the best source:
         // values are already localized and schema-shaped for this marketplace.
-        QJsonObject localAttrs;
-        co_await m_api->fetchListingAttributes(mpId, e.sku, &localAttrs);
+        const QJsonObject localAttrs = localBySku.value(e.sku);
 
         QJsonArray patches;
         auto addPatch = [&](const QString &key, const QJsonValue &val) {
@@ -7757,6 +7850,23 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
         };
         auto usable = [](const QJsonValue &v) {
             return !v.isUndefined() && !v.isNull();
+        };
+        // Scalar value of an attribute, preferring an English language_tag entry —
+        // avoids pushing localized values (e.g. "Erwachsener") to other marketplaces,
+        // which Amazon rejects as "invalid language data" (error 100720).
+        auto englishScalar = [](const QJsonObject &attrs, const QString &key) -> QString {
+            const QJsonArray arr = attrs.value(key).toArray();
+            QString noLang, any;
+            for (const QJsonValue &jv : arr) {
+                const QJsonObject o = jv.toObject();
+                const QString val = o.value(QStringLiteral("value")).toString();
+                if (val.isEmpty()) continue;
+                const QString lang = o.value(QStringLiteral("language_tag")).toString();
+                if (lang.startsWith(QStringLiteral("en"), Qt::CaseInsensitive)) return val;
+                if (lang.isEmpty() && noLang.isEmpty()) noLang = val;
+                if (any.isEmpty()) any = val;
+            }
+            return noLang.isEmpty() ? any : noLang;
         };
 
         // Product identifier — mirrors external_product_id(+type) flat file columns.
@@ -7799,11 +7909,55 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
                 const QJsonValue v = rawOr(k, parentAttrsFallback);
                 if (usable(v)) addPatch(k, v);
             }
-            for (const QString &k : kFamilyKeys) {
-                QJsonValue v = rawOr(k, parentAttrsFallback);
-                if (!usable(v) && !familyAttrFallback.value(k).isEmpty())
-                    v = simpleVal(familyAttrFallback.value(k));
-                if (usable(v)) addPatch(k, v);
+            // NOTE: a delete op ({"op":"delete"}) is NOT supported by JSON_LISTINGS_FEED
+            // (Amazon returns "Invalid empty value provided in patch"), so a corrupted
+            // apparel_size already stored on the parent (e.g. DE) cannot be removed via
+            // feed. The only way to overwrite it is a `replace` with a COMPLETE valid
+            // composite — done below when the parent already carries an apparel_size.
+            if (localAttrs.contains(QStringLiteral("apparel_size"))) {
+                const QJsonArray pSize = localAttrs.value(QStringLiteral("apparel_size")).toArray();
+                QJsonObject pObj = pSize.isEmpty() ? QJsonObject{} : pSize.first().toObject();
+                // Ensure the composite is complete & valid so it stops failing
+                // validation: use THIS marketplace's regional size_system/size_class
+                // (from the children's reference), force body_type/height_type =
+                // regular, and supply a size (Amazon demands ≥1).
+                const QString sysFb = refSizeSystem.isEmpty() ? QStringLiteral("as8") : refSizeSystem;
+                const QString clsFb = refSizeClass.isEmpty()  ? QStringLiteral("numeric") : refSizeClass;
+                if (!pObj.contains(QStringLiteral("size_system")))
+                    pObj.insert(QStringLiteral("size_system"), sysFb);
+                if (!pObj.contains(QStringLiteral("size_class")))
+                    pObj.insert(QStringLiteral("size_class"), clsFb);
+                pObj.insert(QStringLiteral("body_type"),   QStringLiteral("regular"));
+                pObj.insert(QStringLiteral("height_type"), QStringLiteral("regular"));
+                QString pSizeVal = pObj.value(QStringLiteral("size")).toString();
+                if (pSizeVal.isEmpty() && !tplEntries.isEmpty()) {
+                    // Borrow the first child's size so the composite is non-empty.
+                    for (const auto &ce : tplEntries) {
+                        if (ce.isParent || ce.size.isEmpty()) continue;
+                        QString s = ce.size;
+                        if (!s.startsWith(QStringLiteral("numeric_"))) {
+                            bool num=false; s.toDouble(&num);
+                            if (num) s = QStringLiteral("numeric_") + s;
+                        }
+                        pSizeVal = s; break;
+                    }
+                }
+                if (!pSizeVal.isEmpty())
+                    pObj.insert(QStringLiteral("size"), pSizeVal);
+                pObj.insert(QStringLiteral("marketplace_id"), mpId);
+                addPatch(QStringLiteral("apparel_size"), QJsonArray{pObj});
+                logOut->append(tr("parent %1: repaired apparel_size=%2").arg(
+                    e.sku, QString::fromUtf8(QJsonDocument(pObj).toJson(QJsonDocument::Compact))));
+            }
+
+            // Only gender / age_range are safe top-level descriptors on the parent,
+            // and they must be English canonical values (invalid-language otherwise).
+            for (const QString &k : {QStringLiteral("target_gender"),
+                                     QStringLiteral("age_range_description")}) {
+                QString v = englishScalar(localAttrs, k);
+                if (v.isEmpty()) v = englishScalar(parentAttrsFallback, k);
+                if (v.isEmpty()) v = familyAttrFallback.value(k);
+                if (!v.isEmpty()) addPatch(k, simpleVal(v));
             }
         } else {
             addPatch(QStringLiteral("child_parent_sku_relationship"),
@@ -7811,6 +7965,14 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
                          {QStringLiteral("child_relationship_type"), QStringLiteral("variation")},
                          {QStringLiteral("parent_sku"),              parentSku},
                          {QStringLiteral("marketplace_id"),          mpId}}});
+
+            // department — required on children too (per the working flat file).
+            // Copy the raw value: the child's local listing carries the correct
+            // language_tag for this marketplace; parent fallback swaps marketplace_id.
+            {
+                const QJsonValue dept = rawOr(QStringLiteral("department"), parentAttrsFallback);
+                if (usable(dept)) addPatch(QStringLiteral("department"), dept);
+            }
 
             // Color — theme attribute; child-specific, no family fallback.
             QJsonValue colorV = rawOr(QStringLiteral("color_name"), {});
@@ -7824,40 +7986,108 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
                 logOut->append(tr("⚠ %1: no color available — theme attribute missing!").arg(e.sku));
             }
 
-            // Size — own local raw value, else template size converted to this country.
-            QJsonValue sizeV = rawOr(QStringLiteral("apparel_size"), {});
-            if (!usable(sizeV) && !e.size.isEmpty()) {
-                QString sz = e.size;
-                if (!e.sizeSource.isEmpty() && e.sizeSource != mpCode)
-                    sz = FillerSize::convertSize(sz, e.sizeSource, mpCode);
-                sizeV = simpleVal(sz);
+            // apparel_size is a COMPOSITE attribute:
+            //   [{ size, size_system, size_class, marketplace_id }]
+            // NOT a flat {value:…}, and NOT accompanied by separate top-level
+            // apparel_size_system / apparel_size_class / apparel_body_type /
+            // apparel_height_type attributes (Amazon merges those into the composite
+            // and then rejects it — errors 99022, 90004401, 90248, 100893).
+            //
+            // size_system / size_class are REGIONAL — they must come from the target
+            // marketplace, never from UK or another region. Use the child's own local
+            // composite first, then the region reference derived from sibling children
+            // on THIS marketplace (pre-scan above). The .size value is per-child and
+            // converted to this country's numbering. body_type/height_type = "regular"
+            // for women's clothing (per the working flat file).
+            static const QString kUkMpId = QStringLiteral("A1F83G8C2ARO7P");
+            const QJsonArray localSizeArr = localAttrs.value(QStringLiteral("apparel_size")).toArray();
+
+            // ukAttrs is still needed for English age/gender values (not for sizing).
+            QJsonObject ukAttrs;
+            if (mpId != kUkMpId)
+                co_await m_api->fetchListingAttributes(kUkMpId, e.sku, &ukAttrs);
+
+            QJsonObject sizeObj;
+            if (!localSizeArr.isEmpty()) {
+                const QJsonObject o = localSizeArr.first().toObject();
+                for (const QString &k : {QStringLiteral("size_system"),
+                                         QStringLiteral("size_class")}) {
+                    if (o.contains(k)) sizeObj.insert(k, o.value(k));
+                }
             }
-            if (usable(sizeV)) {
-                addPatch(QStringLiteral("apparel_size"), sizeV);
-            } else {
-                logOut->append(tr("⚠ %1: no size available — theme attribute missing!").arg(e.sku));
+            // Fill any still-missing system/class from the marketplace region reference.
+            if (!sizeObj.contains(QStringLiteral("size_system")) && !refSizeSystem.isEmpty())
+                sizeObj.insert(QStringLiteral("size_system"), refSizeSystem);
+            if (!sizeObj.contains(QStringLiteral("size_class")) && !refSizeClass.isEmpty())
+                sizeObj.insert(QStringLiteral("size_class"), refSizeClass);
+            // body_type / height_type default to "regular" for women's clothing.
+            sizeObj.insert(QStringLiteral("body_type"),   QStringLiteral("regular"));
+            sizeObj.insert(QStringLiteral("height_type"), QStringLiteral("regular"));
+
+            // Size VALUE: the child's own local size on this marketplace (already in
+            // this region's numbering), else the collected size converted to mpCode.
+            QString sizeVal;
+            if (!localSizeArr.isEmpty())
+                sizeVal = localSizeArr.first().toObject().value(QStringLiteral("size")).toString();
+            if (sizeVal.isEmpty()) {
+                QString sz = e.size, szSrc = e.sizeSource;
+                if (!sz.isEmpty() && !szSrc.isEmpty() && szSrc != mpCode)
+                    sz = FillerSize::convertSize(sz, szSrc, mpCode);
+                sizeVal = sz;
             }
 
-            // Family-level apparel attributes: local raw → own collected value →
-            // family fallback (first-found among children / parent / dialog).
-            auto ownFor = [&](const QString &k) -> QString {
-                if (k == QLatin1String("apparel_size_system"))   return e.sizeSystem;
-                if (k == QLatin1String("apparel_size_class"))    return e.sizeClass;
-                if (k == QLatin1String("target_gender"))         return e.gender;
-                if (k == QLatin1String("age_range_description")) return e.ageRange;
-                if (k == QLatin1String("apparel_body_type"))     return e.bodyType;
-                if (k == QLatin1String("apparel_height_type"))   return e.heightType;
-                return {};
-            };
-            for (const QString &k : kFamilyKeys) {
-                QJsonValue v = rawOr(k, {});
-                if (!usable(v)) {
-                    QString s = ownFor(k);
-                    if (s.isEmpty()) s = familyAttrFallback.value(k);
-                    if (!s.isEmpty()) v = simpleVal(s);
+            // Amazon's canonical numeric size value is "numeric_<n>" (e.g.
+            // "numeric_38"), NOT the bare display number. Proven by the IT feed:
+            // a child sent "numeric_48" linked, while siblings sent bare "42"/"44"
+            // were rejected with 100893 "Provide [size]". Normalize bare numeric
+            // sizes to that form when size_class is numeric.
+            if (!sizeVal.isEmpty()) {
+                const QString sc = sizeObj.value(QStringLiteral("size_class")).toString();
+                QString bare = sizeVal;
+                if (bare.startsWith(QStringLiteral("numeric_")))
+                    bare = bare.mid(8);
+                bool isNumeric = false;
+                bare.toDouble(&isNumeric);
+                if (isNumeric && (sc.compare(QStringLiteral("numeric"), Qt::CaseInsensitive) == 0
+                                  || sc.isEmpty())) {
+                    sizeVal = QStringLiteral("numeric_") + bare;
+                    // A numeric_<n> size implies size_class "numeric" — supply it when
+                    // no regional source had it (ES/IT feeds already accepted this pair).
+                    if (sc.isEmpty())
+                        sizeObj.insert(QStringLiteral("size_class"), QStringLiteral("numeric"));
                 }
-                if (usable(v)) addPatch(k, v);
+                sizeObj.insert(QStringLiteral("size"), sizeVal);
             }
+            if (!sizeObj.isEmpty()) {
+                sizeObj.insert(QStringLiteral("marketplace_id"), mpId);
+                addPatch(QStringLiteral("apparel_size"), QJsonArray{sizeObj});
+            }
+            // Log the exact composite so the next run confirms which sub-fields made it.
+            {
+                QStringList miss;
+                if (!sizeObj.contains(QStringLiteral("size")))        miss << QStringLiteral("size");
+                if (!sizeObj.contains(QStringLiteral("size_system"))) miss << QStringLiteral("size_system");
+                if (!sizeObj.contains(QStringLiteral("size_class")))  miss << QStringLiteral("size_class");
+                logOut->append(tr("%1 apparel_size=%2%3")
+                    .arg(e.sku,
+                         QString::fromUtf8(QJsonDocument(sizeObj).toJson(QJsonDocument::Compact)),
+                         miss.isEmpty() ? QString()
+                                        : QStringLiteral("  ⚠ MISSING: ") + miss.join(QStringLiteral(","))));
+            }
+
+            // target_gender / age_range_description: top-level scalars and inputs the
+            // apparel_size schema conditions on. Must be English canonical values —
+            // localized values (e.g. "Erwachsener") are rejected as invalid language.
+            auto topLevelEnglish = [&](const QString &key, const QString &own) {
+                QString v = englishScalar(localAttrs, key);
+                if (v.isEmpty()) v = englishScalar(ukAttrs, key);
+                if (v.isEmpty()) v = englishScalar(parentAttrsFallback, key);
+                if (v.isEmpty()) v = own;
+                if (v.isEmpty()) v = familyAttrFallback.value(key);
+                if (!v.isEmpty()) addPatch(key, simpleVal(v));
+            };
+            topLevelEnglish(QStringLiteral("target_gender"),         e.gender);
+            topLevelEnglish(QStringLiteral("age_range_description"), e.ageRange);
         }
 
         logOut->append(tr("%1 %2: %3 patch(es), local listing %4")

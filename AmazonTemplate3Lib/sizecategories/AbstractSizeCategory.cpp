@@ -186,6 +186,41 @@ QStandardItemModel* AbstractSizeCategory::buildTable(const QString &keyFrom,
     return model;
 }
 
+QStandardItemModel* AbstractSizeCategory::buildOneSizeTable(
+    const QMap<QString, MeasurementInput> &measurements,
+    QObject *parent) const
+{
+    const auto fields = measurementFields();
+    const int nRows = 1 + fields.size(); // "Size" header row + measurement rows
+    auto *model = new QStandardItemModel(nRows, 2, parent);
+
+    model->setHeaderData(0, Qt::Horizontal, QString());
+    model->setHeaderData(1, Qt::Horizontal, QObject::tr("One size"));
+
+    const auto noEditFlags = Qt::ItemIsEnabled | Qt::ItemIsSelectable;
+
+    auto *sizeLabel = new QStandardItem(QObject::tr("Size"));
+    sizeLabel->setFlags(noEditFlags);
+    model->setItem(0, 0, sizeLabel);
+    auto *sizeVal = new QStandardItem(QObject::tr("One size"));
+    sizeVal->setFlags(noEditFlags);
+    model->setItem(0, 1, sizeVal);
+
+    for (int f = 0; f < fields.size(); ++f) {
+        const auto &field = fields[f];
+        const int r = 1 + f;
+        auto *label = new QStandardItem(field.label);
+        label->setFlags(noEditFlags);
+        model->setItem(r, 0, label);
+        const auto m = measurements.value(field.id);
+        auto *cell = new QStandardItem(fmtCmAndIn(m.refValue, m.rangeVal));
+        cell->setFlags(noEditFlags);
+        model->setItem(r, 1, cell);
+    }
+
+    return model;
+}
+
 QImage AbstractSizeCategory::_renderRows(const QList<QPair<QString,QStringList>> &rows)
 {
     const int nRows = rows.size();

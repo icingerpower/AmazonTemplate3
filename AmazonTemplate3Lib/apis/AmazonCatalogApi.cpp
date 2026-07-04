@@ -2912,6 +2912,18 @@ AmazonCatalogApi::fetchVariationFamily(const QString& asin,
         }
     }
 
+    // Step 5: standalone product — no children found anywhere. Fetch the ASIN itself
+    // as the sole child so the rest of the pipeline (attributesFetched, working dir
+    // creation, A+ content, size chart) works without special-casing.
+    if (family.children.isEmpty()) {
+        qDebug() << "AmazonCatalogApi: no children found for" << asin
+                 << "— treating as standalone, fetching own attributes";
+        AsinItem self;
+        co_await _fetchAsinItem(asin, marketplaceId, &self);
+        if (self.asin.isEmpty()) self.asin = asin;
+        family.children.append(std::move(self));
+    }
+
     qDebug() << "AmazonCatalogApi: fetchVariationFamily done. parent ="
              << family.parentAsin << "children:" << family.children.size()
              << "first child images:" << (family.children.isEmpty() ? 0 : family.children.first().allImageUrls.size());

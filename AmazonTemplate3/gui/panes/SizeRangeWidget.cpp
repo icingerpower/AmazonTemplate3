@@ -17,6 +17,7 @@ SizeRangeWidget::SizeRangeWidget(QWidget *parent)
     m_radioNumbers = new QRadioButton(tr("Numbers"), this);
     m_radioLetters = new QRadioButton(tr("Letters"), this);
     m_radioHeight  = new QRadioButton(tr("Height"),  this);
+    m_radioOneSize = new QRadioButton(tr("One size"), this);
     m_radioNumbers->setChecked(true);
 
     m_numFrom = new QComboBox(this);
@@ -52,6 +53,10 @@ SizeRangeWidget::SizeRangeWidget(QWidget *parent)
     layout->addWidget(new QLabel(tr("to"), this));
     layout->addWidget(m_hgtTo);
 
+    layout->addWidget(makeSep());
+
+    layout->addWidget(m_radioOneSize);
+
     // Wire signals
     const auto comboChanged = QOverload<int>::of(&QComboBox::currentIndexChanged);
     connect(m_numFrom, comboChanged, this, &SizeRangeWidget::changed);
@@ -61,9 +66,10 @@ SizeRangeWidget::SizeRangeWidget(QWidget *parent)
     connect(m_hgtFrom, comboChanged, this, &SizeRangeWidget::changed);
     connect(m_hgtTo,   comboChanged, this, &SizeRangeWidget::changed);
 
-    connect(m_radioNumbers, &QRadioButton::toggled, this, &SizeRangeWidget::onModeToggled);
-    connect(m_radioLetters, &QRadioButton::toggled, this, &SizeRangeWidget::onModeToggled);
-    connect(m_radioHeight,  &QRadioButton::toggled, this, &SizeRangeWidget::onModeToggled);
+    connect(m_radioNumbers,  &QRadioButton::toggled, this, &SizeRangeWidget::onModeToggled);
+    connect(m_radioLetters,  &QRadioButton::toggled, this, &SizeRangeWidget::onModeToggled);
+    connect(m_radioHeight,   &QRadioButton::toggled, this, &SizeRangeWidget::onModeToggled);
+    connect(m_radioOneSize,  &QRadioButton::toggled, this, &SizeRangeWidget::onModeToggled);
 
     updateControlStates();
 }
@@ -82,6 +88,7 @@ void SizeRangeWidget::setCategory(const AbstractSizeCategory *cat)
     const QSignalBlocker br1(m_radioNumbers);
     const QSignalBlocker br2(m_radioLetters);
     const QSignalBlocker br3(m_radioHeight);
+    const QSignalBlocker br4(m_radioOneSize);
 
     m_numFrom->clear();
     m_numTo->clear();
@@ -122,6 +129,7 @@ void SizeRangeWidget::setCategory(const AbstractSizeCategory *cat)
     m_radioNumbers->setEnabled(!isHeightBased);
     m_radioLetters->setEnabled(hasLetters);
     m_radioHeight ->setEnabled(isHeightBased);
+    m_radioOneSize->setEnabled(true); // always available
 
     if (isHeightBased) {
         m_radioHeight->setChecked(true);
@@ -136,30 +144,34 @@ void SizeRangeWidget::setCategory(const AbstractSizeCategory *cat)
 
 QString SizeRangeWidget::mode() const
 {
-    if (m_radioLetters->isChecked()) return QStringLiteral("letters");
-    if (m_radioHeight->isChecked())  return QStringLiteral("height");
+    if (m_radioOneSize->isChecked())  return QStringLiteral("one_size");
+    if (m_radioLetters->isChecked())  return QStringLiteral("letters");
+    if (m_radioHeight->isChecked())   return QStringLiteral("height");
     return QStringLiteral("numbers");
 }
 
 QString SizeRangeWidget::from() const
 {
     const QString m = mode();
-    if (m == QLatin1String("letters")) return m_letFrom->currentText();
-    if (m == QLatin1String("height"))  return m_hgtFrom->currentText();
+    if (m == QLatin1String("one_size")) return QString{};
+    if (m == QLatin1String("letters"))  return m_letFrom->currentText();
+    if (m == QLatin1String("height"))   return m_hgtFrom->currentText();
     return m_numFrom->currentText();
 }
 
 QString SizeRangeWidget::to() const
 {
     const QString m = mode();
-    if (m == QLatin1String("letters")) return m_letTo->currentText();
-    if (m == QLatin1String("height"))  return m_hgtTo->currentText();
+    if (m == QLatin1String("one_size")) return QString{};
+    if (m == QLatin1String("letters"))  return m_letTo->currentText();
+    if (m == QLatin1String("height"))   return m_hgtTo->currentText();
     return m_numTo->currentText();
 }
 
 bool SizeRangeWidget::isRangeSelected() const
 {
     const QString m = mode();
+    if (m == QLatin1String("one_size")) return true;
     if (m == QLatin1String("letters"))
         return m_letFrom->currentIndex() >= 0 && m_letTo->currentIndex() >= 0;
     if (m == QLatin1String("height"))
@@ -169,7 +181,8 @@ bool SizeRangeWidget::isRangeSelected() const
 
 void SizeRangeWidget::setMode(const QString &mode)
 {
-    if (mode == QLatin1String("letters"))      m_radioLetters->setChecked(true);
+    if (mode == QLatin1String("one_size"))     m_radioOneSize->setChecked(true);
+    else if (mode == QLatin1String("letters")) m_radioLetters->setChecked(true);
     else if (mode == QLatin1String("height"))  m_radioHeight->setChecked(true);
     else                                        m_radioNumbers->setChecked(true);
 }
@@ -192,7 +205,7 @@ void SizeRangeWidget::setTo(const QString &val)
 
 void SizeRangeWidget::guessRange(const QStringList &rawSizes)
 {
-    if (!m_cat)
+    if (!m_cat || mode() == QLatin1String("one_size"))
         return;
     const auto [minKey, maxKey] = m_cat->guessRange(rawSizes);
     if (!minKey.isEmpty()) {
@@ -220,4 +233,5 @@ void SizeRangeWidget::updateControlStates()
     m_letTo->setEnabled(useLetters);
     m_hgtFrom->setEnabled(useHeight);
     m_hgtTo->setEnabled(useHeight);
+    // one_size: no from/to combos needed — all disabled by the above
 }
