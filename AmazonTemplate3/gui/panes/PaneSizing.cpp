@@ -7883,7 +7883,7 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
 
         // The SKU's own listing on the TARGET marketplace is the best source:
         // values are already localized and schema-shaped for this marketplace.
-        const QJsonObject localAttrs = localBySku.value(e.sku);
+        QJsonObject localAttrs = localBySku.value(e.sku);
 
         // ── Legacy cleanup (direct PATCH delete — feeds cannot delete) ──────
         // 1. A stored apparel_size on a listing whose schema doesn't define it
@@ -7895,6 +7895,7 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
                                                    QStringLiteral("apparel_size"),
                                                    stale, &ok, &det);
             logOut->append(tr("%1: delete legacy apparel_size → %2").arg(e.sku, det));
+            if (ok) localAttrs.remove(QStringLiteral("apparel_size"));
         }
         // 2. size/color entries stored under a language_tag the marketplace does
         //    not accept (e.g. nl_BE on BE, which only allows fr_BE) — they raise
@@ -7913,6 +7914,18 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
                                                    wrongLang, &ok, &det);
             logOut->append(tr("%1: delete wrong-language %2 entries (%3) → %4")
                                .arg(e.sku, attr).arg(wrongLang.size()).arg(det));
+            if (ok) {
+                // Drop the deleted entries from our snapshot so the build below
+                // doesn't re-send them via the raw-copy path.
+                QJsonArray keep;
+                for (const QJsonValue &jv : localAttrs.value(attr).toArray()) {
+                    const QString lt = jv.toObject().value(QStringLiteral("language_tag")).toString();
+                    if (lt.isEmpty() || lt == langTag)
+                        keep.append(jv);
+                }
+                if (keep.isEmpty()) localAttrs.remove(attr);
+                else                localAttrs.insert(attr, keep);
+            }
         }
 
         QJsonArray patches;
