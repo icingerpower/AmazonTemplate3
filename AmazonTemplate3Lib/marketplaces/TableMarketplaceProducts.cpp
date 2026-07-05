@@ -109,10 +109,9 @@ void TableMarketplaceProducts::_recalcEstDays(Row &row) const
     }
 }
 
-void TableMarketplaceProducts::applyInventory(
-    const QList<AmazonInventoryApi::InventorySummary> &summaries)
+void TableMarketplaceProducts::applyInventory(const QList<StockRecord> &records)
 {
-    for (const auto &s : summaries) {
+    for (const auto &s : records) {
         const int row = _rowForSku(s.sku);
         if (row < 0) continue;
         Row &r = m_rows[row];

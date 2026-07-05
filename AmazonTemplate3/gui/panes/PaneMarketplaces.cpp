@@ -2,11 +2,13 @@
 #include "PaneMarketplaces.h"
 #include "ui_PaneMarketplaces.h"
 
-#include "AmazonInventoryApi.h"
-#include "TemuInventoryApi.h"
+#include "AbstractInventorySource.h"
+#include "AbstractInventorySourceFactory.h"
+#include "AbstractTargetMarketplace.h"
+#include "AbstractTargetMarketplaceFactory.h"
+#include "MarketplaceTypes.h"
 #include "TableMarketplaceProducts.h"
 #include "TableMarketplaceOrders.h"
-#include "SettingsTable.h"
 
 #include <QDateTime>
 #include <QDialog>
@@ -28,36 +30,24 @@
 #include <QTextEdit>
 #include <QVBoxLayout>
 
-#include "TemuStoreModel.h"
 #include "../../common/workingdirectory/WorkingDirectoryManager.h"
 #include <QSettings>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
 
-// Amazon France marketplace ID (used for FBA inventory report creation)
-static const QString k_marketplaceId = QStringLiteral("A13V1IB3VIYZZH");
+// ---------------------------------------------------------------------------
+// Fulfillment source inventory/sales cache (24 h, partial — failed entries
+// are re-fetched on the next Load).
+// ---------------------------------------------------------------------------
 
-// All EU Amazon marketplaces — Sales API only accepts one per call,
-// so we query each and sum. Querying an inactive marketplace returns 0.
-static const QStringList k_euMarketplaceIds = {
-    QStringLiteral("A1PA6795UKMFR9"), // DE
-    QStringLiteral("A13V1IB3VIYZZH"), // FR
-    QStringLiteral("APJ6JRA9NG5V4"),  // IT
-    QStringLiteral("A1RKKUPIHCS9HS"), // ES
-    QStringLiteral("A1805IZSGTT6HW"), // NL
-    QStringLiteral("A2NODRKZP88ZB9"), // SE
-    QStringLiteral("A1C3SOZRARQ6R3"), // PL
-    QStringLiteral("ARBP9OOSHTCHU"),  // BE
-};
-
-static void saveAmazonCache(const QList<AmazonInventoryApi::InventorySummary> &summaries, const QHash<QString, int> &sales)
+static void saveAmazonCache(const QList<StockRecord> &records, const QHash<QString, int> &sales)
 {
     auto s = WorkingDirectoryManager::instance()->settings();
     s->setValue(QStringLiteral("AmazonCache/timestamp"), QDateTime::currentDateTimeUtc().toSecsSinceEpoch());
 
     QJsonArray invArray;
-    for (const auto &item : summaries) {
+    for (const auto &item : records) {
         QJsonObject obj;
         obj.insert(QStringLiteral("sku"), item.sku);
         obj.insert(QStringLiteral("asin"), item.asin);
@@ -74,7 +64,7 @@ static void saveAmazonCache(const QList<AmazonInventoryApi::InventorySummary> &s
     s->setValue(QStringLiteral("AmazonCache/sales"), QString::fromUtf8(QJsonDocument(salesObj).toJson(QJsonDocument::Compact)));
 }
 
-static bool loadAmazonCache(QList<AmazonInventoryApi::InventorySummary> *summariesOut, QHash<QString, int> *salesOut)
+static bool loadAmazonCache(QList<StockRecord> *recordsOut, QHash<QString, int> *salesOut)
 {
     auto s = WorkingDirectoryManager::instance()->settings();
     if (!s->contains(QStringLiteral("AmazonCache/timestamp"))) {
@@ -93,16 +83,16 @@ static bool loadAmazonCache(QList<AmazonInventoryApi::InventorySummary> *summari
     QJsonDocument invDoc = QJsonDocument::fromJson(invStr.toUtf8(), &err);
     if (err.error != QJsonParseError::NoError) return false;
 
-    summariesOut->clear();
+    recordsOut->clear();
     QJsonArray invArray = invDoc.array();
     for (const auto &val : invArray) {
         QJsonObject obj = val.toObject();
-        AmazonInventoryApi::InventorySummary item;
+        StockRecord item;
         item.sku = obj.value(QStringLiteral("sku")).toString();
         item.asin = obj.value(QStringLiteral("asin")).toString();
         item.available = obj.value(QStringLiteral("available")).toInt();
         item.inbound = obj.value(QStringLiteral("inbound")).toInt();
-        summariesOut->append(item);
+        recordsOut->append(item);
     }
 
     // Load sales
@@ -237,6 +227,8 @@ void PaneMarketplaces::_invalidateAmazonCacheForSku(const QString &sku)
 
 PaneMarketplaces::~PaneMarketplaces()
 {
+    qDeleteAll(m_marketplaces);
+    qDeleteAll(m_sources);
     delete ui;
 }
 
@@ -254,30 +246,49 @@ void PaneMarketplaces::hideEvent(QHideEvent *event)
         m_progressDlg->hide();
 }
 
-AmazonInventoryApi *PaneMarketplaces::_api()
+// Rebuild the configured platforms from the working directory settings via
+// the registered factories (Recorder pattern) — picks up new stores/sources
+// added in Settings without restarting the app.
+void PaneMarketplaces::_rebuildPlatforms()
 {
-    if (!m_api) {
-        auto *st = SettingsTable::instance();
-        m_api = new AmazonInventoryApi(
-            st->value(SettingsTable::KEY_LWA_CLIENT_ID),
-            st->value(SettingsTable::KEY_LWA_CLIENT_SECRET),
-            st->value(SettingsTable::KEY_EU_LWA_REFRESH_TOKEN),
-            st->value(SettingsTable::KEY_EU_SELLER_ID),
-            k_marketplaceId,
-            this);
-    }
-    return m_api;
+    qDeleteAll(m_marketplaces);
+    m_marketplaces.clear();
+    qDeleteAll(m_sources);
+    m_sources.clear();
+
+    auto s = WorkingDirectoryManager::instance()->settings();
+    m_marketplaces = AbstractTargetMarketplaceFactory::buildAllInstances(s.data());
+    m_sources      = AbstractInventorySourceFactory::buildAllInstances(s.data());
+
+    QStringList mktNames, srcNames;
+    for (const auto *m : m_marketplaces) mktNames << m->displayName();
+    for (const auto *src : m_sources)    srcNames << src->displayName();
+    qDebug() << "PaneMarketplaces::_rebuildPlatforms: marketplaces =" << mktNames
+             << "sources =" << srcNames;
+}
+
+AbstractInventorySource *PaneMarketplaces::_source() const
+{
+    return m_sources.isEmpty() ? nullptr : m_sources.first();
+}
+
+AbstractTargetMarketplace *PaneMarketplaces::_marketplaceById(const QString &id) const
+{
+    for (auto *m : m_marketplaces)
+        if (m->id() == id)
+            return m;
+    return nullptr;
 }
 
 QCoro::Task<void> PaneMarketplaces::_onLoad()
 {
-    // Rebuild model from current Temu store configuration.
-    TemuStoreModel temuModel;
+    _rebuildPlatforms();
+
     QList<TableMarketplaceProducts::MarketplaceStore> stores;
-    for (const TemuStore &ts : temuModel.stores()) {
+    for (const auto *mkt : m_marketplaces) {
         TableMarketplaceProducts::MarketplaceStore ms;
-        ms.id    = QStringLiteral("temu_%1_%2").arg(ts.country, ts.label);
-        ms.label = QStringLiteral("Temu %1 – %2").arg(ts.country, ts.label);
+        ms.id    = mkt->id();
+        ms.label = mkt->displayName();
         stores.append(ms);
     }
 
@@ -338,33 +349,38 @@ QCoro::Task<void> PaneMarketplaces::_onLoad()
     dlg->show();
     setEnabled(false);
 
-    // --- Discover SKUs from the Temu stores (rows = union of store SKUs;
-    //     a SKU existing only on Amazon is not displayed) ---
-    auto *st = SettingsTable::instance();
-    const QString appKey    = st->value(SettingsTable::KEY_TEMU_APP_KEY);
-    const QString appSecret = st->value(SettingsTable::KEY_TEMU_APP_SECRET);
+    // Configuration summary — which platforms are active for this run.
+    {
+        QStringList mktNames;
+        for (const auto *m : m_marketplaces) mktNames << m->displayName();
+        appendLog(tr("→ %1 target marketplace(s): %2")
+                  .arg(m_marketplaces.size())
+                  .arg(mktNames.isEmpty() ? tr("none — add stores in Settings")
+                                          : mktNames.join(QStringLiteral(", "))));
+        appendLog(tr("→ Fulfillment source: %1")
+                  .arg(_source() ? _source()->displayName()
+                                 : tr("none configured — check API credentials in Settings")));
+    }
 
-    QHash<QString, QHash<QString,int>> storeQtyByStoreId; // storeId → (sku → qty)
+    // --- Discover SKUs from the target marketplaces (rows = union of store
+    //     SKUs; a SKU existing only at the fulfillment source is not shown) ---
+    QHash<QString, QHash<QString,int>> storeQtyByStoreId; // marketplace id → (sku → qty)
     QMap<QString, QString> skuByLower;                     // lower → original casing (sorted)
-    for (const TemuStore &ts : temuModel.stores()) {
+    for (auto *mkt : m_marketplaces) {
         if (!dlgPtr) { setEnabled(true); co_return; }
-        const QString storeId = QStringLiteral("temu_%1_%2").arg(ts.country, ts.label);
-        setStatus(tr("Listing SKUs of Temu %1 – %2…").arg(ts.country, ts.label));
-        appendLog(tr("→ Temu %1 – %2: listing store SKUs").arg(ts.country, ts.label));
+        setStatus(tr("Listing SKUs of %1…").arg(mkt->displayName()));
+        appendLog(tr("→ %1: listing store SKUs").arg(mkt->displayName()));
 
-        TemuInventoryApi temuApi(appKey, appSecret, ts.token,
-                                 ts.proxyHost, ts.proxyPort, ts.proxyUser, ts.proxyPassword,
-                                 this);
         QHash<QString, int> qtyBySku;
-        co_await temuApi.fetchInventory({}, &qtyBySku); // empty filter = all SKUs
+        co_await mkt->fetchInventory({}, &qtyBySku); // empty filter = all SKUs
         if (!dlgPtr) { setEnabled(true); co_return; }
 
-        if (!temuApi.lastError().isEmpty()) {
-            appendLog(tr("  ✗ Failed to list SKUs: %1").arg(temuApi.lastError()));
+        if (!mkt->lastError().isEmpty()) {
+            appendLog(tr("  ✗ Failed to list SKUs: %1").arg(mkt->lastError()));
             continue;
         }
         appendLog(tr("  ✓ %1 SKU(s) in store").arg(qtyBySku.size()));
-        storeQtyByStoreId.insert(storeId, qtyBySku);
+        storeQtyByStoreId.insert(mkt->id(), qtyBySku);
         for (auto it = qtyBySku.begin(); it != qtyBySku.end(); ++it)
             if (!skuByLower.contains(it.key().toLower()))
                 skuByLower.insert(it.key().toLower(), it.key());
@@ -392,15 +408,15 @@ QCoro::Task<void> PaneMarketplaces::_onLoad()
         co_return;
     }
 
-    // --- Amazon data: cache is PARTIAL — any SKU missing from the cache or
-    //     whose sales retrieval failed (-1) is re-fetched. ---
-    QList<AmazonInventoryApi::InventorySummary> summaries;
+    // --- Fulfillment source data: cache is PARTIAL — any SKU missing from
+    //     the cache or whose sales retrieval failed (-1) is re-fetched. ---
+    QList<StockRecord> records;
     QHash<QString, int> cachedSales;
-    const bool hasCache = loadAmazonCache(&summaries, &cachedSales);
+    const bool hasCache = loadAmazonCache(&records, &cachedSales);
 
     // Which table SKUs have no cached inventory data?
     QSet<QString> cachedInvLower;
-    for (const auto &s : summaries)
+    for (const auto &s : records)
         cachedInvLower.insert(s.sku.toLower());
     QStringList missingInv;
     for (const QString &sku : allSkus)
@@ -408,75 +424,80 @@ QCoro::Task<void> PaneMarketplaces::_onLoad()
             missingInv.append(sku);
 
     if (hasCache) {
-        appendLog(tr("→ Loading Amazon data from cache (valid for 24h)"));
-        m_model->applyInventory(summaries);
-        appendLog(tr("  ✓ %1 SKU(s) found in cache").arg(summaries.size()));
+        appendLog(tr("→ Loading %1 data from cache (valid for 24h)")
+                  .arg(_source() ? _source()->displayName() : QStringLiteral("Amazon")));
+        m_model->applyInventory(records);
+        appendLog(tr("  ✓ %1 SKU(s) found in cache").arg(records.size()));
         for (auto it = cachedSales.begin(); it != cachedSales.end(); ++it) {
             if (it.value() < 0)
                 continue; // failed last time — will be re-fetched below
             m_model->applySales(it.key(), it.value());
         }
         if (!missingInv.isEmpty())
-            appendLog(tr("  ⚠ %1 SKU(s) missing from cache — fetching from Amazon: %2")
+            appendLog(tr("  ⚠ %1 SKU(s) missing from cache — fetching from the source: %2")
                       .arg(missingInv.size()).arg(missingInv.join(QStringLiteral(", "))));
     }
 
-    if (hasCache && !missingInv.isEmpty()) {
-        // Partial refresh: fetch only the missing SKUs via the live FBA
-        // Inventory API — fresher than the MYI report and not subject to the
-        // report-generation quota (repeated reports return FATAL).
-        setStatus(tr("Fetching %1 missing SKU(s) from the live FBA Inventory API…")
-                  .arg(missingInv.size()));
-        appendLog(tr("→ Live FBA Inventory API: fetching %1 missing SKU(s)").arg(missingInv.size()));
+    if (!_source()) {
+        appendLog(tr("→ No fulfillment source configured — skipping source inventory/sales."));
+    } else if (hasCache && !missingInv.isEmpty()) {
+        // Partial refresh: fetch only the missing SKUs via the source's live
+        // API — fresher than the bulk report and not subject to the
+        // report-generation quota (repeated Amazon reports return FATAL).
+        setStatus(tr("Fetching %1 missing SKU(s) from %2…")
+                  .arg(missingInv.size()).arg(_source()->displayName()));
+        appendLog(tr("→ %1 live API: fetching %2 missing SKU(s)")
+                  .arg(_source()->displayName()).arg(missingInv.size()));
 
-        QList<AmazonInventoryApi::InventorySummary> liveMissing;
-        _api()->clearLastError();
-        co_await _api()->fetchFbaInventory(missingInv, &liveMissing, appendLog);
+        QList<StockRecord> liveMissing;
+        _source()->clearLastError();
+        co_await _source()->fetchInventory(missingInv, &liveMissing, appendLog);
         if (!dlgPtr) { setEnabled(true); co_return; }
 
-        if (!_api()->lastError().isEmpty())
-            appendLog(tr("  ✗ %1").arg(_api()->lastError()));
+        if (!_source()->lastError().isEmpty())
+            appendLog(tr("  ✗ %1").arg(_source()->lastError()));
         appendLog(tr("  ✓ %1 SKU(s) retrieved").arg(liveMissing.size()));
         for (const auto &s : liveMissing) {
             appendLog(QStringLiteral("    %1 → %2 | avail %3")
                           .arg(s.sku, s.asin).arg(s.available));
-            summaries.append(s);
+            records.append(s);
         }
         m_model->applyInventory(liveMissing);
     } else if (!hasCache) {
-        // Cold start: full MYI report (covers all SKUs in one shot).
+        // Cold start: bulk fetch (Amazon: MYI report — covers all SKUs in one shot).
         while (true) {
             if (!dlgPtr) { setEnabled(true); co_return; }
-            summaries.clear();
-            setStatus(tr("Requesting FBA inventory report…"));
-            appendLog(tr("→ FBA inventory report: requesting for marketplace %1").arg(k_marketplaceId));
-            appendLog(tr("  (report generation may take 1–2 minutes)"));
+            records.clear();
+            setStatus(tr("Requesting %1 bulk inventory…").arg(_source()->displayName()));
+            appendLog(tr("→ %1: requesting bulk inventory").arg(_source()->displayName()));
+            appendLog(tr("  (may take 1–2 minutes)"));
 
-            co_await _api()->fetchFbaInventoryReport(allSkus, &summaries, appendLog);
+            co_await _source()->fetchAllInventory(allSkus, &records, appendLog);
 
             if (!dlgPtr) { setEnabled(true); co_return; }
-            if (!summaries.isEmpty())
+            if (!records.isEmpty())
                 break; // success
 
-            const QString err = _api()->lastError();
+            const QString err = _source()->lastError();
             appendLog(err.isEmpty()
-                      ? tr("  ✗ No inventory data in report")
+                      ? tr("  ✗ No inventory data returned")
                       : tr("  ✗ %1").arg(err));
 
-            // Report failed (often the generation quota) — the live FBA
-            // Inventory API returns the same numbers without that quota.
-            appendLog(tr("→ Report failed — falling back to the live FBA Inventory API"));
-            _api()->clearLastError();
-            co_await _api()->fetchFbaInventory(allSkus, &summaries, appendLog);
+            // Bulk fetch failed (often the report generation quota) — the
+            // live API returns the same numbers without that quota.
+            appendLog(tr("→ Bulk fetch failed — falling back to the live API"));
+            _source()->clearLastError();
+            co_await _source()->fetchInventory(allSkus, &records, appendLog);
             if (!dlgPtr) { setEnabled(true); co_return; }
-            if (!summaries.isEmpty())
+            if (!records.isEmpty())
                 break;
 
             const int answer = QMessageBox::question(
                 this,
                 tr("Retry?"),
-                tr("Failed to retrieve FBA inventory (report and live API).\n\n%1\n\nRetry?")
-                    .arg(_api()->lastError().isEmpty() ? err : _api()->lastError()),
+                tr("Failed to retrieve %1 inventory (bulk and live API).\n\n%2\n\nRetry?")
+                    .arg(_source()->displayName(),
+                         _source()->lastError().isEmpty() ? err : _source()->lastError()),
                 QMessageBox::Yes | QMessageBox::No);
             if (answer != QMessageBox::Yes)
                 break;
@@ -485,24 +506,24 @@ QCoro::Task<void> PaneMarketplaces::_onLoad()
         }
 
         if (!dlgPtr) { setEnabled(true); co_return; }
-        m_model->applyInventory(summaries);
-        if (!summaries.isEmpty()) {
-            appendLog(tr("  ✓ %1 SKU(s) retrieved").arg(summaries.size()));
-            for (const auto &s : summaries)
+        m_model->applyInventory(records);
+        if (!records.isEmpty()) {
+            appendLog(tr("  ✓ %1 SKU(s) retrieved").arg(records.size()));
+            for (const auto &s : records)
                 appendLog(QStringLiteral("    %1 → %2 | avail %3")
                               .arg(s.sku, s.asin).arg(s.available));
         }
     }
 
-    // --- Sales 90d (one call per SKU × EU marketplace) — only for SKUs Amazon
-    //     knows, and only those without a valid cached value. ---
-    if (!summaries.isEmpty()) {
+    // --- Source sales (Amazon: one call per SKU × EU marketplace) — only for
+    //     SKUs the source knows, and only those without a valid cached value. ---
+    if (_source() && !records.isEmpty()) {
         QHash<QString, int> cachedSalesLower;
         for (auto it = cachedSales.begin(); it != cachedSales.end(); ++it)
             cachedSalesLower.insert(it.key().toLower(), it.value());
 
         QStringList salesToFetch;
-        for (const auto &s : summaries)
+        for (const auto &s : records)
             if (cachedSalesLower.value(s.sku.toLower(), -1) < 0)
                 salesToFetch.append(s.sku);
 
@@ -514,7 +535,7 @@ QCoro::Task<void> PaneMarketplaces::_onLoad()
             appendLog(tr("→ Sales 90d: %1").arg(sku));
 
             int units = -1;
-            co_await _api()->fetchSalesUnits(sku, 90, k_euMarketplaceIds, &units);
+            co_await _source()->fetchSalesUnits(sku, 90, &units);
             if (!dlgPtr) { setEnabled(true); co_return; }
             m_model->applySales(sku, units);
             salesToCache.insert(sku, units); // -1 on failure → re-fetched next Load
@@ -526,31 +547,26 @@ QCoro::Task<void> PaneMarketplaces::_onLoad()
         }
 
         if (!hasCache || !missingInv.isEmpty() || !salesToFetch.isEmpty())
-            saveAmazonCache(summaries, salesToCache);
+            saveAmazonCache(records, salesToCache);
     } else {
-        appendLog(tr("→ Skipping Amazon sales queries (no Amazon inventory data)"));
+        appendLog(tr("→ Skipping source sales queries (no source inventory data)"));
     }
 
-    // --- Temu sales 90d per store (inventory already applied at discovery) ---
-    for (const TemuStore &ts : temuModel.stores()) {
+    // --- Marketplace sales 90d (inventory already applied at discovery) ---
+    for (auto *mkt : m_marketplaces) {
         if (!dlgPtr) { setEnabled(true); co_return; }
-        const QString storeId = QStringLiteral("temu_%1_%2").arg(ts.country, ts.label);
-        setStatus(tr("Fetching Temu sales %1 – %2…").arg(ts.country, ts.label));
-        appendLog(tr("→ Temu %1 – %2: fetching sales").arg(ts.country, ts.label));
-
-        TemuInventoryApi temuApi(appKey, appSecret, ts.token,
-                                 ts.proxyHost, ts.proxyPort, ts.proxyUser, ts.proxyPassword,
-                                 this);
+        setStatus(tr("Fetching %1 sales…").arg(mkt->displayName()));
+        appendLog(tr("→ %1: fetching sales").arg(mkt->displayName()));
 
         QHash<QString, int> salesBySku;
-        co_await temuApi.fetchSales(allSkus, 90, &salesBySku);
+        co_await mkt->fetchSales(allSkus, 90, &salesBySku);
         if (!dlgPtr) { setEnabled(true); co_return; }
 
-        if (!temuApi.lastError().isEmpty()) {
-            appendLog(tr("  ✗ Failed to retrieve Temu sales: %1").arg(temuApi.lastError()));
+        if (!mkt->lastError().isEmpty()) {
+            appendLog(tr("  ✗ Failed to retrieve sales: %1").arg(mkt->lastError()));
         } else {
             appendLog(tr("  ✓ Sales retrieved successfully."));
-            m_model->applyStoreSales(storeId, salesBySku);
+            m_model->applyStoreSales(mkt->id(), salesBySku);
         }
     }
 
@@ -570,6 +586,8 @@ QCoro::Task<void> PaneMarketplaces::_onSyncInventory()
             tr("Please load marketplace data first (click Load)."));
         co_return;
     }
+    if (m_marketplaces.isEmpty())
+        _rebuildPlatforms();
 
     const int pct     = ui->spinBoxPercentageToTargetMkt->value();
     const int maxVal  = ui->spinBoxMaxTarget->value();
@@ -632,7 +650,7 @@ QCoro::Task<void> PaneMarketplaces::_onSyncInventory()
     dlg->show();
     setEnabled(false);
 
-    // --- Compute target qty per SKU from Amazon FBA data ---
+    // --- Compute target qty per SKU from the fulfillment source data ---
     // The computation lives in TableMarketplaceProducts::targetQtyForSku so the
     // "Sync Qty" table columns always show exactly what would be uploaded.
     appendLog(tr("→ Computing target inventory"));
@@ -672,29 +690,20 @@ QCoro::Task<void> PaneMarketplaces::_onSyncInventory()
         co_return;
     }
 
-    // --- Push to each configured Temu store ---
-    auto *st = SettingsTable::instance();
-    const QString appKey    = st->value(SettingsTable::KEY_TEMU_APP_KEY);
-    const QString appSecret = st->value(SettingsTable::KEY_TEMU_APP_SECRET);
+    // --- Push to each configured target marketplace ---
+    if (m_marketplaces.isEmpty())
+        appendLog(tr("→ No target marketplace configured — add stores in Settings"));
 
-    TemuStoreModel temuModel;
-    if (temuModel.stores().isEmpty())
-        appendLog(tr("→ No Temu stores configured — add stores in Settings"));
-
-    for (const TemuStore &ts : temuModel.stores()) {
+    for (auto *mkt : m_marketplaces) {
         if (!dlgPtr) { setEnabled(true); co_return; }
-        setStatus(tr("Syncing Temu %1 – %2…").arg(ts.country, ts.label));
-        appendLog(tr("─── Temu %1 – %2 ───").arg(ts.country, ts.label));
+        setStatus(tr("Syncing %1…").arg(mkt->displayName()));
+        appendLog(tr("─── %1 ───").arg(mkt->displayName()));
 
-        TemuInventoryApi temuApi(appKey, appSecret, ts.token,
-                                 ts.proxyHost, ts.proxyPort, ts.proxyUser, ts.proxyPassword,
-                                 this);
-
-        co_await temuApi.updateInventory(targetQtyBySku, appendLog);
+        co_await mkt->updateInventory(targetQtyBySku, appendLog);
         if (!dlgPtr) { setEnabled(true); co_return; }
 
-        if (!temuApi.lastError().isEmpty())
-            appendLog(tr("  ✗ Store-level error: %1").arg(temuApi.lastError()));
+        if (!mkt->lastError().isEmpty())
+            appendLog(tr("  ✗ Store-level error: %1").arg(mkt->lastError()));
     }
 
     // --- Done ---
@@ -707,6 +716,8 @@ QCoro::Task<void> PaneMarketplaces::_onSyncInventory()
 
 QCoro::Task<void> PaneMarketplaces::_onLoadOrders()
 {
+    _rebuildPlatforms();
+
     // Disable UI
     setEnabled(false);
 
@@ -767,85 +778,73 @@ QCoro::Task<void> PaneMarketplaces::_onLoadOrders()
 
     QList<TableMarketplaceOrders::OrderRow> orderRows;
 
-    // 1. Fetch unshipped orders from Temu stores
-    auto *st = SettingsTable::instance();
-    const QString appKey    = st->value(SettingsTable::KEY_TEMU_APP_KEY);
-    const QString appSecret = st->value(SettingsTable::KEY_TEMU_APP_SECRET);
-
-    TemuStoreModel temuModel;
-    QList<TemuInventoryApi::TemuOrder> allTemuOrders;
-    QHash<QString, TemuStore> orderToStoreMap; // parentOrderSn -> TemuStore
-
-    for (const TemuStore &ts : temuModel.stores()) {
+    // 1. Fetch unshipped orders from every target marketplace
+    QList<MarketOrder> allOrders;
+    for (auto *mkt : m_marketplaces) {
         if (!dlgPtr) { setEnabled(true); co_return; }
-        setStatus(tr("Fetching Temu %1 – %2 orders…").arg(ts.country, ts.label));
-        appendLog(tr("→ Temu %1 – %2: requesting unshipped orders").arg(ts.country, ts.label));
+        setStatus(tr("Fetching %1 orders…").arg(mkt->displayName()));
+        appendLog(tr("→ %1: requesting unshipped orders").arg(mkt->displayName()));
 
-        TemuInventoryApi temuApi(appKey, appSecret, ts.token,
-                                 ts.proxyHost, ts.proxyPort, ts.proxyUser, ts.proxyPassword,
-                                 this);
-
-        QList<TemuInventoryApi::TemuOrder> storeOrders = co_await temuApi.fetchUnshippedOrders();
+        const QList<MarketOrder> storeOrders = co_await mkt->fetchUnshippedOrders();
         if (!dlgPtr) { setEnabled(true); co_return; }
 
-        if (!temuApi.lastError().isEmpty()) {
-            appendLog(tr("  ✗ Failed to retrieve Temu orders: %1").arg(temuApi.lastError()));
+        if (!mkt->lastError().isEmpty()) {
+            appendLog(tr("  ✗ Failed to retrieve orders: %1").arg(mkt->lastError()));
         } else {
             appendLog(tr("  ✓ Retrieved %1 unshipped order(s)").arg(storeOrders.size()));
-            for (const auto &o : storeOrders) {
-                allTemuOrders.append(o);
-                orderToStoreMap.insert(o.parentOrderSn, ts);
-                orderToStoreMap.insert(o.orderSn, ts);
-            }
+            allOrders.append(storeOrders);
         }
     }
 
-    // 2. For each Temu order, fetch the corresponding Amazon MCF order directly.
-    // Amazon sellerFulfillmentOrderId convention: "temu-" + parentOrderSn.
-    // We bypass fetchFulfillmentOrders (the list endpoint requires the
-    // "Multi-Channel Fulfillment" SP-API role which is often missing from EU tokens).
-    setStatus(tr("Fetching Amazon MCF tracking details…"));
-    bool mcfRoleErrorLogged = false;
-    for (const auto &tOrder : allTemuOrders) {
+    // 2. For each marketplace order, fetch the fulfillment order tracking
+    // directly by id: orderIdPrefix() + "-" + orderId (e.g. "temu-PO-…").
+    setStatus(tr("Fetching fulfillment tracking details…"));
+    bool authErrorLogged = false;
+    for (const MarketOrder &order : allOrders) {
         if (!dlgPtr) { setEnabled(true); co_return; }
+
+        AbstractTargetMarketplace *mkt = _marketplaceById(order.marketplaceId);
 
         TableMarketplaceOrders::OrderRow row;
-        row.targetStore = orderToStoreMap.value(tOrder.parentOrderSn).label;
-        if (row.targetStore.isEmpty()) row.targetStore = orderToStoreMap.value(tOrder.orderSn).label;
-        row.parentOrderSn = tOrder.parentOrderSn;
-        row.orderSn = tOrder.orderSn;
-        row.targetOrderId = tOrder.orderSn;
-        row.sku = tOrder.sku;
-        row.goodsId = tOrder.goodsId;
-        row.skuId = tOrder.skuId;
-        row.quantity = tOrder.quantity;
+        row.marketplaceId = order.marketplaceId;
+        row.targetStore = mkt ? mkt->displayName() : order.marketplaceId;
+        row.parentOrderSn = order.orderId;
+        row.orderSn = order.itemId;
+        row.targetOrderId = order.itemId;
+        row.sku = order.sku;
+        row.goodsId = order.goodsId;
+        row.skuId = order.skuId;
+        row.quantity = order.quantity;
 
-        TemuStore ts = orderToStoreMap.value(tOrder.parentOrderSn);
-        if (ts.label.isEmpty()) ts = orderToStoreMap.value(tOrder.orderSn);
-        row.temuStoreToken = ts.token;
-        row.temuStoreCountry = ts.country;
-        row.temuProxyHost = ts.proxyHost;
-        row.temuProxyPort = ts.proxyPort;
-        row.temuProxyUser = ts.proxyUser;
-        row.temuProxyPass = ts.proxyPassword;
+        if (!_source()) {
+            appendLog(tr("→ %1: no fulfillment source configured — cannot fetch tracking")
+                      .arg(order.itemId));
+            row.source = tr("None");
+            orderRows.append(row);
+            continue;
+        }
 
-        const QString fulfillmentId = QStringLiteral("temu-") + tOrder.parentOrderSn;
-        appendLog(tr("→ Temu order %1 — fetching Amazon MCF order %2").arg(tOrder.orderSn, fulfillmentId));
+        const QString fulfillmentId =
+            (mkt ? mkt->orderIdPrefix() : QStringLiteral("temu"))
+            + QStringLiteral("-") + order.orderId;
+        appendLog(tr("→ Order %1 — fetching %2 order %3")
+                  .arg(order.itemId, _source()->displayName(), fulfillmentId));
 
-        _api()->clearLastError();
-        QJsonObject detailedOrder = co_await _api()->getFulfillmentOrder(fulfillmentId);
+        _source()->clearLastError();
+        TrackingInfo tracking;
+        co_await _source()->fetchTracking(fulfillmentId, &tracking);
         if (!dlgPtr) { setEnabled(true); co_return; }
 
-        if (!_api()->lastError().isEmpty()) {
-            const QString err = _api()->lastError();
-            const bool is403 = err.contains(QLatin1String("403"));
-            if (!is403) {
+        if (!_source()->lastError().isEmpty()) {
+            const QString err = _source()->lastError();
+            const bool isAuth = err.contains(QLatin1String("403"));
+            if (!isAuth) {
                 appendLog(tr("  ✗ %1").arg(err));
-            } else if (!mcfRoleErrorLogged) {
+            } else if (!authErrorLogged) {
                 appendLog(tr("  ✗ %1").arg(err));
-                mcfRoleErrorLogged = true;
+                authErrorLogged = true;
             } else {
-                appendLog(tr("  ✗ MCF 403 — see message above"));
+                appendLog(tr("  ✗ 403 — see message above"));
             }
             row.source = tr("None");
             row.sourceOrderId = QString();
@@ -854,31 +853,17 @@ QCoro::Task<void> PaneMarketplaces::_onLoadOrders()
             continue;
         }
 
-        QString trackingNumber;
-        QString carrierCode;
-        QJsonArray shipments = detailedOrder.value(QStringLiteral("fulfillmentShipments")).toArray();
-        for (const QJsonValue &shipVal : shipments) {
-            QJsonObject shipObj = shipVal.toObject();
-            QJsonArray packages = shipObj.value(QStringLiteral("fulfillmentShipmentPackage")).toArray();
-            if (packages.isEmpty())
-                packages = shipObj.value(QStringLiteral("fulfillmentShipmentPackages")).toArray();
-            for (const QJsonValue &pkgVal : packages) {
-                QJsonObject pkgObj = pkgVal.toObject();
-                trackingNumber = pkgObj.value(QStringLiteral("trackingNumber")).toString();
-                carrierCode = pkgObj.value(QStringLiteral("carrierCode")).toString();
-                if (!trackingNumber.isEmpty()) break;
-            }
-            if (!trackingNumber.isEmpty()) break;
-        }
-
-        row.source = QStringLiteral("Amazon (%1)").arg(carrierCode.isEmpty() ? QStringLiteral("FBA") : carrierCode);
+        row.source = QStringLiteral("%1 (%2)")
+            .arg(_source()->displayName(),
+                 tracking.carrierName.isEmpty() ? QStringLiteral("?") : tracking.carrierName);
         row.sourceOrderId = fulfillmentId;
-        row.trackingNumber = trackingNumber;
+        row.trackingNumber = tracking.trackingNumber;
 
-        if (trackingNumber.isEmpty()) {
+        if (!tracking.hasTracking()) {
             appendLog(tr("  ⚠ No tracking number yet for %1.").arg(fulfillmentId));
         } else {
-            appendLog(tr("  ✓ Tracking number: %1").arg(trackingNumber));
+            appendLog(tr("  ✓ Tracking number: %1 (carrier %2)")
+                      .arg(tracking.trackingNumber, tracking.carrierName));
         }
 
         orderRows.append(row);
@@ -896,6 +881,9 @@ QCoro::Task<void> PaneMarketplaces::_onLoadOrders()
 
 QCoro::Task<void> PaneMarketplaces::_onSyncOrders()
 {
+    if (m_marketplaces.isEmpty())
+        _rebuildPlatforms();
+
     setEnabled(false);
 
     auto *dlg = new QDialog(this);
@@ -945,10 +933,6 @@ QCoro::Task<void> PaneMarketplaces::_onSyncOrders()
     QPointer<QDialog> dlgPtr(dlg);
     dlg->show();
 
-    auto *st = SettingsTable::instance();
-    const QString appKey    = st->value(SettingsTable::KEY_TEMU_APP_KEY);
-    const QString appSecret = st->value(SettingsTable::KEY_TEMU_APP_SECRET);
-
     auto orders = m_ordersModel->orders();
     int successCount = 0;
 
@@ -961,37 +945,46 @@ QCoro::Task<void> PaneMarketplaces::_onSyncOrders()
             continue;
         }
 
-        if (order.temuStoreToken.isEmpty()) {
-            appendLog(tr("Skipping order %1: No store credentials.").arg(order.orderSn));
+        AbstractTargetMarketplace *mkt = _marketplaceById(order.marketplaceId);
+        if (!mkt) {
+            appendLog(tr("Skipping order %1: marketplace \"%2\" is not configured anymore.")
+                      .arg(order.orderSn, order.marketplaceId));
             continue;
         }
 
         statusLabel->setText(tr("Syncing order %1 (%2/%3)…").arg(order.orderSn).arg(i + 1).arg(orders.size()));
-        appendLog(tr("→ Shipping order %1 on Temu with tracking %2…").arg(order.orderSn, order.trackingNumber));
+        appendLog(tr("→ Shipping order %1 on %2 with tracking %3…")
+                  .arg(order.orderSn, mkt->displayName(), order.trackingNumber));
 
-        TemuInventoryApi temuApi(appKey, appSecret, order.temuStoreToken,
-                                 order.temuProxyHost, order.temuProxyPort, order.temuProxyUser, order.temuProxyPass,
-                                 this);
-
-        // Extract carrier Name from ColSource (e.g. "Amazon (CarrierCode)")
+        // Extract carrier name from ColSource (e.g. "Amazon FBA EU (Amazon Logistics)")
         QString carrier = order.source;
-        if (carrier.startsWith(QStringLiteral("Amazon (")) && carrier.endsWith(QStringLiteral(")"))) {
-            carrier = carrier.mid(8, carrier.length() - 9);
-        } else {
-            carrier = QStringLiteral("Amazon");
-        }
+        const int open  = carrier.lastIndexOf(QLatin1Char('('));
+        if (open >= 0 && carrier.endsWith(QLatin1Char(')')))
+            carrier = carrier.mid(open + 1, carrier.length() - open - 2);
 
-        bool ok = co_await temuApi.shipOrder(order.parentOrderSn, order.orderSn,
-                                             order.goodsId, order.skuId, order.quantity,
-                                             order.trackingNumber, carrier, order.temuStoreCountry,
-                                             [appendLog](const QString &msg) { appendLog(QStringLiteral("  ") + msg); });
+        MarketOrder mo;
+        mo.marketplaceId = order.marketplaceId;
+        mo.orderId  = order.parentOrderSn;
+        mo.itemId   = order.orderSn;
+        mo.sku      = order.sku;
+        mo.goodsId  = order.goodsId;
+        mo.skuId    = order.skuId;
+        mo.quantity = order.quantity;
+
+        TrackingInfo tracking;
+        tracking.trackingNumber = order.trackingNumber;
+        tracking.carrierName    = carrier;
+
+        const bool ok = co_await mkt->confirmShipment(mo, tracking,
+            [appendLog](const QString &msg) { appendLog(QStringLiteral("  ") + msg); });
         if (!dlgPtr) { setEnabled(true); co_return; }
 
         if (ok) {
-            appendLog(tr("  ✓ Successfully shipped order %1 on Temu.").arg(order.orderSn));
+            appendLog(tr("  ✓ Successfully shipped order %1 on %2.")
+                      .arg(order.orderSn, mkt->displayName()));
             successCount++;
         } else {
-            appendLog(tr("  ✗ Failed to ship order %1 on Temu: %2").arg(order.orderSn, temuApi.lastError()));
+            appendLog(tr("  ✗ Failed to ship order %1: %2").arg(order.orderSn, mkt->lastError()));
         }
     }
 
@@ -1005,6 +998,14 @@ QCoro::Task<void> PaneMarketplaces::_onSyncOrders()
 
 QCoro::Task<void> PaneMarketplaces::_onShipByAmazon()
 {
+    if (m_marketplaces.isEmpty())
+        _rebuildPlatforms();
+    if (!_source()) {
+        QMessageBox::warning(this, tr("No fulfillment source"),
+            tr("No fulfillment source is configured — check API credentials in Settings."));
+        co_return;
+    }
+
     QModelIndexList selected;
     if (ui->tableViewOrders->selectionModel())
         selected = ui->tableViewOrders->selectionModel()->selectedRows();
@@ -1014,18 +1015,13 @@ QCoro::Task<void> PaneMarketplaces::_onShipByAmazon()
         co_return;
     }
 
-    auto *st = SettingsTable::instance();
-    const QString appKey    = st->value(SettingsTable::KEY_TEMU_APP_KEY);
-    const QString appSecret = st->value(SettingsTable::KEY_TEMU_APP_SECRET);
-
     const auto orders = m_ordersModel->orders();
 
     // --- Phase 1: build one candidate per selected order (address + payload) ---
     struct Candidate {
         TableMarketplaceOrders::OrderRow order;
-        QString fulfillmentId;
-        QJsonObject dest;
-        QJsonObject payload;
+        FulfillmentRequest request;
+        QJsonObject payload; // exact JSON the source would send (preview)
     };
     QList<Candidate> candidates;
 
@@ -1033,62 +1029,44 @@ QCoro::Task<void> PaneMarketplaces::_onShipByAmazon()
         if (idx.row() < 0 || idx.row() >= orders.size())
             continue;
         const auto &order = orders.at(idx.row());
-        const QString fulfillmentId = QStringLiteral("temu-") + order.parentOrderSn;
 
+        AbstractTargetMarketplace *mkt = _marketplaceById(order.marketplaceId);
+        if (!mkt) {
+            QMessageBox::warning(this, tr("Unknown marketplace"),
+                tr("Order %1 belongs to marketplace \"%2\" which is not configured anymore.")
+                    .arg(order.orderSn, order.marketplaceId));
+            continue;
+        }
         if (order.sku.isEmpty()) {
             QMessageBox::warning(this, tr("Missing SKU"),
                 tr("Order %1 has no SKU — reload orders first.").arg(order.orderSn));
             continue;
         }
 
-        TemuInventoryApi temuApi(appKey, appSecret, order.temuStoreToken,
-                                 order.temuProxyHost, order.temuProxyPort,
-                                 order.temuProxyUser, order.temuProxyPass,
-                                 this);
-        QJsonObject addr;
-        co_await temuApi.fetchOrderAddress(order.parentOrderSn, &addr);
-        if (!temuApi.lastError().isEmpty() || addr.isEmpty()) {
+        ShippingAddress address;
+        co_await mkt->fetchOrderAddress(order.parentOrderSn, &address);
+        if (!mkt->lastError().isEmpty() || !address.isValid()) {
             QMessageBox::warning(this, tr("Address error"),
                 tr("Could not fetch the shipping address of order %1:\n%2")
-                    .arg(order.orderSn, temuApi.lastError()));
+                    .arg(order.orderSn, mkt->lastError()));
             continue;
         }
 
-        QJsonObject dest;
-        dest.insert(QStringLiteral("name"), addr.value(QStringLiteral("receiptName")).toString());
-        dest.insert(QStringLiteral("addressLine1"), addr.value(QStringLiteral("addressLine1")).toString());
-        const QString line2 = addr.value(QStringLiteral("addressLine2")).toString();
-        if (!line2.isEmpty())
-            dest.insert(QStringLiteral("addressLine2"), line2);
-        dest.insert(QStringLiteral("city"), addr.value(QStringLiteral("regionName3")).toString());
-        dest.insert(QStringLiteral("stateOrRegion"), addr.value(QStringLiteral("regionName2")).toString());
-        dest.insert(QStringLiteral("postalCode"), addr.value(QStringLiteral("postCode")).toString());
-        dest.insert(QStringLiteral("countryCode"),
-                    order.temuStoreCountry.isEmpty() ? QStringLiteral("FR") : order.temuStoreCountry);
-        const QString phone = addr.value(QStringLiteral("mobile")).toString();
-        if (!phone.isEmpty())
-            dest.insert(QStringLiteral("phone"), phone);
+        FulfillmentRequest request;
+        request.fulfillmentOrderId = mkt->orderIdPrefix() + QStringLiteral("-") + order.parentOrderSn;
+        request.comment = QStringLiteral("%1 order %2").arg(mkt->displayName(), order.parentOrderSn);
+        request.address = address;
+        FulfillmentItem item;
+        item.sku      = order.sku;
+        item.itemId   = order.orderSn;
+        item.quantity = order.quantity;
+        request.items.append(item);
 
-        QJsonObject item;
-        item.insert(QStringLiteral("sellerSku"), order.sku);
-        item.insert(QStringLiteral("sellerFulfillmentOrderItemId"), order.orderSn);
-        item.insert(QStringLiteral("quantity"), order.quantity);
-        QJsonArray items;
-        items.append(item);
-
-        QJsonObject payload;
-        payload.insert(QStringLiteral("sellerFulfillmentOrderId"), fulfillmentId);
-        payload.insert(QStringLiteral("displayableOrderId"), fulfillmentId);
-        payload.insert(QStringLiteral("displayableOrderDate"),
-                       QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
-        payload.insert(QStringLiteral("displayableOrderComment"),
-                       QStringLiteral("Temu order %1").arg(order.parentOrderSn));
-        payload.insert(QStringLiteral("shippingSpeedCategory"), QStringLiteral("Standard"));
-        payload.insert(QStringLiteral("marketplaceId"), k_marketplaceId);
-        payload.insert(QStringLiteral("destinationAddress"), dest);
-        payload.insert(QStringLiteral("items"), items);
-
-        candidates.append(Candidate{order, fulfillmentId, dest, payload});
+        Candidate c;
+        c.order   = order;
+        c.request = request;
+        c.payload = _source()->previewFulfillmentOrder(request);
+        candidates.append(c);
     }
 
     if (candidates.isEmpty())
@@ -1096,11 +1074,12 @@ QCoro::Task<void> PaneMarketplaces::_onShipByAmazon()
 
     // --- Phase 2: one confirmation dialog, one checkable line per order ---
     QDialog dlg(this);
-    dlg.setWindowTitle(tr("Ship by Amazon — confirmation"));
+    dlg.setWindowTitle(tr("Ship by %1 — confirmation").arg(_source()->displayName()));
     dlg.resize(940, 520);
     auto *vLayout = new QVBoxLayout(&dlg);
     vLayout->addWidget(new QLabel(
-        tr("These Amazon MCF orders will be created. Uncheck a line to skip it."), &dlg));
+        tr("These %1 orders will be created. Uncheck a line to skip it.")
+            .arg(_source()->displayName()), &dlg));
 
     auto *table = new QTableWidget(candidates.size(), 6, &dlg);
     table->setHorizontalHeaderLabels({tr("New order ID"), tr("SKU"), tr("Qty"),
@@ -1112,20 +1091,20 @@ QCoro::Task<void> PaneMarketplaces::_onShipByAmazon()
         const Candidate &c = candidates.at(i);
         const bool hasTracking = !c.order.trackingNumber.isEmpty();
 
-        auto *idItem = new QTableWidgetItem(c.fulfillmentId);
+        auto *idItem = new QTableWidgetItem(c.request.fulfillmentOrderId);
         idItem->setFlags(idItem->flags() | Qt::ItemIsUserCheckable);
-        // Orders that already have a tracking number probably already exist on
-        // Amazon — leave them unchecked by default.
+        // Orders that already have a tracking number probably already exist at
+        // the source — leave them unchecked by default.
         idItem->setCheckState(hasTracking ? Qt::Unchecked : Qt::Checked);
         table->setItem(i, 0, idItem);
         table->setItem(i, 1, new QTableWidgetItem(c.order.sku));
         table->setItem(i, 2, new QTableWidgetItem(QString::number(c.order.quantity)));
-        table->setItem(i, 3, new QTableWidgetItem(c.dest.value(QStringLiteral("name")).toString()));
+        table->setItem(i, 3, new QTableWidgetItem(c.request.address.name));
         table->setItem(i, 4, new QTableWidgetItem(QStringLiteral("%1, %2 %3 (%4)")
-            .arg(c.dest.value(QStringLiteral("addressLine1")).toString(),
-                 c.dest.value(QStringLiteral("postalCode")).toString(),
-                 c.dest.value(QStringLiteral("city")).toString(),
-                 c.dest.value(QStringLiteral("countryCode")).toString())));
+            .arg(c.request.address.addressLine1,
+                 c.request.address.postalCode,
+                 c.request.address.city,
+                 c.request.address.countryCode)));
         table->setItem(i, 5, new QTableWidgetItem(hasTracking
             ? tr("⚠ already has tracking %1").arg(c.order.trackingNumber)
             : QString()));
@@ -1137,7 +1116,7 @@ QCoro::Task<void> PaneMarketplaces::_onShipByAmazon()
     auto *payloadView = new QTextEdit(&dlg);
     payloadView->setReadOnly(true);
     payloadView->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-    payloadView->setPlaceholderText(tr("Click a line to preview the exact payload sent to Amazon."));
+    payloadView->setPlaceholderText(tr("Click a line to preview the exact payload sent to the source."));
     payloadView->setMaximumHeight(150);
     vLayout->addWidget(payloadView);
     connect(table, &QTableWidget::currentCellChanged, &dlg,
@@ -1161,9 +1140,11 @@ QCoro::Task<void> PaneMarketplaces::_onShipByAmazon()
         if (table->item(i, 0)->checkState() != Qt::Checked)
             continue;
         const Candidate &c = candidates.at(i);
-        const bool ok = co_await _api()->createFulfillmentOrder(c.payload);
-        results.append(ok ? tr("✓ %1 created").arg(c.fulfillmentId)
-                          : tr("✗ %1 failed: %2").arg(c.fulfillmentId, _api()->lastError()));
+        _source()->clearLastError();
+        const bool ok = co_await _source()->createFulfillmentOrder(c.request);
+        results.append(ok ? tr("✓ %1 created").arg(c.request.fulfillmentOrderId)
+                          : tr("✗ %1 failed: %2").arg(c.request.fulfillmentOrderId,
+                                                      _source()->lastError()));
     }
 
     if (results.isEmpty()) {
@@ -1171,8 +1152,8 @@ QCoro::Task<void> PaneMarketplaces::_onShipByAmazon()
             tr("All lines were unchecked — no order was created."));
         co_return;
     }
-    QMessageBox::information(this, tr("Ship by Amazon — results"),
+    QMessageBox::information(this, tr("Ship by %1 — results").arg(_source()->displayName()),
         results.join(QStringLiteral("\n"))
-        + tr("\n\nUse \"Load\" then \"Sync orders\" once Amazon generates the tracking numbers."));
+        + tr("\n\nUse \"Load\" then \"Sync orders\" once the source generates the tracking numbers."));
     co_return;
 }

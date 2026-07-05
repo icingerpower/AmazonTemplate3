@@ -1,6 +1,7 @@
 #ifndef PANEMARKETPLACES_H
 #define PANEMARKETPLACES_H
 
+#include <QList>
 #include <QPointer>
 #include <QWidget>
 #include <QCoro/QCoroTask>
@@ -9,7 +10,8 @@ QT_BEGIN_NAMESPACE
 namespace Ui { class PaneMarketplaces; }
 QT_END_NAMESPACE
 
-class AmazonInventoryApi;
+class AbstractInventorySource;
+class AbstractTargetMarketplace;
 class TableMarketplaceProducts;
 class TableMarketplaceOrders;
 class QDialog;
@@ -27,9 +29,13 @@ protected:
 
 private:
     Ui::PaneMarketplaces     *ui;
-    AmazonInventoryApi       *m_api   = nullptr;
     TableMarketplaceProducts *m_model = nullptr;
     TableMarketplaceOrders   *m_ordersModel = nullptr;
+
+    // Configured platforms, built by the registered factories (Recorder
+    // pattern) from the working directory settings. Owned. Rebuilt on Load.
+    QList<AbstractTargetMarketplace *> m_marketplaces;
+    QList<AbstractInventorySource *>   m_sources;
 
     QCoro::Task<void>  m_loadTask;
     QCoro::Task<void>  m_loadOrdersTask;
@@ -38,7 +44,9 @@ private:
     QCoro::Task<void>  m_shipByAmzTask;
     QPointer<QDialog>  m_progressDlg; // survives tab switches; null when not loading
 
-    AmazonInventoryApi *_api();
+    void _rebuildPlatforms();
+    AbstractInventorySource   *_source() const; // first configured source, or nullptr
+    AbstractTargetMarketplace *_marketplaceById(const QString &id) const;
     void                _invalidateAmazonCacheForSku(const QString &sku);
     QCoro::Task<void>   _onLoad();
     QCoro::Task<void>   _onLoadOrders();

@@ -7,7 +7,7 @@
 #include <QString>
 #include <QStringList>
 
-#include "AmazonInventoryApi.h"
+#include "MarketplaceTypes.h"
 
 class TableMarketplaceProducts : public QAbstractTableModel
 {
@@ -34,8 +34,8 @@ public:
                                       const QList<MarketplaceStore> &stores = {},
                                       QObject *parent = nullptr);
 
-    // Amazon data
-    void applyInventory(const QList<AmazonInventoryApi::InventorySummary> &summaries);
+    // Fulfillment source data (Amazon FBA, Octopia…)
+    void applyInventory(const QList<StockRecord> &records);
     void applySales(const QString &sku, int units90d);
 
     // Per-store data (dynamic columns). storeId must match MarketplaceStore::id.

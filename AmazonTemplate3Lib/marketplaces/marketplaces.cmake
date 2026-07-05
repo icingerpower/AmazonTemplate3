@@ -1,4 +1,9 @@
 set(MARKETPLACE_FILES
+    ${CMAKE_CURRENT_LIST_DIR}/MarketplaceTypes.h
+    ${CMAKE_CURRENT_LIST_DIR}/AmazonFbaInventorySource.h
+    ${CMAKE_CURRENT_LIST_DIR}/AmazonFbaInventorySource.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/TemuTargetMarketplace.h
+    ${CMAKE_CURRENT_LIST_DIR}/TemuTargetMarketplace.cpp
     ${CMAKE_CURRENT_LIST_DIR}/AbstractInventorySource.h
     ${CMAKE_CURRENT_LIST_DIR}/AbstractInventorySource.cpp
     ${CMAKE_CURRENT_LIST_DIR}/AbstractInventorySourceFactory.h

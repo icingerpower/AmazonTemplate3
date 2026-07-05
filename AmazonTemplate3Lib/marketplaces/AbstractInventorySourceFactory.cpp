@@ -1,5 +1,7 @@
 #include "AbstractInventorySourceFactory.h"
 
+#include "AmazonFbaInventorySource.h"
+
 AbstractInventorySourceFactory::Recorder::Recorder(AbstractInventorySourceFactory *factory)
 {
     getFactories().append(factory);
@@ -20,6 +22,15 @@ QList<AbstractInventorySource *> AbstractInventorySourceFactory::buildAllInstanc
 
 QList<AbstractInventorySourceFactory *> &AbstractInventorySourceFactory::getFactories()
 {
-    static QList<AbstractInventorySourceFactory *> list;
+    // Explicit registration (same pattern as AbstractFiller::ALL_FILLERS_SORTED):
+    // a static library linker drops object files that are never referenced, so
+    // pure static self-registration in the implementation files never runs.
+    static QList<AbstractInventorySourceFactory *> list = []() {
+        QList<AbstractInventorySourceFactory *> l;
+        static AmazonFbaInventorySourceFactory amazonFba;
+        l << &amazonFba;
+        // Octopia fulfillment: add its factory here.
+        return l;
+    }();
     return list;
 }

@@ -28,18 +28,13 @@ public:
         QString targetStore;
 
         // Hidden fulfillment fields for sync
-        QString parentOrderSn;
-        QString orderSn;
-        QString sku;            // seller SKU (Temu extCode = Amazon SKU)
+        QString marketplaceId;  // AbstractTargetMarketplace::id() the order belongs to
+        QString parentOrderSn;  // MarketOrder::orderId
+        QString orderSn;        // MarketOrder::itemId
+        QString sku;            // seller SKU (marketplace extCode = source SKU)
         qint64 goodsId = 0;
         qint64 skuId = 0;
         int quantity = 0;
-        QString temuStoreToken;
-        QString temuStoreCountry; // e.g. "FR"
-        QString temuProxyHost;
-        int temuProxyPort = 0;
-        QString temuProxyUser;
-        QString temuProxyPass;
     };
 
     explicit TableMarketplaceOrders(QObject *parent = nullptr);
