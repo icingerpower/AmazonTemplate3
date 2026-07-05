@@ -102,6 +102,17 @@ void SizeRangeWidget::setCategory(const AbstractSizeCategory *cat)
         return;
     }
 
+    // Fixed-dimension categories (Rectangle…) generate no size chart:
+    // no range/mode to pick, all radios stay disabled.
+    if (!cat->generatesSizeChart()) {
+        m_radioNumbers->setEnabled(false);
+        m_radioLetters->setEnabled(false);
+        m_radioHeight ->setEnabled(false);
+        m_radioOneSize->setEnabled(false);
+        updateControlStates();
+        return;
+    }
+
     const bool isHeightBased = cat->referenceKey() == QStringLiteral("HEIGHT");
     const bool hasLetters    = !cat->letterSizes().isEmpty();
 
@@ -170,6 +181,8 @@ QString SizeRangeWidget::to() const
 
 bool SizeRangeWidget::isRangeSelected() const
 {
+    if (m_cat && !m_cat->generatesSizeChart())
+        return true; // nothing to select — never block on a range
     const QString m = mode();
     if (m == QLatin1String("one_size")) return true;
     if (m == QLatin1String("letters"))

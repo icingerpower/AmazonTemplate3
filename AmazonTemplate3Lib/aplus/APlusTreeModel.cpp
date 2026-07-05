@@ -95,6 +95,8 @@ void APlusTreeModel::_rebuildFamilies()
     for (int i = 0; i < elements.size(); ++i) {
         const APlusElement &el = elements.at(i);
         const QString fid = familyIdFor(el.id);
+        if (m_hiddenFamilyIds.contains(fid))
+            continue;
 
         int famIdx = familyIndexByKey.value(fid, -1);
         if (famIdx < 0) {

@@ -58,4 +58,6 @@ SET(GUI_FILES
     ${CMAKE_CURRENT_LIST_DIR}/DialogClassificationTypes.cpp
     ${CMAKE_CURRENT_LIST_DIR}/DialogGenStorefrontImage.h
     ${CMAKE_CURRENT_LIST_DIR}/DialogGenStorefrontImage.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/DialogTemuStoreBrands.h
+    ${CMAKE_CURRENT_LIST_DIR}/DialogTemuStoreBrands.cpp
 )

@@ -469,109 +469,71 @@ QVariant FillerSize::convertUnit(const QString &countryTo, const QVariant &origV
         unitsFound.append({chain, unit, isInch, isCm, match.captured(0)});
     }
     
-    static const QSet<QString> inchCountries{"UK", "IE", "AU", "COM", "CA", "US", "SG"}; 
+    static const QSet<QString> inchCountries{"UK", "IE", "AU", "COM", "CA", "US", "SG"};
     bool targetIsInch = inchCountries.contains(countryTo.toUpper());
-    
-    // 1. Try to find a match that already satisfies the target unit
+
+    const FetchedUnit *inchU = nullptr;
+    const FetchedUnit *cmU   = nullptr;
     for (const auto &u : unitsFound)
     {
-        if (targetIsInch && u.isInch)
-        {
-             return u.rawValue;
-        }
-        if (!targetIsInch && u.isCm)
-        {
-            return u.rawValue;
-        }
+        if (u.isInch && !inchU) inchU = &u;
+        if (u.isCm   && !cmU)   cmU   = &u;
     }
-    
-    // 2. If no matching unit found, convert the first one
-    if (!unitsFound.isEmpty())
-    {
-        const auto &u = unitsFound.first();
-        
-        // Helper lambda to convert chain
-        auto convertChain = [&](double factor, const QString &newUnit) -> QString
-        {
-            QString res;
-            static const QRegularExpression reNums("[0-9]+(?:\\.[0-9]+)?");
-            auto nums = reNums.globalMatch(u.chain);
-            int lastPos = 0;
-            while (nums.hasNext())
-            {
-                auto match = nums.next();
-                // Append separator if any
-                if (match.capturedStart() > lastPos)
-                {
-                     res += u.chain.mid(lastPos, match.capturedStart() - lastPos);
-                }
-                
-                double val = match.captured(0).toDouble();
-                double newVal = val * factor;
-                // If factor < 1 (cm to inch), 2 decimals. If > 1 (inch to cm), 1 decimal.
-                if (factor < 1.0)
-                {
-                     res += QString::number(newVal, 'f', 2);
-                }
-                else
-                {
-                     res += QString::number(newVal, 'f', 1);
-                }
-            }
-            // Append remaining if any (unlikely for well formed chain but safety)
-             if (lastPos < u.chain.length() && 0)
-             { // logic above is slightly flawed for append.
-             }
-             
-             // Simpler approach: split by regex separator, convert, join.
-             QStringList parts = u.chain.split(QRegularExpression("\\s*[xX×]\\s*"));
-             QStringList convertedParts;
-             // We need to preserve the exact separators? User request: "10x20cm" -> "3.94" x 7.87"". Implicitly adding " to each?
-             // Or "3.94 x 7.87""?
-             // Test expectation: "3.94\" x 7.87\"". So unit attached to EACH or just at end?
-             // If input "10x20cm" (unit at end), typically we want "3.94\" x 7.87\"" (unit at each) OR "3.94 x 7.87\"" (unit at end).
-             // Let's assume unit at end for the whole group if the input had unit at end.
-             // Wait, test said: `QVariant("3.94\" x 7.87\"")`. This implies unit on EACH.
-             // But my Plan said "reconstruct the string with the new unit symbol".
-             // If I reconstruct "val x val" + " unit", it is "val x val unit".
-             // If I want unit on each, I need to append unit to each number.
-             
-             for (int i=0; i<parts.size(); ++i)
-             {
-                 double val = parts[i].toDouble();
-                 double newVal = val * factor;
-                 QString s = (factor < 1.0) ? QString::number(newVal, 'f', 2) : QString::number(newVal, 'f', 1); 
-                 // If we want unit on each:
-                 if (factor < 1.0)
-                 {
-                     s += "\""; // inch
-                 }
-                 
-                 convertedParts << s;
-             }
-             
-             if (factor < 1.0)
-             { // Target Inch
-                 return convertedParts.join(" x ");
-             }
-             else
-             { // Target Cm
-                 return convertedParts.join(" x ") + " cm";
-             }
-        };
 
-        if (u.isCm && targetIsInch)
+    // Converts a dimension chain ("10 x 20"): cm→inch when factor < 1
+    // (2 decimals, '"' on each number), inch→cm otherwise (1 decimal,
+    // single " cm" suffix).
+    auto convertChain = [](const FetchedUnit &u, double factor) -> QString
+    {
+        static const QRegularExpression reSep("\\s*[xX×]\\s*");
+        const QStringList parts = u.chain.split(reSep);
+        QStringList convertedParts;
+        for (const QString &part : parts)
         {
-             // cm to inch: / 2.54
-             return convertChain(1.0/2.54, "\"");
+            const double newVal = part.toDouble() * factor;
+            QString s = (factor < 1.0) ? QString::number(newVal, 'f', 2)
+                                       : QString::number(newVal, 'f', 1);
+            if (factor < 1.0)
+            {
+                s += "\""; // inch
+            }
+            convertedParts << s;
         }
-        else if (u.isInch && !targetIsInch)
+        if (factor < 1.0)
+        { // Target Inch
+            return convertedParts.join(" x ");
+        }
+        // Target Cm
+        return convertedParts.join(" x ") + " cm";
+    };
+
+    if (!targetIsInch)
+    {
+        // Metric countries: cm only.
+        if (cmU)
         {
-             // inch to cm: * 2.54
-            return convertChain(2.54, " cm");
+            return cmU->rawValue.trimmed();
         }
+        if (inchU)
+        {
+            return convertChain(*inchU, 2.54);
+        }
+        return origValue;
     }
-    
+
+    // English-language (inch) countries: show both units, inches first then cm.
+    if (inchU && cmU)
+    {
+        return inchU->rawValue.trimmed() + " / " + cmU->rawValue.trimmed();
+    }
+    if (cmU)
+    {
+        return convertChain(*cmU, 1.0/2.54) + " / " + cmU->chain.trimmed() + " cm";
+    }
+    if (inchU)
+    {
+        return inchU->rawValue.trimmed() + " / " + convertChain(*inchU, 2.54);
+    }
     return origValue;
 }
 

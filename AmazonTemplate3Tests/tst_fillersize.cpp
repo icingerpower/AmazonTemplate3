@@ -207,46 +207,42 @@ void FillerSizeTests::testConvertUnit_data()
     QTest::addColumn<QVariant>("origValue");
     QTest::addColumn<QVariant>("expected");
 
-    QTest::newRow("10cm_to_US") << "US" << QVariant("10 cm") << QVariant("3.94\"");
+    // English-language (inch) marketplaces always get both units,
+    // inches first then cm. Metric marketplaces get cm only.
+    QTest::newRow("10cm_to_US") << "US" << QVariant("10 cm") << QVariant("3.94\" / 10 cm");
     QTest::newRow("10cm_to_FR") << "FR" << QVariant("10 cm") << QVariant("10 cm");
     QTest::newRow("5inch_to_FR") << "FR" << QVariant("5\"") << QVariant("12.7 cm");
-    QTest::newRow("5inch_to_US") << "US" << QVariant("5 inch") << QVariant("5 inch");
+    QTest::newRow("5inch_to_US") << "US" << QVariant("5 inch") << QVariant("5 inch / 12.7 cm");
     QTest::newRow("NoUnit_to_US") << "US" << QVariant("10") << QVariant("10");
     QTest::newRow("MixedUnit_to_DE") << "DE" << QVariant("10in") << QVariant("25.4 cm");
-    
-    // New mixed unit cases
-    // Prefer existing value if available
-    QTest::newRow("Mixed_CmFirst_TargetInch") << "US" << QVariant("50 cm / 20 inch") << QVariant("20 inch");
+
+    // Mixed unit cases: reuse both existing values, inches reordered first
+    QTest::newRow("Mixed_CmFirst_TargetInch") << "US" << QVariant("50 cm / 20 inch") << QVariant("20 inch / 50 cm");
     QTest::newRow("Mixed_InchFirst_TargetCm") << "FR" << QVariant("20 inch / 50 cm") << QVariant("50 cm");
-    
+
     // Check that we don't just convert the first one randomly
-    // 100 cm is approx 39.37 inch. If we have 1 inch there, and we want inch, we should return 1 inch.
-    QTest::newRow("Mixed_DistinguishValues_TargetInch") << "US" << QVariant("100 cm (1 inch)") << QVariant("1 inch");
+    // 100 cm is approx 39.37 inch. If we have 1 inch there, keep it (not a conversion).
+    QTest::newRow("Mixed_DistinguishValues_TargetInch") << "US" << QVariant("100 cm (1 inch)") << QVariant("1 inch / 100 cm");
     QTest::newRow("Mixed_DistinguishValues_TargetCm") << "FR" << QVariant("1 inch (100 cm)") << QVariant("100 cm");
 
     // Dimensions and Complex Mixed Units
     // 1. Simple Dimension Conversion
-    // 10x20cm -> Target US (Inch). 10cm ~ 3.94", 20cm ~ 7.87". Separator x/X preserved.
-    // Expected format: "3.94\" x 7.87\"" or "3.94 x 7.87\"" ?
-    // If input is "10x20cm", unit is at end.
-    // We should probably attach unit to end or each?
-    // User example: 3 x 10 x 50 " (7.62 × 25.4 × 127 cm)
-    // Implicitly, commonly: 3" x 10" x 50"
-    // Let's aim for: 3.94" x 7.87"
-    QTest::newRow("Dimension_Cm_to_Inch") << "US" << QVariant("10x20cm") << QVariant("3.94\" x 7.87\"");
-    
+    // 10x20cm -> Target US (Inch). 10cm ~ 3.94", 20cm ~ 7.87". Separator x/X preserved,
+    // inch unit on each number, original cm value appended after " / ".
+    QTest::newRow("Dimension_Cm_to_Inch") << "US" << QVariant("10x20cm") << QVariant("3.94\" x 7.87\" / 10x20 cm");
+
     // 2. Spaces in dimension
-    QTest::newRow("Dimension_Spaces_Cm_to_Inch") << "US" << QVariant("10 x 20 cm") << QVariant("3.94\" x 7.87\"");
+    QTest::newRow("Dimension_Spaces_Cm_to_Inch") << "US" << QVariant("10 x 20 cm") << QVariant("3.94\" x 7.87\" / 10 x 20 cm");
 
     // 3. Complex Mixed: Parenthesis
     // Target CM: should pick the one in parens
     QTest::newRow("Complex_Mixed_Paren_TargetCm") << "FR" << QVariant("3 x 10 x 50 \" (7.62 x 25.4 x 127 cm)") << QVariant("7.62 x 25.4 x 127 cm");
-    
-    // Target Inch: should pick the first part
-    QTest::newRow("Complex_Mixed_Paren_TargetInch") << "US" << QVariant("3 x 10 x 50 \" (7.62 x 25.4 x 127 cm)") << QVariant("3 x 10 x 50 \"");
 
-    // 4. Mixed with slash
-    QTest::newRow("Complex_Mixed_Slash_TargetInch") << "US" << QVariant("10 in / 25.4 cm") << QVariant("10 in");
+    // Target Inch: inches first, then the cm part
+    QTest::newRow("Complex_Mixed_Paren_TargetInch") << "US" << QVariant("3 x 10 x 50 \" (7.62 x 25.4 x 127 cm)") << QVariant("3 x 10 x 50 \" / 7.62 x 25.4 x 127 cm");
+
+    // 4. Mixed with slash — already in the target format
+    QTest::newRow("Complex_Mixed_Slash_TargetInch") << "US" << QVariant("10 in / 25.4 cm") << QVariant("10 in / 25.4 cm");
 }
 
 void FillerSizeTests::testConvertUnit()

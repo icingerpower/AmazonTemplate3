@@ -391,12 +391,21 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
                 if (!ma.startsWith(kWidthPrefix))
                     filteredMaterial.append(ma);
 
+            QString brand;
+            for (const auto& c : family.children) {
+                if (!c.brand.isEmpty()) {
+                    brand = c.brand;
+                    break;
+                }
+            }
+
             emit attributesFetched(family.children.first().bulletPoints,
                                    filteredMaterial,
                                    family.children.first().mainImageUrl,
                                    family.parentAsin,
                                    family.children.first().title,
-                                   shoeWidths);
+                                   shoeWidths,
+                                   brand);
 
             // Emit images grouped by unique color. Dedup by canonical color key
             // (lowercased + cross-language translation) so that "Black" and "Schwarz"

@@ -19,6 +19,8 @@ set(PROJECT_SOURCES
         SettingsTable.cpp
         TemuStoreModel.h
         TemuStoreModel.cpp
+        TreeTemuStoreBrands.h
+        TreeTemuStoreBrands.cpp
         "../../common/types/types.h"
         "../../common/types/types.cpp"
         ${GUI_FILES}

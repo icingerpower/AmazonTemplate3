@@ -14,6 +14,8 @@
 #include "sizecategories/AbstractSizeCategory.h"
 #include "sizecategories/SizingTableTemplateModel.h"
 #include "gui/DialogEditPrompts.h"
+#include "gui/DialogTemuStoreBrands.h"
+#include "TreeTemuStoreBrands.h"
 #include "BrokenChildTable.h"
 #include "AmazonMarketplace.h"
 #include "fillers/FillerSize.h"
@@ -307,6 +309,15 @@ PaneSizing::PaneSizing(QWidget *parent)
     connect(ui->comboBoxBrokenAttrMarket,
             QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &PaneSizing::onBrokenAttrMarketChanged);
+
+    connect(ui->buttonTemuEditStores, &QPushButton::clicked,
+            this, [this]() {
+                DialogTemuStoreBrands dialog(this);
+                dialog.exec();
+            });
+
+    connect(ui->buttonExcludedColors, &QPushButton::clicked,
+            this, &PaneSizing::onAplusExcludedColors);
 
     _rebuildMeasurementForm();
     updateButtonStates();
@@ -641,6 +652,9 @@ void PaneSizing::_loadProductSettings()
 
     m_aplusExcludedColors = s.value(QStringLiteral("aplus/excluded_colors"))
         .toString().split(QLatin1Char(','), Qt::SkipEmptyParts);
+    // Hide excluded colors' A+ elements right away (the variants tree and
+    // file sync follow once the color variants arrive).
+    _applyColorExclusions();
 
     const QString savedTpl = s.value(QStringLiteral("brokenChild/templatePath")).toString();
     if (!savedTpl.isEmpty())
@@ -696,7 +710,8 @@ void PaneSizing::_loadProductSettings()
         }
     }
 
-    if (_currentCategory() && ui->sizeRangeMain->isRangeSelected()) {
+    if (_currentCategory() && _currentCategory()->generatesSizeChart()
+        && ui->sizeRangeMain->isRangeSelected()) {
         _rebuildSizeTable();
         updateButtonStates();
     }
@@ -858,18 +873,20 @@ void PaneSizing::_ensureModel(const QDir &dir)
 
     connect(m_treeModel.get(), &TreeSizingAsins::colorLog,
             this, [this](const QString& log) {
-                const QString cur = ui->textEditAttributes->toPlainText();
-                ui->textEditAttributes->setPlainText(
-                    cur.isEmpty() ? log : cur + QStringLiteral("\n\n") + log);
+                m_colorLogs << log;
+                _refreshAttributesText();
             });
 
     connect(m_treeModel.get(), &TreeSizingAsins::attributesFetched,
             this, [this](const QStringList& bullets, const QStringList& materials,
                          const QString& mainImageUrl, const QString& asin,
-                         const QString& title, const QStringList& shoeWidths) {
+                         const QString& title, const QStringList& shoeWidths,
+                         const QString& brand) {
                 m_productTitle = title;
                 m_currentAsin = asin;
+                m_mainImageUrl = mainImageUrl;
                 m_shoeWidths = shoeWidths;
+                TreeTemuStoreBrands::cacheBrand(brand);
                 QString text;
                 if (!bullets.isEmpty()) {
                     text += tr("Bullet points:\n");
@@ -901,7 +918,11 @@ void PaneSizing::_ensureModel(const QDir &dir)
                     if (!text.isEmpty()) text += QLatin1Char('\n');
                     text += tr("Shoe width: ") + display + QLatin1Char('\n');
                 }
-                ui->textEditAttributes->setPlainText(text.trimmed());
+                // The description box is rebuilt from these cached pieces so
+                // excluded colors can be filtered out of it at any time.
+                m_attributesBaseText = text.trimmed();
+                m_colorLogs.clear(); // colorLog fires after attributesFetched
+                _refreshAttributesText();
 
                 if (!asin.isEmpty()) {
                     m_productWorkingDir = _resolveProductDir(asin, title);
@@ -926,10 +947,15 @@ void PaneSizing::updateButtonStates()
     const bool typeOk   = ui->comboBoxSizeType->currentIndex() > 0;
     const bool rangeOk  = ui->sizeRangeMain->isRangeSelected();
 
-    ui->comboBoxSizeType->setEnabled(hasAsins);
-    ui->buttoGenSizeTables->setEnabled(hasAsins && typeOk && rangeOk);
+    // Fixed-dimension categories (Rectangle…): no size table exists, so the
+    // toolbox (images, A+, Temu…) must not be gated on generating one.
+    const auto *curCat  = _currentCategory();
+    const bool noChart  = curCat && !curCat->generatesSizeChart();
 
-    ui->toolBoxSizing->setEnabled(m_generatedSuccessfully);
+    ui->comboBoxSizeType->setEnabled(hasAsins);
+    ui->buttoGenSizeTables->setEnabled(hasAsins && typeOk && rangeOk && !noChart);
+
+    ui->toolBoxSizing->setEnabled(m_generatedSuccessfully || noChart);
     ui->buttonMakeEditable->setEnabled(m_generatedSuccessfully);
 
     // A+ generate: enabled when a product dir is loaded
@@ -948,7 +974,15 @@ void PaneSizing::onSizeTypeChanged(int index)
     Q_UNUSED(index)
     _populateSizeRangeCombos();
     _rebuildMeasurementForm();
+    _selectWorkflowForCategory();
     updateButtonStates();
+
+    // No-chart categories never pass through the "Generate" click that
+    // normally persists sizing/type — save it here so the selection
+    // survives a reload.
+    const auto *cat = _currentCategory();
+    if (cat && !cat->generatesSizeChart())
+        _saveProductSettings();
 }
 
 const AbstractSizeCategory* PaneSizing::_currentCategory() const
@@ -1826,12 +1860,235 @@ static void injectGroupShotColorHints(QList<ImageSlotSpec> &specs,
     }
 }
 
+// Moves the reference images of excluded colors into an "excluded/" subfolder
+// of the product directory (and back when a color is re-included). The AI CLI
+// works inside the product directory and picks up whatever images it finds
+// there, so prompt-level exclusion hints alone are not reliable.
+void PaneSizing::_syncExcludedColorFiles()
+{
+    if (!m_productWorkingDir.exists())
+        return;
+
+    // colorId → excluded?
+    QHash<QString, bool> idExcluded;
+    for (const auto &[color, urls] : std::as_const(m_colorVariants)) {
+        if (color.isEmpty()) continue;
+        idExcluded.insert(colorToFileSegment(color),
+                          m_aplusExcludedColors.contains(color));
+    }
+    if (idExcluded.isEmpty())
+        return;
+
+    // Assign each file to the LONGEST matching color id so that an active
+    // "blush-pink" never claims "blush-pink-dusty-image-01.jpg".
+    auto ownerOf = [&idExcluded](const QString &fileName) -> QString {
+        QString best;
+        for (auto it = idExcluded.cbegin(); it != idExcluded.cend(); ++it) {
+            const QString &cid = it.key();
+            if ((fileName.startsWith(cid + QLatin1Char('-'))
+                 || fileName.startsWith(cid + QLatin1Char('_')))
+                && cid.size() > best.size())
+                best = cid;
+        }
+        return best;
+    };
+
+    QDir excludedDir(m_productWorkingDir.filePath(QStringLiteral("excluded")));
+
+    // Excluded colors: move their files out of the product dir root.
+    for (const QString &f : m_productWorkingDir.entryList(QDir::Files)) {
+        const QString owner = ownerOf(f);
+        if (owner.isEmpty() || !idExcluded.value(owner))
+            continue;
+        if (!excludedDir.exists())
+            m_productWorkingDir.mkdir(QStringLiteral("excluded"));
+        QFile::rename(m_productWorkingDir.absoluteFilePath(f),
+                      excludedDir.absoluteFilePath(f));
+    }
+
+    // Re-included colors: move their files back.
+    if (excludedDir.exists()) {
+        for (const QString &f : excludedDir.entryList(QDir::Files)) {
+            const QString owner = ownerOf(f);
+            if (owner.isEmpty() || idExcluded.value(owner))
+                continue;
+            QFile::rename(excludedDir.absoluteFilePath(f),
+                          m_productWorkingDir.absoluteFilePath(f));
+        }
+    }
+}
+
+// Child ASINs belonging to excluded colors — no upload of any kind targets them.
+QSet<QString> PaneSizing::_excludedColorAsins() const
+{
+    QSet<QString> result;
+    for (const QString &color : m_aplusExcludedColors)
+        for (const QString &asin : m_colorAsins.value(color.toLower()))
+            result.insert(asin);
+    return result;
+}
+
+// A+ element ids belonging to excluded colors — hidden from the A+ tree
+// and from the per-element generate menu.
+QSet<QString> PaneSizing::_hiddenAplusElementIds() const
+{
+    static const QStringList kPrefixes = {
+        QStringLiteral("image_color_"),
+        QStringLiteral("image_detail_"),
+        QStringLiteral("image_lifestyle_"),
+    };
+    QSet<QString> ids;
+    for (const QString &color : m_aplusExcludedColors) {
+        const QString cid = colorToFileSegment(color);
+        for (const QString &prefix : kPrefixes)
+            ids.insert(prefix + cid);
+    }
+    return ids;
+}
+
+// Removes lines mentioning excluded colors from a color-detection log and
+// rewrites its "→ N distinct color(s): …" summary accordingly.
+QString PaneSizing::_filterColorLog(const QString &log) const
+{
+    QStringList out;
+    for (const QString &line : log.split(QLatin1Char('\n'))) {
+        bool mentionsExcluded = false;
+        for (const QString &color : m_aplusExcludedColors) {
+            if (line.contains(QStringLiteral("\"%1\"").arg(color), Qt::CaseInsensitive)) {
+                mentionsExcluded = true;
+                break;
+            }
+        }
+        if (mentionsExcluded)
+            continue;
+
+        const int arrow = line.indexOf(QStringLiteral("distinct color"));
+        const int colon = line.lastIndexOf(QStringLiteral(": "));
+        if (arrow >= 0 && colon > arrow) {
+            QStringList kept;
+            const QStringList names = line.mid(colon + 2)
+                .split(QStringLiteral(", "), Qt::SkipEmptyParts);
+            for (const QString &name : names)
+                if (!m_aplusExcludedColors.contains(name.trimmed(), Qt::CaseInsensitive))
+                    kept << name.trimmed();
+            out << tr("  → %1 distinct color(s): %2")
+                       .arg(kept.size()).arg(kept.join(QStringLiteral(", ")));
+            continue;
+        }
+        out << line;
+    }
+    return out.join(QLatin1Char('\n'));
+}
+
+// Rebuilds the description box (bullet points, materials, color detection)
+// from the cached pieces, with excluded colors filtered out. This text is
+// also the product description injected into every A+ prompt, so excluded
+// colors must not appear in it.
+void PaneSizing::_refreshAttributesText()
+{
+    QString text = m_attributesBaseText;
+    for (const QString &log : m_colorLogs) {
+        const QString filtered = _filterColorLog(log);
+        if (filtered.trimmed().isEmpty())
+            continue;
+        if (!text.isEmpty())
+            text += QStringLiteral("\n\n");
+        text += filtered;
+    }
+    ui->textEditAttributes->setPlainText(text.trimmed());
+}
+
+// The product main image comes from the FIRST child, which may be an excluded
+// color. Left in place, the CLI uses it as design reference and produces mixes
+// of the active color with the banned design. Move it to excluded/ and point
+// the reference hint at an active color's photo instead.
+void PaneSizing::_syncMainImageExclusion()
+{
+    if (!m_productWorkingDir.exists() || m_currentAsin.isEmpty())
+        return;
+
+    const QString fileName = m_currentAsin + QStringLiteral("_main.jpg");
+    const QString rootPath = m_productWorkingDir.filePath(fileName);
+    QDir excludedDir(m_productWorkingDir.filePath(QStringLiteral("excluded")));
+    const QString excludedPath = excludedDir.filePath(fileName);
+
+    // Which color does the main image show? (match its URL in the variants)
+    QString mainColor;
+    if (!m_mainImageUrl.isEmpty()) {
+        for (const auto &[color, urls] : std::as_const(m_colorVariants)) {
+            if (urls.contains(m_mainImageUrl)) {
+                mainColor = color;
+                break;
+            }
+        }
+    }
+
+    if (mainColor.isEmpty()) {
+        // Color unknown (variants not fetched yet) — don't move anything.
+        return;
+    }
+
+    if (m_aplusExcludedColors.contains(mainColor)) {
+        if (QFileInfo::exists(rootPath)) {
+            if (!excludedDir.exists())
+                m_productWorkingDir.mkdir(QStringLiteral("excluded"));
+            if (QFileInfo::exists(excludedPath))
+                QFile::remove(rootPath); // same image already stashed
+            else
+                QFile::rename(rootPath, excludedPath);
+        }
+        // Reference an active color's first photo instead.
+        m_mainImageLocalPath.clear();
+        const bool multiColor = m_colorVariants.size() > 1;
+        for (const auto &[color, urls] : std::as_const(m_colorVariants)) {
+            if (color.isEmpty() || m_aplusExcludedColors.contains(color))
+                continue;
+            const QString candidate = m_productWorkingDir.filePath(
+                (multiColor ? colorToFileSegment(color) + QLatin1Char('-') : QString{})
+                + QStringLiteral("image-01.jpg"));
+            if (QFileInfo::exists(candidate)) {
+                m_mainImageLocalPath = candidate;
+                break;
+            }
+        }
+    } else {
+        if (QFileInfo::exists(excludedPath) && !QFileInfo::exists(rootPath))
+            QFile::rename(excludedPath, rootPath);
+        if (QFileInfo::exists(rootPath))
+            m_mainImageLocalPath = rootPath;
+    }
+}
+
+// Applies the current exclusion list everywhere it is visible: moves files,
+// updates the summary label, hides A+ elements and menu entries, and strips
+// excluded colors from the description text.
+void PaneSizing::_applyColorExclusions()
+{
+    _syncExcludedColorFiles();
+    _syncMainImageExclusion();
+
+    ui->labelExcludedColors->setText(m_aplusExcludedColors.isEmpty()
+        ? QString{}
+        : tr("Excluded: %1").arg(m_aplusExcludedColors.join(QStringLiteral(", "))));
+
+    if (m_aplusModel) {
+        m_aplusModel->setHiddenFamilyIds(_hiddenAplusElementIds());
+        _rebuildAplusModel();
+    }
+    _rebuildAplusMenu();
+    _refreshAttributesText();
+}
+
 void PaneSizing::_downloadVariantImages(const QList<QPair<QString, QStringList>> &colorImages)
 {
     if (!m_productWorkingDir.exists() || colorImages.isEmpty())
         return;
 
     m_colorVariants = colorImages;
+
+    // Reconcile disk + UI state with the persisted exclusion list before
+    // deciding which files need downloading.
+    _applyColorExclusions();
 
     ui->treeWidgetColorVariants->clear();
     m_variantImagePaths.clear();
@@ -1843,14 +2100,14 @@ void PaneSizing::_downloadVariantImages(const QList<QPair<QString, QStringList>>
     const QString dir = m_productWorkingDir.absolutePath();
 
     for (const auto &[color, urls] : colorImages) {
+        // Excluded colors are invisible everywhere; they only appear in the
+        // "Excluded colors…" dialog where they can be re-included.
         const bool excluded = !color.isEmpty() && m_aplusExcludedColors.contains(color);
+        if (excluded)
+            continue;
 
         auto *colorItem = new QTreeWidgetItem(ui->treeWidgetColorVariants);
         colorItem->setText(0, color.isEmpty() ? tr("(default)") : color);
-        if (excluded) {
-            colorItem->setText(0, tr("%1 (excluded)").arg(color));
-            colorItem->setForeground(0, palette().color(QPalette::Disabled, QPalette::Text));
-        }
 
         const QString prefix = multiColor
             ? colorToFileSegment(color) + QLatin1Char('-')
@@ -1873,7 +2130,7 @@ void PaneSizing::_downloadVariantImages(const QList<QPair<QString, QStringList>>
                 firstForColor = false;
             }
 
-            if (!excluded && !QFileInfo::exists(localPath)) {
+            if (!QFileInfo::exists(localPath)) {
                 QNetworkRequest req{QUrl(url)};
                 QNetworkReply *reply = m_imageNam->get(req);
                 const QString savedPath = localPath;
@@ -2013,10 +2270,18 @@ void PaneSizing::_downloadMainImage(const QString &url, const QString &asin)
     const QString dir = targetDir.isAbsolute()
         ? targetDir.path()
         : QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    const QString filename = dir + QLatin1Char('/') + (asin.isEmpty() ? QStringLiteral("main") : asin) + QStringLiteral("_main.jpg");
+    const QString baseName = (asin.isEmpty() ? QStringLiteral("main") : asin) + QStringLiteral("_main.jpg");
+    const QString filename = dir + QLatin1Char('/') + baseName;
 
     if (QFileInfo::exists(filename)) {
         m_mainImageLocalPath = filename;
+        _syncMainImageExclusion();
+        return;
+    }
+    // Stashed in excluded/ (main image belongs to an excluded color):
+    // don't re-download it to the root.
+    if (QFileInfo::exists(dir + QStringLiteral("/excluded/") + baseName)) {
+        _syncMainImageExclusion();
         return;
     }
 
@@ -2031,6 +2296,8 @@ void PaneSizing::_downloadMainImage(const QString &url, const QString &asin)
             f.write(reply->readAll());
             f.close();
             m_mainImageLocalPath = filename;
+            // The download may finish after the exclusion sync ran.
+            _syncMainImageExclusion();
         }
     });
 }
@@ -2478,7 +2745,8 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
 
     QStringList colorNames;
     for (const auto &[color, urls] : std::as_const(m_colorVariants))
-        if (!color.isEmpty()) colorNames << color;
+        if (!color.isEmpty() && !m_aplusExcludedColors.contains(color))
+            colorNames << color;
 
     // --- Dialog (all locals scoped before any co_await) ---
     QStringList mpIds;
@@ -2655,8 +2923,11 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
             }
 
             // --- Resolve child ASINs and document name (once, before retry loop) ---
+            // Excluded colors' children never receive A+ content: they are
+            // absent from colorNames, and the apply-to-all fallback filters them.
             QStringList asinList;
             {
+                const QSet<QString> excludedAsins = _excludedColorAsins();
                 const QString colorKey = (colorIdx < colorNames.size())
                     ? colorNames.at(colorIdx).toLower() : QString{};
                 if (!colorKey.isEmpty() && m_colorAsins.contains(colorKey)) {
@@ -2664,7 +2935,8 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                 } else {
                     for (const auto &asins : std::as_const(m_colorAsins))
                         for (const QString &a : asins)
-                            if (!asinList.contains(a)) asinList << a;
+                            if (!asinList.contains(a) && !excludedAsins.contains(a))
+                                asinList << a;
                 }
             }
             QString docName = m_productTitle.isEmpty() ? QStringLiteral("A+ Content") : m_productTitle;
@@ -3131,9 +3403,12 @@ void PaneSizing::_rebuildAplusMenu()
             this, &PaneSizing::onAplusGenerateSizeChart);
 
     if (m_aplusContent) {
+        const QSet<QString> hiddenIds = _hiddenAplusElementIds();
         for (const APlusElement &e : m_aplusContent->elements()) {
             if (e.type != APlusElementType::Image)
                 continue;
+            if (hiddenIds.contains(e.id))
+                continue; // excluded color — invisible everywhere
             const QString id = e.id;
             QAction *imgAct = m_aplusMenu->addAction(e.displayName);
             connect(imgAct, &QAction::triggered, this, [this, id]() {
@@ -3145,10 +3420,6 @@ void PaneSizing::_rebuildAplusMenu()
     m_aplusMenu->addSeparator();
     QAction *faqAct = m_aplusMenu->addAction(tr("FAQ"));
     connect(faqAct, &QAction::triggered, this, &PaneSizing::onAplusGenerateFaq);
-
-    m_aplusMenu->addSeparator();
-    QAction *excludeAct = m_aplusMenu->addAction(tr("Excluded colors…"));
-    connect(excludeAct, &QAction::triggered, this, &PaneSizing::onAplusExcludedColors);
 }
 
 void PaneSizing::onAplusExcludedColors()
@@ -3198,6 +3469,11 @@ void PaneSizing::onAplusExcludedColors()
         s.setValue(QStringLiteral("aplus/excluded_colors"),
                    m_aplusExcludedColors.join(QLatin1Char(',')));
     }
+
+    // Rebuild the variants tree without the excluded colors; this also moves
+    // their files to excluded/ (or restores re-included ones), refreshes the
+    // summary label, the A+ tree and the generate menu.
+    _downloadVariantImages(m_colorVariants);
 }
 
 QString PaneSizing::_aplusTimestamp() const
@@ -3364,12 +3640,45 @@ void PaneSizing::_initWorkflowCombo()
             QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int) {
                 APlusWorkflow *wf = _currentWorkflow();
-                if (wf)
-                    WorkingDirectoryManager::instance()->settings()
-                        ->setValue(QStringLiteral("aplusWorkflow"), wf->id());
+                if (wf) {
+                    auto s = WorkingDirectoryManager::instance()->settings();
+                    s->setValue(QStringLiteral("aplusWorkflow"), wf->id());
+                    // Remember the choice per category so switching the size
+                    // type restores the matching workflow.
+                    const auto *cat = _currentCategory();
+                    if (cat)
+                        s->setValue(_workflowCategoryKey(cat), wf->id());
+                }
                 _rebuildPromptTabs();
                 _loadWorkflowPrompts();
             });
+}
+
+QString PaneSizing::_workflowCategoryKey(const AbstractSizeCategory *cat)
+{
+    QString safeCat = cat->displayName();
+    safeCat.replace(QLatin1Char(' '), QLatin1Char('_'))
+           .replace(QLatin1Char('/'), QLatin1Char('_'))
+           .replace(QString::fromUtf8("–"), QStringLiteral("-"));
+    return QStringLiteral("aplusWorkflow/") + safeCat;
+}
+
+// Selects the A+ workflow matching the current size category: the last
+// workflow explicitly chosen for that category, else Clothing / Shoes for
+// apparel categories and Home / Object for the rest (Rectangle…).
+void PaneSizing::_selectWorkflowForCategory()
+{
+    const auto *cat = _currentCategory();
+    if (!cat)
+        return;
+    QString wfId = WorkingDirectoryManager::instance()->settings()
+        ->value(_workflowCategoryKey(cat)).toString();
+    if (wfId.isEmpty())
+        wfId = cat->isApparel() ? QStringLiteral("clothing")
+                                : QStringLiteral("home_object");
+    const int idx = ui->comboBoxWorkflow->findData(wfId);
+    if (idx >= 0)
+        ui->comboBoxWorkflow->setCurrentIndex(idx);
 }
 
 void PaneSizing::_rebuildPromptTabs()
@@ -3702,6 +4011,8 @@ void PaneSizing::_appendFaqFormatValidateTasks(
 
 void PaneSizing::onAplusGenerateAll()
 {
+    _applyColorExclusions();
+
     if (!m_aplusContent) {
         QMessageBox::information(this, tr("Generate All"),
             tr("Load a product first."));
@@ -5167,6 +5478,8 @@ void PaneSizing::onAplusGenerateFaq()
 
 void PaneSizing::onAplusGenerateImage(const QString &elementId)
 {
+    _applyColorExclusions();
+
     if (!m_aplusContent) return;
 
     AbstractCli *cli = ui->comboBoxCli->currentData().value<AbstractCli *>();
@@ -5357,6 +5670,10 @@ void PaneSizing::onAplusGenerateImage(const QString &elementId)
 
 void PaneSizing::onAplusGenerateSelected()
 {
+    // Make sure excluded colors' reference images (main image included) are
+    // out of the product dir before the CLI can see them.
+    _applyColorExclusions();
+
     if (!m_aplusContent) {
         QMessageBox::information(this, tr("Generate Selected"), tr("Load a product first."));
         return;
@@ -6780,7 +7097,9 @@ QCoro::Task<void> PaneSizing::_uploadSizeImage(int imageIndex)
         co_return;
     }
 
-    // Collect child ASINs + whatever SKUs are already known from the tree
+    // Collect child ASINs + whatever SKUs are already known from the tree.
+    // Children of excluded colors are skipped entirely.
+    const QSet<QString> excludedAsins = _excludedColorAsins();
     QList<AsinSku> treeItems;
     if (m_treeModel) {
         for (int i = 0; i < m_treeModel->rowCount(); ++i) {
@@ -6792,8 +7111,14 @@ QCoro::Task<void> PaneSizing::_uploadSizeImage(int imageIndex)
                 const QString sku = m_treeModel->data(
                     m_treeModel->index(j, TreeSizingAsins::SKU, parentIdx),
                     Qt::DisplayRole).toString().trimmed();
-                if (!asin.isEmpty())
-                    treeItems << AsinSku{asin, sku};
+                if (asin.isEmpty())
+                    continue;
+                if (excludedAsins.contains(asin)) {
+                    qDebug() << "PaneSizing: size image upload skips" << asin
+                             << "(excluded color)";
+                    continue;
+                }
+                treeItems << AsinSku{asin, sku};
             }
         }
     }
@@ -6924,7 +7249,16 @@ QCoro::Task<void> PaneSizing::_uploadVariantImage(int imageIndex)
         co_return;
     }
     auto *colorItem = selItem->parent() ? selItem->parent() : selItem;
-    const QString color = colorItem->text(0);
+    QString color = colorItem->text(0);
+    // Excluded colors are labeled "%1 (excluded)" in the tree — strip and block.
+    const QString excludedSuffix = tr(" (excluded)");
+    if (color.endsWith(excludedSuffix))
+        color.chop(excludedSuffix.size());
+    if (m_aplusExcludedColors.contains(color)) {
+        QMessageBox::warning(this, tr("Upload"),
+            tr("Color \"%1\" is excluded — nothing is uploaded for it.").arg(color));
+        co_return;
+    }
 
     // Image to upload: prefer locally browsed image, otherwise selected Amazon variant
     const QString imgPath = m_variantBrowsedImagePath.isEmpty()

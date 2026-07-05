@@ -4,6 +4,7 @@
 #include "sizecategories/ShoesWomenCategory.h"
 #include "sizecategories/ShoesMenCategory.h"
 #include "sizecategories/ClothingKidCategory.h"
+#include "sizecategories/RectangleCategory.h"
 
 QList<const AbstractSizeCategory*> SizeTableGenerator::allCategories()
 {
@@ -12,5 +13,6 @@ QList<const AbstractSizeCategory*> SizeTableGenerator::allCategories()
     static const ShoesWomenCategory    shoesWomen;
     static const ShoesMenCategory      shoesMen;
     static const ClothingKidCategory   clothingKid;
-    return {&clothingWomen, &clothingMen, &shoesWomen, &shoesMen, &clothingKid};
+    static const RectangleCategory     rectangle;
+    return {&clothingWomen, &clothingMen, &shoesWomen, &shoesMen, &clothingKid, &rectangle};
 }

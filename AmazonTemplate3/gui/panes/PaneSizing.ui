@@ -248,6 +248,37 @@
         </widget>
        </item>
        <item>
+        <layout class="QHBoxLayout" name="layoutExcludedColors">
+         <item>
+          <widget class="QPushButton" name="buttonExcludedColors">
+           <property name="text">
+            <string>Excluded colors…</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLabel" name="labelExcludedColors">
+           <property name="text">
+            <string/>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="horizontalSpacerExcludedColors">
+           <property name="orientation">
+            <enum>Qt::Orientation::Horizontal</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>40</width>
+             <height>20</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+        </layout>
+       </item>
+       <item>
         <widget class="QToolBox" name="toolBoxSizing">
          <property name="sizePolicy">
           <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
@@ -256,15 +287,15 @@
           </sizepolicy>
          </property>
          <property name="currentIndex">
-          <number>1</number>
+          <number>5</number>
          </property>
          <widget class="QWidget" name="pageImages">
           <property name="geometry">
            <rect>
             <x>0</x>
             <y>0</y>
-            <width>956</width>
-            <height>437</height>
+            <width>971</width>
+            <height>408</height>
            </rect>
           </property>
           <attribute name="label">
@@ -273,9 +304,6 @@
           <layout class="QHBoxLayout" name="horizontalLayoutImages">
            <item>
             <widget class="QTreeWidget" name="treeWidgetColorVariants">
-             <property name="minimumWidth">
-              <number>180</number>
-             </property>
              <column>
               <property name="text">
                <string>Color</string>
@@ -284,108 +312,106 @@
             </widget>
            </item>
            <item>
-            <widget class="QWidget" name="widgetVariantImagePanel">
-             <layout class="QVBoxLayout" name="verticalLayoutVariantPanel">
-              <item>
-               <layout class="QHBoxLayout" name="horizontalLayoutVariantTools">
-                <item>
-                 <widget class="QPushButton" name="buttonUploadVariantImage">
-                  <property name="text">
-                   <string>Upload</string>
-                  </property>
-                 </widget>
-                </item>
-                <item>
-                 <widget class="QRadioButton" name="radioButtonVariantAppend">
-                  <property name="text">
-                   <string>Append at end</string>
-                  </property>
-                  <property name="checked">
-                   <bool>true</bool>
-                  </property>
-                 </widget>
-                </item>
-                <item>
-                 <widget class="QRadioButton" name="radioButtonVariantReplaceLast">
-                  <property name="text">
-                   <string>Replace last image</string>
-                  </property>
-                 </widget>
-                </item>
-                <item>
-                 <widget class="QRadioButton" name="radioButtonVariantReplaceAt">
-                  <property name="text">
-                   <string>Replace at index:</string>
-                  </property>
-                 </widget>
-                </item>
-                <item>
-                 <widget class="QSpinBox" name="spinBoxVariantImagePos">
-                  <property name="enabled">
-                   <bool>false</bool>
-                  </property>
-                  <property name="maximum">
-                   <number>9</number>
-                  </property>
-                  <property name="value">
-                   <number>4</number>
-                  </property>
-                 </widget>
-                </item>
-                <item>
-                 <widget class="QPushButton" name="buttonBrowseVariantImage">
-                  <property name="text">
-                   <string>Browse…</string>
-                  </property>
-                 </widget>
-                </item>
-                <item>
-                 <widget class="QLabel" name="labelVariantUploadStatus">
-                  <property name="text">
-                   <string/>
-                  </property>
-                 </widget>
-                </item>
-                <item>
-                 <spacer name="horizontalSpacerVariant">
-                  <property name="orientation">
-                   <enum>Qt::Orientation::Horizontal</enum>
-                  </property>
-                  <property name="sizeHint" stdset="0">
-                   <size>
-                    <width>40</width>
-                    <height>20</height>
-                   </size>
-                  </property>
-                 </spacer>
-                </item>
-               </layout>
-              </item>
-              <item>
-               <widget class="QSplitter" name="splitterVariantImages">
-                <property name="orientation">
-                 <enum>Qt::Orientation::Vertical</enum>
-                </property>
-                <widget class="QLabel" name="labelVariantImage">
+            <layout class="QVBoxLayout" name="verticalLayoutVariantPanel">
+             <item>
+              <layout class="QHBoxLayout" name="horizontalLayoutVariantTools">
+               <item>
+                <widget class="QPushButton" name="buttonUploadVariantImage">
+                 <property name="text">
+                  <string>Upload</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QRadioButton" name="radioButtonVariantAppend">
+                 <property name="text">
+                  <string>Append at end</string>
+                 </property>
+                 <property name="checked">
+                  <bool>true</bool>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QRadioButton" name="radioButtonVariantReplaceLast">
+                 <property name="text">
+                  <string>Replace last image</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QRadioButton" name="radioButtonVariantReplaceAt">
+                 <property name="text">
+                  <string>Replace at index:</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QSpinBox" name="spinBoxVariantImagePos">
+                 <property name="enabled">
+                  <bool>false</bool>
+                 </property>
+                 <property name="maximum">
+                  <number>9</number>
+                 </property>
+                 <property name="value">
+                  <number>4</number>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QPushButton" name="buttonBrowseVariantImage">
+                 <property name="text">
+                  <string>Browse…</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QLabel" name="labelVariantUploadStatus">
                  <property name="text">
                   <string/>
                  </property>
-                 <property name="alignment">
-                  <set>Qt::AlignmentFlag::AlignHCenter|Qt::AlignmentFlag::AlignTop</set>
-                 </property>
                 </widget>
-                <widget class="QLabel" name="labelBrowsedImage">
-                 <property name="text">
-                  <string>(no browsed image)</string>
+               </item>
+               <item>
+                <spacer name="horizontalSpacerVariant">
+                 <property name="orientation">
+                  <enum>Qt::Orientation::Horizontal</enum>
                  </property>
-                 <property name="alignment">
-                  <set>Qt::AlignmentFlag::AlignHCenter|Qt::AlignmentFlag::AlignTop</set>
+                 <property name="sizeHint" stdset="0">
+                  <size>
+                   <width>40</width>
+                   <height>20</height>
+                  </size>
                  </property>
-                </widget>
+                </spacer>
+               </item>
+              </layout>
+             </item>
+             <item>
+              <widget class="QSplitter" name="splitterVariantImages">
+               <property name="orientation">
+                <enum>Qt::Orientation::Vertical</enum>
+               </property>
+               <widget class="QLabel" name="labelVariantImage">
+                <property name="text">
+                 <string/>
+                </property>
+                <property name="alignment">
+                 <set>Qt::AlignmentFlag::AlignHCenter|Qt::AlignmentFlag::AlignTop</set>
+                </property>
                </widget>
-              </item>
-             </layout>
-            </widget>
+               <widget class="QLabel" name="labelBrowsedImage">
+                <property name="text">
+                 <string>(no browsed image)</string>
+                </property>
+                <property name="alignment">
+                 <set>Qt::AlignmentFlag::AlignHCenter|Qt::AlignmentFlag::AlignTop</set>
+                </property>
+               </widget>
+              </widget>
+             </item>
+            </layout>
            </item>
           </layout>
          </widget>
@@ -394,8 +420,8 @@
            <rect>
             <x>0</x>
             <y>0</y>
-            <width>956</width>
-            <height>437</height>
+            <width>971</width>
+            <height>408</height>
            </rect>
           </property>
           <attribute name="label">
@@ -434,21 +460,21 @@
              </item>
              <item>
               <widget class="QPushButton" name="buttonFixLog">
-               <property name="text">
-                <string>Fix log</string>
-               </property>
                <property name="toolTip">
                 <string>Show history of fix attempts with Amazon response details</string>
+               </property>
+               <property name="text">
+                <string>Fix log</string>
                </property>
               </widget>
              </item>
              <item>
               <widget class="QPushButton" name="buttonCheckStatus">
-               <property name="text">
-                <string>Check status</string>
-               </property>
                <property name="toolTip">
                 <string>Read-only: current listing status, issues and relationships per marketplace + apparel_size schema rules. No submission.</string>
+               </property>
+               <property name="text">
+                <string>Check status</string>
                </property>
               </widget>
              </item>
@@ -464,11 +490,7 @@
               </widget>
              </item>
              <item>
-              <widget class="QComboBox" name="comboBoxBrokenAttrMarket">
-               <property name="minimumWidth">
-                <number>60</number>
-               </property>
-              </widget>
+              <widget class="QComboBox" name="comboBoxBrokenAttrMarket"/>
              </item>
              <item>
               <spacer name="horizontalSpacer_brokenAttr">
@@ -513,8 +535,8 @@
            <rect>
             <x>0</x>
             <y>0</y>
-            <width>956</width>
-            <height>437</height>
+            <width>971</width>
+            <height>408</height>
            </rect>
           </property>
           <attribute name="label">
@@ -628,8 +650,8 @@
            <rect>
             <x>0</x>
             <y>0</y>
-            <width>956</width>
-            <height>437</height>
+            <width>971</width>
+            <height>408</height>
            </rect>
           </property>
           <attribute name="label">
@@ -715,11 +737,11 @@
              </item>
              <item>
               <widget class="QPushButton" name="buttonGenerateSizeTableXlsx">
-               <property name="text">
-                <string>Generate xlsx</string>
-               </property>
                <property name="enabled">
                 <bool>false</bool>
+               </property>
+               <property name="text">
+                <string>Generate xlsx</string>
                </property>
               </widget>
              </item>
@@ -735,8 +757,8 @@
            <rect>
             <x>0</x>
             <y>0</y>
-            <width>956</width>
-            <height>437</height>
+            <width>971</width>
+            <height>408</height>
            </rect>
           </property>
           <attribute name="label">
@@ -981,8 +1003,8 @@
                            <rect>
                             <x>0</x>
                             <y>0</y>
-                            <width>462</width>
-                            <height>113</height>
+                            <width>469</width>
+                            <height>100</height>
                            </rect>
                           </property>
                           <layout class="QVBoxLayout" name="verticalLayoutAplusScrollContents">
@@ -1019,6 +1041,50 @@
               </layout>
              </widget>
             </widget>
+           </item>
+          </layout>
+         </widget>
+         <widget class="QWidget" name="pageTemu">
+          <attribute name="label">
+           <string>Temu</string>
+          </attribute>
+          <layout class="QVBoxLayout" name="verticalLayout_11">
+           <item>
+            <layout class="QHBoxLayout" name="horizontalLayout_9">
+             <item>
+              <widget class="QPushButton" name="buttonTemuEditStores">
+               <property name="text">
+                <string>Edit stores</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QPushButton" name="buttonTemuCreateOrUpdate">
+               <property name="toolTip">
+                <string>Will either create or update product pages in temu, for each store selected</string>
+               </property>
+               <property name="text">
+                <string>Create or update</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <spacer name="horizontalSpacer_7">
+               <property name="orientation">
+                <enum>Qt::Orientation::Horizontal</enum>
+               </property>
+               <property name="sizeHint" stdset="0">
+                <size>
+                 <width>40</width>
+                 <height>20</height>
+                </size>
+               </property>
+              </spacer>
+             </item>
+            </layout>
+           </item>
+           <item>
+            <widget class="QTableView" name="tableViewTemuStores"/>
            </item>
           </layout>
          </widget>

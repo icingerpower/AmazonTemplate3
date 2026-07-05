@@ -135,12 +135,17 @@ private:
     QDir                m_workingDir;
     QDir                m_productWorkingDir;
     QStringList         m_shoeWidths;
+    // Cached pieces of the description box (textEditAttributes), rebuilt by
+    // _refreshAttributesText() so excluded colors can be filtered anytime.
+    QString             m_attributesBaseText;
+    QStringList         m_colorLogs;
     QString              m_productType;
     QString              m_productTitle;
     QStringList         m_variantImagePaths;
     QString             m_variantBrowsedImagePath;
     QCoro::Task<void>   m_variantUploadTask;
     QString             m_mainImageLocalPath;
+    QString             m_mainImageUrl; // Amazon URL — identifies the main image's color
     QList<AbstractCli *>  m_availableClis;
     QNetworkAccessManager *m_imageNam = nullptr;
     QList<QPair<QString, QStringList>> m_colorVariants;
@@ -255,6 +260,23 @@ private:
     QString _brokenAttrMarketplaceId() const;
     void _downloadMainImage(const QString &url, const QString &asin);
     void _downloadVariantImages(const QList<QPair<QString, QStringList>> &colorImages);
+    // Moves excluded colors' reference images to {productDir}/excluded/ and
+    // restores re-included ones.
+    void _syncExcludedColorFiles();
+    // Same for the {ASIN}_main.jpg product photo when it shows an excluded
+    // color; repoints the prompt reference to an active color's photo.
+    void _syncMainImageExclusion();
+    // Child ASINs of excluded colors — skipped by every upload path.
+    QSet<QString> _excludedColorAsins() const;
+    // A+ element ids of excluded colors — hidden from the A+ tree and menu.
+    QSet<QString> _hiddenAplusElementIds() const;
+    // Applies the exclusion list everywhere: files, label, A+ tree, menu,
+    // description text.
+    void _applyColorExclusions();
+    // Rebuilds textEditAttributes from m_attributesBaseText + m_colorLogs,
+    // stripping excluded colors.
+    void _refreshAttributesText();
+    QString _filterColorLog(const QString &log) const;
     void _runCliPrompt(const QString &executable, const QStringList &args,
                        const QByteArray &stdinData, const QString &workDir,
                        QObject *guard, std::function<void(QString)> callback);
@@ -303,6 +325,8 @@ private:
     void           _initWorkflowCombo();
     void           _loadWorkflowPrompts();
     void           _rebuildPromptTabs();
+    void           _selectWorkflowForCategory();
+    static QString _workflowCategoryKey(const AbstractSizeCategory *cat);
     APlusWorkflow *_currentWorkflow() const;
     QStringList    _stepInstructions() const;
     // Saves tree expansion by stable family ID, calls rebuild(), then restores.

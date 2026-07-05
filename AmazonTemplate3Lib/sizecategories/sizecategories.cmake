@@ -11,6 +11,8 @@ SET(SIZECATEGORY_FILES
     ${CMAKE_CURRENT_LIST_DIR}/ShoesMenCategory.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ClothingKidCategory.h
     ${CMAKE_CURRENT_LIST_DIR}/ClothingKidCategory.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/RectangleCategory.h
+    ${CMAKE_CURRENT_LIST_DIR}/RectangleCategory.cpp
     ${CMAKE_CURRENT_LIST_DIR}/SizingTableTemplateModel.h
     ${CMAKE_CURRENT_LIST_DIR}/SizingTableTemplateModel.cpp
 )

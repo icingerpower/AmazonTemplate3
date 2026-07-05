@@ -533,14 +533,220 @@ public:
 };
 
 // ============================================================================
+// HomeObjectAPlusWorkflow — physical objects (carpets, book covers, home
+// goods…): no models wearing the product; dimensions & materials get their
+// own infographic-style image with inch + cm callouts.
+// ============================================================================
+class HomeObjectAPlusWorkflow : public APlusWorkflow
+{
+public:
+    QString id()   const override { return QStringLiteral("home_object"); }
+    QString name() const override
+    { return QCoreApplication::translate("APlusWorkflow", "Home / Object"); }
+
+    int stepCount() const override { return 3; }
+    QString stepName(int step) const override
+    {
+        switch (step) {
+        case 0: return QCoreApplication::translate("APlusWorkflow", "Hero Shot");
+        case 1: return QCoreApplication::translate("APlusWorkflow", "Dimensions / Materials");
+        case 2: return QCoreApplication::translate("APlusWorkflow", "Lifestyle Scene");
+        default: return {};
+        }
+    }
+
+    QString defaultDesktopPrompt(int step) const override
+    {
+        QSettings s;
+        QString val = readWorkflowSetting(s, id(), categoryKey(), QStringLiteral("step%1_desktop").arg(step));
+        if (val.isEmpty()) {
+            switch (step) {
+            case 0: return QCoreApplication::translate("APlusWorkflow",
+                "Generate a professional Amazon A+ desktop image (970x600 px, landscape) "
+                "of the product%1 — a physical object, no people. "
+                "Show it from a flattering 3/4 angle plus one complementary angle or detail, "
+                "on a clean minimal surface with soft studio lighting. "
+                "The product is the clear hero; colors, patterns and details must stay "
+                "faithful to the reference. Premium quality. "
+                "No text overlays, no watermarks. "
+                "Save as desktop.png in the current directory.");
+            case 1: return QCoreApplication::translate("APlusWorkflow",
+                "Generate a professional Amazon A+ desktop infographic image (970x600 px, landscape) "
+                "presenting the exact dimensions and materials of the product%1. "
+                "Show the product with clean dimension callout lines; label each measurement "
+                "in both inches and centimeters, inches first (use the dimensions from the "
+                "product description). Add one close-up inset of the material texture. "
+                "Minimal, elegant infographic style — the measurement labels are the only "
+                "text allowed, no other text, no watermarks. "
+                "Save as desktop.png in the current directory.");
+            case 2: return QCoreApplication::translate("APlusWorkflow",
+                "Generate a professional Amazon A+ desktop lifestyle image (970x600 px, landscape) "
+                "showing the product%1 in a realistic, aspirational setting that matches its use "
+                "(e.g. a carpet styled in a bright modern living room, a book cover on a desk "
+                "or bedside table). Natural light, editorial framing, elevated atmosphere — "
+                "the product remains the clear hero. No faces, no text overlays, no watermarks. "
+                "Save as desktop.png in the current directory.");
+            }
+        }
+        return val;
+    }
+
+    QString defaultMobilePrompt(int step) const override
+    {
+        QSettings s;
+        QString val = readWorkflowSetting(s, id(), categoryKey(), QStringLiteral("step%1_mobile").arg(step));
+        if (val.isEmpty()) {
+            switch (step) {
+            case 0: return QCoreApplication::translate("APlusWorkflow",
+                "Generate a professional Amazon A+ mobile image (600x600 px, square) "
+                "of the product%1 — a physical object, no people. "
+                "Single flattering 3/4 angle on a clean minimal surface, soft studio lighting. "
+                "Colors and details faithful to the reference, premium quality. "
+                "No text overlays, no watermarks. "
+                "Save as mobile.png in the current directory.");
+            case 1: return QCoreApplication::translate("APlusWorkflow",
+                "Generate a professional Amazon A+ mobile infographic image (600x600 px, square) "
+                "presenting the exact dimensions of the product%1. "
+                "Clean dimension callout lines, each measurement labeled in both inches and "
+                "centimeters, inches first (use the dimensions from the product description). "
+                "Minimal infographic style — measurement labels are the only text allowed. "
+                "Save as mobile.png in the current directory.");
+            case 2: return QCoreApplication::translate("APlusWorkflow",
+                "Generate a professional Amazon A+ mobile lifestyle image (600x600 px, square) "
+                "showing the product%1 in a realistic, aspirational setting matching its use. "
+                "Natural light, editorial framing, the product is the clear hero. "
+                "No faces, no text overlays. "
+                "Save as mobile.png in the current directory.");
+            }
+        }
+        return val;
+    }
+
+    int versionCount(int step) const override
+    {
+        QSettings s;
+        const QString key = QStringLiteral("step%1_versionCount").arg(step);
+        const QString catKey = workflowSettingKey(id(), categoryKey(), key);
+        if (s.contains(catKey)) return s.value(catKey, 1).toInt();
+        return s.value(workflowSettingKey(id(), {}, key), 1).toInt();
+    }
+
+    void setDefaultDesktopPrompt(int step, const QString &prompt) override
+    {
+        QSettings s;
+        s.setValue(workflowSettingKey(id(), categoryKey(), QStringLiteral("step%1_desktop").arg(step)), prompt);
+    }
+
+    void setDefaultMobilePrompt(int step, const QString &prompt) override
+    {
+        QSettings s;
+        s.setValue(workflowSettingKey(id(), categoryKey(), QStringLiteral("step%1_mobile").arg(step)), prompt);
+    }
+
+    void setVersionCount(int step, int count) override
+    {
+        QSettings s;
+        s.setValue(workflowSettingKey(id(), categoryKey(), QStringLiteral("step%1_versionCount").arg(step)), count);
+    }
+
+    QList<ImageSlotSpec> buildSlots(
+        const APlusContent * /*content*/,
+        const QStringList  &colors,
+        const QString      &focusColor,
+        const QString      &productDesc,
+        const QString      &mainImageHint,
+        const QStringList  &stepInstructions) const override
+    {
+        QList<ImageSlotSpec> result;
+
+        const QStringList orderedColors = orderColors(colors, focusColor);
+
+        const QString heroInstr      = stepInstructions.value(0);
+        const QString dimensionInstr = stepInstructions.value(1);
+        const QString lifestyleInstr = stepInstructions.value(2);
+
+        auto colorMention = [](const QString &color) -> QString {
+            return color.isEmpty() ? QString{}
+                : QCoreApplication::translate("APlusWorkflow", " in %1").arg(color);
+        };
+
+        // 1. Hero shot — one per color (single "image_hero" when no variants)
+        if (orderedColors.isEmpty()) {
+            ImageSlotSpec spec;
+            spec.elementId     = QStringLiteral("image_hero");
+            spec.displayName   = QCoreApplication::translate("APlusWorkflow", "Hero Shot");
+            spec.desktopPrompt = buildPreamble(productDesc, mainImageHint, heroInstr)
+                               + defaultDesktopPrompt(0).arg(QString{});
+            spec.mobilePrompt  = buildPreamble(productDesc, mainImageHint, heroInstr)
+                               + defaultMobilePrompt(0).arg(QString{});
+            spec.versionCount  = versionCount(0);
+            result << spec;
+        }
+        for (const QString &color : orderedColors) {
+            ImageSlotSpec spec;
+            spec.elementId     = QStringLiteral("image_color_") + colorSafeId(color);
+            spec.displayName   = QCoreApplication::translate("APlusWorkflow", "Hero — %1").arg(color);
+            spec.desktopPrompt = buildPreamble(productDesc, mainImageHint, heroInstr)
+                               + defaultDesktopPrompt(0).arg(colorMention(color));
+            spec.mobilePrompt  = buildPreamble(productDesc, mainImageHint, heroInstr)
+                               + defaultMobilePrompt(0).arg(colorMention(color));
+            spec.versionCount  = versionCount(0);
+            result << spec;
+        }
+
+        // 2. Dimensions & materials — one single slot (dimensions are shared
+        // across colors; the focus color is used for rendering)
+        {
+            const QString color = orderedColors.value(0);
+            ImageSlotSpec spec;
+            spec.elementId     = QStringLiteral("image_dimensions");
+            spec.displayName   = QCoreApplication::translate("APlusWorkflow", "Dimensions / Materials");
+            spec.desktopPrompt = buildPreamble(productDesc, mainImageHint, dimensionInstr)
+                               + defaultDesktopPrompt(1).arg(colorMention(color));
+            spec.mobilePrompt  = buildPreamble(productDesc, mainImageHint, dimensionInstr)
+                               + defaultMobilePrompt(1).arg(colorMention(color));
+            spec.versionCount  = versionCount(1);
+            result << spec;
+        }
+
+        // 3. Lifestyle scene — one per color (matches per-color hero slots)
+        for (const QString &color : orderedColors) {
+            ImageSlotSpec spec;
+            spec.elementId     = QStringLiteral("image_lifestyle_") + colorSafeId(color);
+            spec.displayName   = QCoreApplication::translate("APlusWorkflow", "Lifestyle — %1").arg(color);
+            spec.desktopPrompt = buildPreamble(productDesc, mainImageHint, lifestyleInstr)
+                               + defaultDesktopPrompt(2).arg(colorMention(color));
+            spec.mobilePrompt  = buildPreamble(productDesc, mainImageHint, lifestyleInstr)
+                               + defaultMobilePrompt(2).arg(colorMention(color));
+            spec.versionCount  = versionCount(2);
+            result << spec;
+        }
+        if (orderedColors.isEmpty()) {
+            ImageSlotSpec spec;
+            spec.elementId     = QStringLiteral("image_lifestyle");
+            spec.displayName   = QCoreApplication::translate("APlusWorkflow", "Lifestyle Scene");
+            spec.desktopPrompt = buildPreamble(productDesc, mainImageHint, lifestyleInstr)
+                               + defaultDesktopPrompt(2).arg(QString{});
+            spec.mobilePrompt  = buildPreamble(productDesc, mainImageHint, lifestyleInstr)
+                               + defaultMobilePrompt(2).arg(QString{});
+            spec.versionCount  = versionCount(2);
+            result << spec;
+        }
+
+        return result;
+    }
+};
+
+// ============================================================================
 // Factory
 // ============================================================================
-static GenericAPlusWorkflow  sGeneric;
-static ClothingAPlusWorkflow sClothing;
+static GenericAPlusWorkflow    sGeneric;
+static ClothingAPlusWorkflow   sClothing;
+static HomeObjectAPlusWorkflow sHomeObject;
 
 const QList<APlusWorkflow *> &APlusWorkflow::all()
 {
-    static QList<APlusWorkflow *> lst = { &sClothing, &sGeneric };
+    static QList<APlusWorkflow *> lst = { &sClothing, &sHomeObject, &sGeneric };
     return lst;
 }
 

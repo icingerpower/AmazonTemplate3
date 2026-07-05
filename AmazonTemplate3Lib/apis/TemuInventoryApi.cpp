@@ -818,3 +818,49 @@ QCoro::Task<bool> TemuInventoryApi::shipOrder(const QString &parentOrderSn, cons
 
     co_return true;
 }
+
+QCoro::Task<void> TemuInventoryApi::fetchComplianceEntities(int complianceInfoType,
+                                                            QList<RepEntity> *out)
+{
+    out->clear();
+
+    const int pageSize = 20; // documented maximum
+    const int kMaxPages = 20;
+    for (int page = 1; page <= kMaxPages; ++page) {
+        QJsonObject businessParams;
+        businessParams.insert(QStringLiteral("page"), page);
+        businessParams.insert(QStringLiteral("size"), pageSize);
+        businessParams.insert(QStringLiteral("complianceInfoType"), complianceInfoType);
+        businessParams.insert(QStringLiteral("language"), QStringLiteral("en"));
+
+        QJsonObject result;
+        co_await _postRequest(QStringLiteral("bg.local.goods.compliance.info.fill.list.query"),
+                              businessParams, &result);
+        if (!m_lastError.isEmpty())
+            co_return;
+
+        const int total = result.value(QStringLiteral("total")).toInt();
+        const QJsonArray list = result.value(QStringLiteral("authRepInfoList")).toArray();
+        for (const QJsonValue &val : list) {
+            const QJsonObject o = val.toObject();
+            RepEntity e;
+            e.repId = static_cast<qint64>(o.value(QStringLiteral("repId")).toDouble());
+            e.name  = o.value(QStringLiteral("repName")).toString();
+            const QJsonObject addr = o.value(QStringLiteral("repAddressInfo")).toObject();
+            QStringList parts;
+            for (const QString &key : {QStringLiteral("addressLineOne"),
+                                       QStringLiteral("addressLineTwo"),
+                                       QStringLiteral("city"),
+                                       QStringLiteral("stateName"),
+                                       QStringLiteral("regionName")}) {
+                const QString part = addr.value(key).toString();
+                if (!part.isEmpty())
+                    parts << part;
+            }
+            e.address = parts.join(QStringLiteral(", "));
+            out->append(e);
+        }
+        if (list.isEmpty() || out->size() >= total)
+            co_return;
+    }
+}

@@ -608,6 +608,9 @@ static AmazonCatalogApi::AsinItem parseAsinItem(const QString& asin, const QByte
     }
 
     const QJsonObject attrs = root.value("attributes").toObject();
+    item.brand = firstAttrValue(attrs, "brand");
+    if (item.brand.isEmpty() && !summaries.isEmpty())
+        item.brand = summaries.first().toObject().value("brand").toString();
     item.color = firstAttrValue(attrs, "color");
     item.size  = firstAttrValue(attrs, "size");
     item.hasSizeTable = !attrs.value("size_chart_node_id").toArray().isEmpty();

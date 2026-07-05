@@ -57,6 +57,19 @@ public:
                                 const QString &countryCode = {},
                                 std::function<void(const QString&)> onProgress = {});
 
+    // GPSR compliance entities registered in the seller account
+    // (bg.local.goods.compliance.info.fill.list.query).
+    // complianceInfoType: 2 = EU responsible person (GSPR rep), 3 = manufacturer,
+    // 4 = after-sales responsible person.
+    struct RepEntity {
+        qint64  repId = 0;
+        QString name;
+        QString address; // single-line summary for tooltips
+    };
+    static constexpr int COMPLIANCE_TYPE_GSPR_REP     = 2;
+    static constexpr int COMPLIANCE_TYPE_MANUFACTURER = 3;
+    QCoro::Task<void> fetchComplianceEntities(int complianceInfoType, QList<RepEntity> *out);
+
     QString lastError() const { return m_lastError; }
 
 private:

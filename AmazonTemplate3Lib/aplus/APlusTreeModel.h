@@ -4,6 +4,7 @@
 #include <QAbstractItemModel>
 #include <QList>
 #include <QModelIndex>
+#include <QSet>
 #include <QString>
 #include <QVariant>
 
@@ -42,6 +43,10 @@ public:
     // - else          → -1
     int elementIndexForLocation(const Location &loc) const;
 
+    // Families whose familyId is in this set are omitted from the tree
+    // (used to hide elements of excluded colors). Takes effect on rebuild().
+    void setHiddenFamilyIds(const QSet<QString> &ids) { m_hiddenFamilyIds = ids; }
+
     void rebuild();
 
     QModelIndex index(int row, int col, const QModelIndex &parent = {}) const override;
@@ -77,6 +82,7 @@ private:
 
     APlusContent       *m_content = nullptr;
     QList<FamilyNode>   m_families;
+    QSet<QString>       m_hiddenFamilyIds;
 };
 
 #endif // APLUSTREEMODEL_H

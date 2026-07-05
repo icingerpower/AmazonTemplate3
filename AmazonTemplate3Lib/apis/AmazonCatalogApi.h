@@ -28,6 +28,7 @@ public:
         QString asin;
         QString sku;        // usually empty when loaded from ASIN only
         QString title;
+        QString brand;      // attribute "brand" value (summaries fallback)
         QString color;      // attribute "color" value (NOT "color_map")
         QString size;       // attribute "size" value
         bool    hasSizeTable = false; // true if "size_chart_node_id" attribute is non-empty
