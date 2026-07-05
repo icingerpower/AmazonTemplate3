@@ -171,8 +171,9 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventory(QStringList skus,
         query.addQueryItem("granularityType", "Marketplace");
         query.addQueryItem("granularityId", m_marketplaceId);
         query.addQueryItem("marketplaceIds", m_marketplaceId); // required by the API
-        for (const QString &sku : chunk)
-            query.addQueryItem("sellerSkus", sku);
+        // SP-API list parameters are comma-separated, NOT repeated: with
+        // repeated sellerSkus params Amazon silently reads only the first one.
+        query.addQueryItem("sellerSkus", chunk.join(QLatin1Char(',')));
         url.setQuery(query);
 
         for (int attempt = 0; attempt < 3; ++attempt) {
