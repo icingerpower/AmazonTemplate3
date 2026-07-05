@@ -1820,6 +1820,78 @@ QCoro::Task<void> AmazonCatalogApi::fetchApparelSizeSchemaInfo(
 }
 
 // ---------------------------------------------------------------------------
+// deleteListingAttribute — direct PATCH op=delete on a single listing attribute
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonCatalogApi::deleteListingAttribute(
+    QString marketplaceId, QString sku, QString productType, QString attribute,
+    QJsonArray storedValue, bool* success, QString* detailsOut)
+{
+    *success = false;
+    if (detailsOut) detailsOut->clear();
+
+    const QString sellerId = sellerIdForMarketplace(marketplaceId);
+    if (sellerId.isEmpty()) co_return;
+
+    QString token;
+    co_await _getAccessToken(lwaRegionForMarketplace(marketplaceId), &token);
+    if (token.isEmpty()) co_return;
+
+    const QJsonObject bodyObj{
+        {QStringLiteral("productType"), productType},
+        {QStringLiteral("patches"), QJsonArray{QJsonObject{
+            {QStringLiteral("op"),    QStringLiteral("delete")},
+            {QStringLiteral("path"),  QStringLiteral("/attributes/") + attribute},
+            {QStringLiteral("value"), storedValue},
+        }}},
+    };
+    const QByteArray jsonBody = QJsonDocument(bodyObj).toJson(QJsonDocument::Compact);
+
+    QUrl url;
+    url.setScheme(QStringLiteral("https"));
+    url.setHost(endpointForMarketplace(marketplaceId));
+    url.setPath(QStringLiteral("/listings/2021-08-01/items/%1/%2").arg(sellerId, sku));
+    QUrlQuery q;
+    q.addQueryItem(QStringLiteral("marketplaceIds"), marketplaceId);
+    q.addQueryItem(QStringLiteral("issueLocale"),    QStringLiteral("en_US"));
+    url.setQuery(q);
+
+    QNetworkRequest req(url);
+    req.setRawHeader("x-amz-access-token", token.toUtf8());
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    req.setRawHeader("accept", "application/json");
+
+    qDebug() << "AmazonCatalogApi: PATCH(delete" << attribute << ")" << sku << jsonBody.left(300);
+    QNetworkReply* reply = _nam()->sendCustomRequest(req, "PATCH", jsonBody);
+    co_await qCoro(reply).waitForFinished();
+
+    const QByteArray data = reply->readAll();
+    const int httpStatus  = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    reply->deleteLater();
+
+    const QJsonObject respObj  = QJsonDocument::fromJson(data).object();
+    const QString amazonStatus = respObj.value(QStringLiteral("status")).toString();
+    QStringList issueSummaries;
+    for (const QJsonValue &iv : respObj.value(QStringLiteral("issues")).toArray()) {
+        const QJsonObject iobj = iv.toObject();
+        const QString msg = iobj.value(QStringLiteral("message")).toString();
+        if (!msg.isEmpty())
+            issueSummaries << QStringLiteral("[%1] %2")
+                                  .arg(iobj.value(QStringLiteral("severity")).toString(), msg);
+    }
+    QString details = QStringLiteral("HTTP %1 | %2").arg(httpStatus)
+                          .arg(amazonStatus.isEmpty() ? QStringLiteral("(none)") : amazonStatus);
+    if (!issueSummaries.isEmpty())
+        details += QStringLiteral(" | ") + issueSummaries.join(QStringLiteral(" ; "));
+    if (detailsOut) *detailsOut = details;
+
+    *success = (httpStatus < 400 && amazonStatus != QStringLiteral("INVALID"));
+    if (!*success)
+        qWarning() << "deleteListingAttribute failed for" << sku << "/" << attribute << ":" << details;
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
 // fetchListingGtin — GET /listings/2021-08-01/items/{sellerId}/{sku}?includedData=attributes
 // Reads externally_assigned_product_identifier from the seller's own listing data.
 // Tries primary marketplace first, then other same-region markets, then the other region.

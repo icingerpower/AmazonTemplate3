@@ -261,6 +261,19 @@ public:
                                                   QString productType,
                                                   QSet<QString>* propsOut);
 
+    // Direct Listings Items API PATCH with op=delete — removes the given stored
+    // entries of an attribute. Unlike JSON_LISTINGS_FEED (which does not support
+    // delete), the direct PATCH endpoint does. Used to clean legacy attributes
+    // that the current product type schema no longer defines (e.g. a stale
+    // apparel_size on an APPAREL listing) or wrong-language entries.
+    // storedValue: the exact entries to delete (fetch them first).
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> deleteListingAttribute(QString marketplaceId, QString sku,
+                                             QString productType, QString attribute,
+                                             QJsonArray storedValue,
+                                             bool* success,
+                                             QString* detailsOut = nullptr);
+
     // Builds and uploads a JSON_LISTINGS_FEED variation relationship feed via the Feeds API.
     // Fetches nothing — all data is passed in. Polls until DONE (3 min max).
     // Returns a human-readable status string in *resultOut.

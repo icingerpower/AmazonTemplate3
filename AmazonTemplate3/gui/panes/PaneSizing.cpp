@@ -7765,7 +7765,7 @@ static QString langTagForMarketplace(const QString &mpId)
         {QStringLiteral("A13V1IB3VIYZZH"), QStringLiteral("fr_FR")},
         {QStringLiteral("A1RKKUPIHCS9HS"), QStringLiteral("es_ES")},
         {QStringLiteral("APJ6JRA9NG5V4"),  QStringLiteral("it_IT")},
-        {QStringLiteral("AMEN7PMS3EDWL"),  QStringLiteral("nl_BE")},
+        {QStringLiteral("AMEN7PMS3EDWL"),  QStringLiteral("fr_BE")}, // BE schema: only fr_BE allowed
         {QStringLiteral("A1805IZSGTT6HS"), QStringLiteral("nl_NL")},
         {QStringLiteral("A2NODRKZP88ZB9"), QStringLiteral("sv_SE")},
         {QStringLiteral("A1C3SOZRARQ6R3"), QStringLiteral("pl_PL")},
@@ -7884,6 +7884,36 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
         // The SKU's own listing on the TARGET marketplace is the best source:
         // values are already localized and schema-shaped for this marketplace.
         const QJsonObject localAttrs = localBySku.value(e.sku);
+
+        // ── Legacy cleanup (direct PATCH delete — feeds cannot delete) ──────
+        // 1. A stored apparel_size on a listing whose schema doesn't define it
+        //    can never validate and permanently blocks the family (DE case).
+        if (!hasApparelSize && localAttrs.contains(QStringLiteral("apparel_size"))) {
+            const QJsonArray stale = localAttrs.value(QStringLiteral("apparel_size")).toArray();
+            bool ok = false; QString det;
+            co_await m_api->deleteListingAttribute(mpId, e.sku, actualPt,
+                                                   QStringLiteral("apparel_size"),
+                                                   stale, &ok, &det);
+            logOut->append(tr("%1: delete legacy apparel_size → %2").arg(e.sku, det));
+        }
+        // 2. size/color entries stored under a language_tag the marketplace does
+        //    not accept (e.g. nl_BE on BE, which only allows fr_BE) — they raise
+        //    100720 and coexist with the correct entry (selector = language_tag).
+        for (const QString &attr : {QStringLiteral("size"), QStringLiteral("color")}) {
+            if (!ptProps.contains(attr) || !localAttrs.contains(attr)) continue;
+            QJsonArray wrongLang;
+            for (const QJsonValue &jv : localAttrs.value(attr).toArray()) {
+                const QString lt = jv.toObject().value(QStringLiteral("language_tag")).toString();
+                if (!lt.isEmpty() && lt != langTag)
+                    wrongLang.append(jv);
+            }
+            if (wrongLang.isEmpty()) continue;
+            bool ok = false; QString det;
+            co_await m_api->deleteListingAttribute(mpId, e.sku, actualPt, attr,
+                                                   wrongLang, &ok, &det);
+            logOut->append(tr("%1: delete wrong-language %2 entries (%3) → %4")
+                               .arg(e.sku, attr).arg(wrongLang.size()).arg(det));
+        }
 
         QJsonArray patches;
         auto addPatch = [&](const QString &key, const QJsonValue &val) {
