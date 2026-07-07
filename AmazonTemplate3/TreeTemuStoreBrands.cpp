@@ -64,6 +64,33 @@ QString TreeTemuStoreBrands::_storeKey(const StoreNode &store)
     return key;
 }
 
+void TreeTemuStoreBrands::lookupBrandEntities(const QString &country, const QString &label,
+                                              const QString &brand,
+                                              QString *manufacturerName, QString *gsprRepName,
+                                              qint64 *manufacturerId, qint64 *gsprRepId)
+{
+    manufacturerName->clear();
+    gsprRepName->clear();
+    if (manufacturerId) *manufacturerId = 0;
+    if (gsprRepId)      *gsprRepId = 0;
+    QString key = country + QLatin1Char('|') + label;
+    key.replace(QLatin1Char('/'), QLatin1Char('_'));
+
+    auto s = WorkingDirectoryManager::instance()->settings();
+    const int size = s->beginReadArray(GROUP_KEY + QLatin1Char('/') + key);
+    for (int i = 0; i < size; ++i) {
+        s->setArrayIndex(i);
+        if (s->value(QStringLiteral("brand")).toString().compare(brand, Qt::CaseInsensitive) == 0) {
+            *manufacturerName = s->value(QStringLiteral("manufacturerName")).toString();
+            *gsprRepName      = s->value(QStringLiteral("gsprRepName")).toString();
+            if (manufacturerId) *manufacturerId = s->value(QStringLiteral("manufacturerId")).toLongLong();
+            if (gsprRepId)      *gsprRepId      = s->value(QStringLiteral("gsprRepId")).toLongLong();
+            break;
+        }
+    }
+    s->endArray();
+}
+
 void TreeTemuStoreBrands::setEntityChoices(int storeRow,
                                            const QList<TemuInventoryApi::RepEntity> &manufacturers,
                                            const QList<TemuInventoryApi::RepEntity> &gsprReps)

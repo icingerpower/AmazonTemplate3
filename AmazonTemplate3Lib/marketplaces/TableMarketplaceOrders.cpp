@@ -73,5 +73,5 @@ QVariant TableMarketplaceOrders::headerData(int section, Qt::Orientation orienta
 Qt::ItemFlags TableMarketplaceOrders::flags(const QModelIndex &index) const
 {
     if (!index.isValid()) return Qt::NoItemFlags;
-    return Qt::ItemIsSelectable | Qt::ItemIsEnabled;
+    return Qt::ItemIsSelectable | Qt::ItemIsEnabled | Qt::ItemIsEditable;
 }

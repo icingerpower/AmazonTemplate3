@@ -864,3 +864,341 @@ QCoro::Task<void> TemuInventoryApi::fetchComplianceEntities(int complianceInfoTy
             co_return;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Product create/update
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> TemuInventoryApi::lookupGoods(const QStringList &outSkuSns, ExistingGoods *out)
+{
+    *out = ExistingGoods{};
+    if (outSkuSns.isEmpty())
+        co_return;
+
+    QJsonArray snArr;
+    for (const QString &sn : outSkuSns)
+        snArr.append(sn);
+
+    // "ALL" excludes just-created products still in INCOMPLETE/DRAFT — search
+    // those statuses too so a freshly-published product is detected for update.
+    QJsonArray goods;
+    for (const QString &status : {QStringLiteral("ALL"), QStringLiteral("INCOMPLETE"),
+                                  QStringLiteral("DRAFT")}) {
+        QJsonObject businessParams;
+        businessParams.insert(QStringLiteral("goodsSearchType"), status);
+        businessParams.insert(QStringLiteral("outSkuSnList"), snArr);
+        businessParams.insert(QStringLiteral("pageSize"), 20);
+        QJsonObject result;
+        co_await _postRequest(QStringLiteral("temu.local.goods.list.retrieve"), businessParams, &result);
+        if (!m_lastError.isEmpty())
+            co_return;
+        goods = result.value(QStringLiteral("goodsList")).toArray();
+        if (!goods.isEmpty())
+            break;
+    }
+    if (goods.isEmpty())
+        co_return;
+
+    const QJsonObject g = goods.first().toObject();
+    out->found   = true;
+    out->goodsId = static_cast<qint64>(g.value(QStringLiteral("goodsId")).toVariant().toLongLong());
+    out->catId   = g.value(QStringLiteral("catId")).toVariant().toString();
+    for (const QJsonValue &sv : g.value(QStringLiteral("skuInfoList")).toArray()) {
+        const QJsonObject s = sv.toObject();
+        const QString sn = s.value(QStringLiteral("skuSn")).toString();
+        const qint64 id  = static_cast<qint64>(s.value(QStringLiteral("skuId")).toVariant().toLongLong());
+        if (!sn.isEmpty())
+            out->skuIdBySkuSn.insert(sn, id);
+    }
+
+    // The category NAME is not in the list response; the detail query carries
+    // it (catName = the full "A / B / Leaf" path) — cheap for a single goods.
+    if (out->goodsId != 0) {
+        QJsonObject detailParams;
+        detailParams.insert(QStringLiteral("goodsId"), out->goodsId);
+        QJsonObject detail;
+        co_await _postRequest(QStringLiteral("bg.local.goods.detail.query"), detailParams, &detail);
+        m_lastError.clear(); // the name is a nicety; ignore detail failures
+        out->catName = detail.value(QStringLiteral("catName")).toString();
+    }
+    co_return;
+}
+
+QCoro::Task<void> TemuInventoryApi::fetchCategoryTemplate(qint64 catId, QList<CategoryAttr> *out)
+{
+    out->clear();
+    QJsonObject businessParams;
+    businessParams.insert(QStringLiteral("catId"), catId);
+    businessParams.insert(QStringLiteral("language"), QStringLiteral("en"));
+
+    QJsonObject result;
+    co_await _postRequest(QStringLiteral("bg.local.goods.template.get"), businessParams, &result);
+    if (!m_lastError.isEmpty())
+        co_return;
+
+    const QJsonObject ti = result.value(QStringLiteral("templateInfo")).toObject();
+    for (const QJsonValue &pv : ti.value(QStringLiteral("goodsProperties")).toArray()) {
+        const QJsonObject p = pv.toObject();
+        CategoryAttr attr;
+        attr.pid               = static_cast<qint64>(p.value(QStringLiteral("pid")).toVariant().toLongLong());
+        attr.templatePid       = static_cast<qint64>(p.value(QStringLiteral("templatePid")).toVariant().toLongLong());
+        attr.refPid            = static_cast<qint64>(p.value(QStringLiteral("refPid")).toVariant().toLongLong());
+        attr.name              = p.value(QStringLiteral("name")).toString();
+        attr.required          = p.value(QStringLiteral("required")).toBool();
+        attr.controlType       = p.value(QStringLiteral("controlType")).toInt(1);
+        attr.parentTemplatePid = static_cast<qint64>(p.value(QStringLiteral("parentTemplatePid")).toVariant().toLongLong());
+        for (const QJsonValue &vv : p.value(QStringLiteral("values")).toArray()) {
+            const QJsonObject v = vv.toObject();
+            attr.values.append({v.value(QStringLiteral("value")).toString(),
+                                static_cast<qint64>(v.value(QStringLiteral("vid")).toVariant().toLongLong())});
+        }
+        out->append(attr);
+    }
+    co_return;
+}
+
+QCoro::Task<void> TemuInventoryApi::fetchCategories(qint64 parentCatId, QList<CatNode> *out)
+{
+    out->clear();
+    QJsonObject businessParams;
+    businessParams.insert(QStringLiteral("parentCatId"), parentCatId);
+    businessParams.insert(QStringLiteral("language"), QStringLiteral("en"));
+
+    QJsonObject result;
+    co_await _postRequest(QStringLiteral("bg.local.goods.cats.get"), businessParams, &result);
+    if (!m_lastError.isEmpty())
+        co_return;
+
+    for (const QJsonValue &cv : result.value(QStringLiteral("goodsCatsList")).toArray()) {
+        const QJsonObject c = cv.toObject();
+        CatNode node;
+        node.catId   = static_cast<qint64>(c.value(QStringLiteral("catId")).toVariant().toLongLong());
+        node.catName = c.value(QStringLiteral("catName")).toString();
+        node.leaf    = c.value(QStringLiteral("leaf")).toBool();
+        out->append(node);
+    }
+    co_return;
+}
+
+QCoro::Task<void> TemuInventoryApi::recommendCategory(const QString &goodsName,
+                                                      const QString &description,
+                                                      const QString &imageUrl,
+                                                      QList<qint64> *candidateCatIds)
+{
+    candidateCatIds->clear();
+
+    QJsonObject businessParams;
+    businessParams.insert(QStringLiteral("goodsName"), goodsName);
+    if (!description.isEmpty())
+        businessParams.insert(QStringLiteral("description"), description);
+    if (!imageUrl.isEmpty())
+        businessParams.insert(QStringLiteral("imageUrl"), imageUrl);
+
+    QJsonObject result;
+    co_await _postRequest(QStringLiteral("bg.local.goods.category.recommend"), businessParams, &result);
+    if (!m_lastError.isEmpty())
+        co_return;
+
+    // catIdList is a list of candidate leaf categories (NOT a parent→child path).
+    for (const QJsonValue &idv : result.value(QStringLiteral("catIdList")).toArray()) {
+        const qint64 id = static_cast<qint64>(idv.toVariant().toLongLong());
+        if (id != 0)
+            candidateCatIds->append(id);
+    }
+    co_return;
+}
+
+QCoro::Task<void> TemuInventoryApi::resolveCategoryPaths(const QList<qint64> &targetIds,
+                                                         int maxCalls,
+                                                         QHash<qint64, QString> *idToPath)
+{
+    idToPath->clear();
+    QSet<qint64> remaining;
+    for (qint64 id : targetIds) {
+        if (m_catPathCache.contains(id))
+            idToPath->insert(id, m_catPathCache.value(id));
+        else
+            remaining.insert(id);
+    }
+    if (remaining.isEmpty())
+        co_return;
+
+    // Breadth-first crawl from the root, tracking each node's path, until all
+    // targets are found or the call budget is exhausted. Every node seen is
+    // cached for future lookups.
+    struct Item { qint64 id; QString path; };
+    QList<Item> queue;
+    queue.append({0, QString{}});
+    int calls = 0;
+    while (!queue.isEmpty() && !remaining.isEmpty() && calls < maxCalls) {
+        const Item cur = queue.takeFirst();
+        QList<CatNode> children;
+        co_await fetchCategories(cur.id, &children);
+        ++calls;
+        if (!m_lastError.isEmpty()) { m_lastError.clear(); continue; }
+        for (const CatNode &n : children) {
+            const QString path = cur.path.isEmpty()
+                ? n.catName : (cur.path + QStringLiteral(" › ") + n.catName);
+            m_catPathCache.insert(n.catId, path);
+            if (remaining.remove(n.catId))
+                idToPath->insert(n.catId, path);
+            if (!n.leaf)
+                queue.append({n.catId, path});
+        }
+    }
+    co_return;
+}
+
+QCoro::Task<QString> TemuInventoryApi::uploadImageToTemu(const QString &publicUrl)
+{
+    if (publicUrl.isEmpty())
+        co_return QString{};
+
+    QJsonObject businessParams;
+    businessParams.insert(QStringLiteral("fileUrl"), publicUrl);
+    businessParams.insert(QStringLiteral("scalingType"), 0); // keep original
+
+    QJsonObject result;
+    co_await _postRequest(QStringLiteral("bg.local.goods.image.upload"), businessParams, &result);
+    if (!m_lastError.isEmpty())
+        co_return QString{};
+
+    // The processed image URL comes back under one of these keys.
+    for (const QString &key : {QStringLiteral("url"), QStringLiteral("imageUrl"),
+                               QStringLiteral("fileUrl"), QStringLiteral("processedUrl")}) {
+        const QString u = result.value(key).toString();
+        if (!u.isEmpty())
+            co_return u;
+    }
+    co_return QString{};
+}
+
+QCoro::Task<void> TemuInventoryApi::fetchFreightTemplateId(QString *out)
+{
+    out->clear();
+    QJsonObject result;
+    co_await _postRequest(QStringLiteral("bg.freight.template.list.query"), QJsonObject{}, &result);
+    if (!m_lastError.isEmpty())
+        co_return;
+    const QJsonArray list = result.value(QStringLiteral("templateList")).toArray();
+    if (!list.isEmpty())
+        *out = list.first().toObject().value(QStringLiteral("templateId")).toString();
+}
+
+QCoro::Task<void> TemuInventoryApi::generateSpecId(qint64 catId, qint64 parentSpecId,
+                                                   const QString &childSpecName, qint64 *specIdOut)
+{
+    *specIdOut = 0;
+    QJsonObject businessParams;
+    businessParams.insert(QStringLiteral("catId"), catId);
+    businessParams.insert(QStringLiteral("parentSpecId"), parentSpecId);
+    businessParams.insert(QStringLiteral("childSpecName"), childSpecName);
+    QJsonObject result;
+    co_await _postRequest(QStringLiteral("bg.local.goods.spec.id.get"), businessParams, &result);
+    if (!m_lastError.isEmpty())
+        co_return;
+    *specIdOut = static_cast<qint64>(result.value(QStringLiteral("specId")).toVariant().toLongLong());
+}
+
+QCoro::Task<qint64> TemuInventoryApi::publishGoods(const QJsonObject &payload, bool isUpdate, qint64 goodsId)
+{
+    QJsonObject businessParams = payload;
+    const QString method = isUpdate
+        ? QStringLiteral("bg.local.goods.update")
+        : QStringLiteral("bg.local.goods.add");
+    if (isUpdate)
+        businessParams.insert(QStringLiteral("goodsId"), goodsId);
+
+    QJsonObject result;
+    co_await _postRequest(method, businessParams, &result);
+    if (!m_lastError.isEmpty())
+        co_return 0;
+
+    const qint64 id = static_cast<qint64>(result.value(QStringLiteral("goodsId")).toVariant().toLongLong());
+    co_return id != 0 ? id : goodsId;
+}
+
+QCoro::Task<qint64> TemuInventoryApi::publishGoodsV3(const QJsonObject &payload)
+{
+    QJsonObject result;
+    co_await _postRequest(QStringLiteral("temu.local.goods.v3.add"), payload, &result);
+    if (!m_lastError.isEmpty())
+        co_return 0;
+    co_return static_cast<qint64>(result.value(QStringLiteral("goodsId")).toVariant().toLongLong());
+}
+
+QCoro::Task<bool> TemuInventoryApi::updateGoodsPartial(qint64 goodsId, const QJsonObject &fields)
+{
+    QJsonObject businessParams = fields;
+    businessParams.insert(QStringLiteral("goodsId"), goodsId);
+    QJsonObject result;
+    co_await _postRequest(QStringLiteral("bg.local.goods.partial.update"), businessParams, &result);
+    co_return m_lastError.isEmpty();
+}
+
+QCoro::Task<bool> TemuInventoryApi::submitCompliance(qint64 goodsId, qint64 manufacturerRepId,
+                                                     qint64 gsprRepId,
+                                                     const QString &productIdentifier)
+{
+    // GPSR compliance. Verified shapes (2026-07-07 against goodsId
+    // 609458725987182/609527445430843: gpsrInfoList + templateId-51 status flip
+    // 1 → 5 in bg.local.compliance.goods.list.query).
+    //
+    // Responsible persons — `gpsrInfo` with two SEPARATE lists (NOT the
+    // `repInfoList` we used before, which the endpoint silently ignored):
+    //   gpsrInfo.manufacturerList      = [{repType:3, repId}]
+    //   gpsrInfo.responsiblePersonList = [{repType:2, repId}]
+    //
+    // Product Identification (templateId 51, refPid 1100100115) — the value goes
+    // in `multiLineInputs[].name` ONLY. Adding the sibling "name" on the $value
+    // object makes Temu reject every value with 150011031 "non-compliant". Free
+    // text is accepted (a GTIN or a SKU/model reference both work).
+    QJsonArray manufacturerList, responsiblePersonList;
+    if (manufacturerRepId != 0) {
+        QJsonObject o;
+        o.insert(QStringLiteral("repType"), 3);
+        o.insert(QStringLiteral("repId"), manufacturerRepId);
+        manufacturerList.append(o);
+    }
+    if (gsprRepId != 0) {
+        QJsonObject o;
+        o.insert(QStringLiteral("repType"), 2);
+        o.insert(QStringLiteral("repId"), gsprRepId);
+        responsiblePersonList.append(o);
+    }
+    if (manufacturerList.isEmpty() && responsiblePersonList.isEmpty()
+        && productIdentifier.trimmed().isEmpty())
+        co_return true; // nothing to submit
+
+    QJsonObject businessParams;
+    businessParams.insert(QStringLiteral("goodsId"), goodsId);
+
+    if (!manufacturerList.isEmpty() || !responsiblePersonList.isEmpty()) {
+        QJsonObject gpsrInfo;
+        gpsrInfo.insert(QStringLiteral("skip"), false);
+        if (!manufacturerList.isEmpty())
+            gpsrInfo.insert(QStringLiteral("manufacturerList"), manufacturerList);
+        if (!responsiblePersonList.isEmpty())
+            gpsrInfo.insert(QStringLiteral("responsiblePersonList"), responsiblePersonList);
+        businessParams.insert(QStringLiteral("gpsrInfo"), gpsrInfo);
+    }
+
+    if (!productIdentifier.trimmed().isEmpty()) {
+        QJsonObject line;
+        line.insert(QStringLiteral("name"), productIdentifier.trimmed());
+        QJsonObject value;
+        value.insert(QStringLiteral("multiLineInputs"), QJsonArray{line});
+        QJsonObject inputText;
+        inputText.insert(QStringLiteral("1100100115"), value);
+        QJsonObject detail;
+        detail.insert(QStringLiteral("templateId"), 51);
+        detail.insert(QStringLiteral("inputText"), inputText);
+        QJsonObject extraTemplate;
+        extraTemplate.insert(QStringLiteral("extraTemplateDetailList"), QJsonArray{detail});
+        businessParams.insert(QStringLiteral("extraTemplate"), extraTemplate);
+    }
+
+    QJsonObject result;
+    co_await _postRequest(QStringLiteral("bg.local.goods.compliance.edit"), businessParams, &result);
+    co_return m_lastError.isEmpty();
+}

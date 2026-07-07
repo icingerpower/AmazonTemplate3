@@ -60,4 +60,8 @@ SET(GUI_FILES
     ${CMAKE_CURRENT_LIST_DIR}/DialogGenStorefrontImage.cpp
     ${CMAKE_CURRENT_LIST_DIR}/DialogTemuStoreBrands.h
     ${CMAKE_CURRENT_LIST_DIR}/DialogTemuStoreBrands.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/DialogTemuCreateProduct.h
+    ${CMAKE_CURRENT_LIST_DIR}/DialogTemuCreateProduct.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/DialogKeywordTemplates.h
+    ${CMAKE_CURRENT_LIST_DIR}/DialogKeywordTemplates.cpp
 )

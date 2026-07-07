@@ -126,6 +126,17 @@ private:
     std::unique_ptr<AmazonCatalogApi> m_api;
     std::unique_ptr<AmazonAplusApi>   m_aplusApi;
     QString                           m_currentAsin;
+    // The exact ASIN string passed to m_treeModel->load() for the in-flight
+    // request (set right before calling load()). Used by _findExistingProductDir
+    // to recognize a previously-seen product even when the parent ASIN this
+    // probe resolves to differs from earlier sessions.
+    QString                           m_requestedAsin;
+    // Set by onLoadSubFolderClicked to the exact folder the user picked from
+    // the list, right before calling load(). When non-empty, the modelReset /
+    // attributesFetched handlers use it verbatim instead of re-deriving the
+    // folder from ASIN/SKU heuristics — the user already told us which folder
+    // this is, so there's nothing to guess. Cleared once consumed.
+    QString                           m_pinnedProductDir;
     std::unique_ptr<TreeSizingAsins>  m_treeModel;
     QStandardItemModel               *m_sizeTableModel = nullptr;
     bool                              m_generatedSuccessfully = false;
@@ -146,6 +157,11 @@ private:
     QCoro::Task<void>   m_variantUploadTask;
     QString             m_mainImageLocalPath;
     QString             m_mainImageUrl; // Amazon URL — identifies the main image's color
+    QString             m_currentBrand;
+    QStringList         m_currentBulletPoints;
+
+    QStandardItemModel *m_temuStoreSelectModel = nullptr;
+    bool                m_temuStoreSelectGuard = false;
     QList<AbstractCli *>  m_availableClis;
     QNetworkAccessManager *m_imageNam = nullptr;
     QList<QPair<QString, QStringList>> m_colorVariants;
@@ -175,7 +191,23 @@ private:
     QCoro::Task<void> _runBrokenChildFix(bool fixParents, bool fixImages,
                                          bool checkOnly = false);
     void _refreshTemplateCombo();
-    QDir _resolveProductDir(const QString &asin, const QString &title);
+    // Looks for an already-existing sizing/ subfolder for this product, without
+    // creating one. The parent ASIN returned by the catalog API can differ per
+    // marketplace (sellers whose variation family isn't linked consistently
+    // across regions), and the Catalog Items API rarely returns a seller SKU
+    // from a plain ASIN lookup (`sku` is usually empty at this point) — so the
+    // most reliable signal is `requestedAsin`: the exact ASIN string the user
+    // asked to load. Any folder that has EVER recorded that ASIN as a family
+    // member (sizing/skus/{requestedAsin} key present, from an earlier
+    // SKU-resolution pass) is a match, regardless of which parent ASIN this
+    // particular probe resolved to. Falls back to sku-value matching (for
+    // flows that do provide a real SKU, e.g. loading from an xlsx), then to
+    // the legacy {ASIN} / {ASIN}-* folder-name prefix match.
+    // Returns an empty string if no folder is found.
+    QString _findExistingProductDir(const QString &asin, const QString &sku,
+                                     const QString &requestedAsin) const;
+    QDir _resolveProductDir(const QString &asin, const QString &title, const QString &sku,
+                             const QString &requestedAsin);
     void _saveProductSettings();
     void _loadProductSettings();
     void _populateSizeRangeCombos();
@@ -253,6 +285,9 @@ private:
                                                   QJsonObject parentAttrsFallback,
                                                   QList<VariationTemplateEntry> tplEntries,
                                                   QHash<QString,QString> familyAttrFallback,
+                                                  // childSku → corrected size in FR/ES numbering
+                                                  // (user-reviewed); converted per region.
+                                                  QHash<QString,QString> sizeOverridesFr,
                                                   QJsonArray* messagesOut,
                                                   QStringList* logOut);
     void _refreshBrokenAttrCombo();
@@ -273,6 +308,15 @@ private:
     // Applies the exclusion list everywhere: files, label, A+ tree, menu,
     // description text.
     void _applyColorExclusions();
+
+    // Temu store selection table (one selectable store per country).
+    void _initTemuStoreTable();
+    QList<QPair<QString, QString>> _selectedTemuStores() const;
+    QCoro::Task<void> onTemuCreateOrUpdate();
+    // Resolves m_productType (Amazon browse-node key) from cache or a quick API
+    // lookup, so the Temu category can be remembered per Amazon category.
+    QCoro::Task<void> _ensureProductType();
+    QCoro::Task<void> m_temuDialogTask;
     // Rebuilds textEditAttributes from m_attributesBaseText + m_colorLogs,
     // stripping excluded colors.
     void _refreshAttributesText();

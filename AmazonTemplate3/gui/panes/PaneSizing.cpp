@@ -15,7 +15,10 @@
 #include "sizecategories/SizingTableTemplateModel.h"
 #include "gui/DialogEditPrompts.h"
 #include "gui/DialogTemuStoreBrands.h"
+#include "gui/DialogTemuCreateProduct.h"
 #include "TreeTemuStoreBrands.h"
+#include "TemuStoreModel.h"
+#include "apis/TemuInventoryApi.h"
 #include "BrokenChildTable.h"
 #include "AmazonMarketplace.h"
 #include "fillers/FillerSize.h"
@@ -314,11 +317,15 @@ PaneSizing::PaneSizing(QWidget *parent)
             this, [this]() {
                 DialogTemuStoreBrands dialog(this);
                 dialog.exec();
+                _initTemuStoreTable(); // stores may have changed
             });
+    connect(ui->buttonTemuCreateOrUpdate, &QPushButton::clicked,
+            this, [this]() { m_temuDialogTask = onTemuCreateOrUpdate(); });
 
     connect(ui->buttonExcludedColors, &QPushButton::clicked,
             this, &PaneSizing::onAplusExcludedColors);
 
+    _initTemuStoreTable();
     _rebuildMeasurementForm();
     updateButtonStates();
 }
@@ -574,21 +581,107 @@ static QStringList allMarketplaceIdsFromCountryList(QListWidget *listWidget)
     return result;
 }
 
-QDir PaneSizing::_resolveProductDir(const QString &asin, const QString &title)
+QString PaneSizing::_findExistingProductDir(const QString &asin, const QString &sku,
+                                             const QString &requestedAsin) const
+{
+    if (!m_workingDir.exists())
+        return QString();
+
+    // Sorted so the fallback below (and the tie-break among equally-valid SKU
+    // matches) is deterministic instead of depending on filesystem entry order.
+    const QDir sizingRoot(m_workingDir.filePath(QStringLiteral("sizing")));
+    const QStringList entries =
+        sizingRoot.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+
+    // Prefer the seller SKU: the parent ASIN returned by fetchVariationFamily()
+    // depends on which marketplace answers first (DE tried before UK/US/…), and
+    // sellers whose listings aren't linked as one variation family across every
+    // region will get a DIFFERENT parent ASIN depending on which marketplace
+    // happened to respond. The SKU is assigned once by the seller and is the
+    // same everywhere, so folders are named "{sku}-{title}" — check that first
+    // (cheap, no settings.ini read needed). In practice the Catalog Items API
+    // rarely returns a SKU for a plain ASIN lookup, so this is mostly future-proofing.
+    if (!sku.isEmpty()) {
+        const QString skuPrefix = sku + QLatin1Char('-');
+        for (const QString &entry : entries) {
+            if (entry == sku || entry.startsWith(skuPrefix))
+                return sizingRoot.filePath(entry);
+        }
+    }
+
+    // Most reliable check: has ANY folder ever recorded requestedAsin — the
+    // exact ASIN the user asked to load — as a family member? sizing/skus/*
+    // keys accumulate across every session's SKU-resolution passes (Broken-child
+    // fix, Reports API, etc.) and don't change even when this probe's parent
+    // ASIN differs from a previous session's, so this survives the
+    // marketplace-dependent parent-ASIN drift that `sku` (usually empty) and
+    // `asin` (the freshly-resolved, possibly different, parent) can't.
+    if (!requestedAsin.isEmpty()) {
+        for (const QString &entry : entries) {
+            QSettings s(sizingRoot.filePath(entry) + QStringLiteral("/settings.ini"),
+                        QSettings::IniFormat);
+            if (s.contains(QStringLiteral("sizing/skus/") + requestedAsin))
+                return sizingRoot.filePath(entry);
+        }
+    }
+
+    // Legacy folders (named "{asin}-{title}" from before the SKU-based naming)
+    // won't be found by name above. Fall back to checking every folder's
+    // recorded SKUs (sizing/skus/*) for a value match.
+    if (!sku.isEmpty()) {
+        QString firstMatch;
+        for (const QString &entry : entries) {
+            QSettings s(sizingRoot.filePath(entry) + QStringLiteral("/settings.ini"),
+                        QSettings::IniFormat);
+            s.beginGroup(QStringLiteral("sizing/skus"));
+            const QStringList keys = s.childKeys();
+            bool matched = false;
+            for (const QString &k : keys) {
+                if (s.value(k).toString().trimmed() == sku) { matched = true; break; }
+            }
+            s.endGroup();
+            if (!matched)
+                continue;
+            const QString path = sizingRoot.filePath(entry);
+            // Multiple folders can legitimately end up sharing the same recorded
+            // SKUs: a stray folder created in passing by e.g. the Broken-child
+            // workflow (before a "real" folder is picked) only ever gets SKUs
+            // written to it, never sizing/type. Prefer the folder that's
+            // actually been configured (has sizing/type set) over such a shell.
+            if (!s.value(QStringLiteral("sizing/type")).toString().isEmpty())
+                return path;
+            if (firstMatch.isEmpty())
+                firstMatch = path;
+        }
+        if (!firstMatch.isEmpty())
+            return firstMatch;
+    }
+
+    const QString prefix = asin + QLatin1Char('-');
+    for (const QString &entry : entries) {
+        if (entry == asin || entry.startsWith(prefix))
+            return sizingRoot.filePath(entry);
+    }
+    return QString();
+}
+
+QDir PaneSizing::_resolveProductDir(const QString &asin, const QString &title, const QString &sku,
+                                     const QString &requestedAsin)
 {
     if (!m_workingDir.exists())
         return m_workingDir;
 
+    const QString existing = _findExistingProductDir(asin, sku, requestedAsin);
+    if (!existing.isEmpty())
+        return QDir(existing);
+
     const QDir sizingRoot(m_workingDir.filePath(QStringLiteral("sizing")));
-
-    const QString prefix = asin + QLatin1Char('-');
-    for (const QString &entry : sizingRoot.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
-        if (entry == asin || entry.startsWith(prefix))
-            return QDir(sizingRoot.filePath(entry));
-    }
-
     const QString simplified = simplifyForDirName(title);
-    const QString dirName = simplified.isEmpty() ? asin : asin + QLatin1Char('-') + simplified;
+    // Name by SKU when known — it's stable across marketplaces, unlike the
+    // parent ASIN (see _findExistingProductDir). Fall back to the ASIN when no
+    // SKU was returned (e.g. missing seller SKU in the catalog response).
+    const QString key = sku.isEmpty() ? asin : sku;
+    const QString dirName = simplified.isEmpty() ? key : key + QLatin1Char('-') + simplified;
     m_workingDir.mkpath(QStringLiteral("sizing/") + dirName);
     return QDir(sizingRoot.filePath(dirName));
 }
@@ -604,6 +697,14 @@ void PaneSizing::_saveProductSettings()
     const auto *cat = _currentCategory();
     s.setValue(QStringLiteral("sizing/type"),
                cat ? cat->displayName() : ui->comboBoxSizeType->currentText());
+
+    // Folders are named after the seller SKU (stable across marketplaces), not
+    // the parent ASIN (which can vary per marketplace — see
+    // _findExistingProductDir). Persist the ASIN explicitly so callers that
+    // need to re-query the Amazon catalog (e.g. onLoadSubFolderClicked) don't
+    // have to parse it back out of the folder name.
+    if (!m_currentAsin.isEmpty())
+        s.setValue(QStringLiteral("sizing/parentAsin"), m_currentAsin);
 
     s.setValue(QStringLiteral("sizing/mode"), ui->sizeRangeMain->mode());
     s.setValue(QStringLiteral("sizing/from"), ui->sizeRangeMain->from());
@@ -828,23 +929,32 @@ void PaneSizing::_ensureModel(const QDir &dir)
                 updateButtonStates();
                 _tryGuessSizeRange();
 
-                // If a product subdir already exists for this ASIN, show it
+                // If the user explicitly picked this folder (Load Sub Folder),
+                // reopen it verbatim — no need to re-derive it from ASIN/SKU
+                // heuristics, and doing so risks landing on a different folder.
+                if (!m_pinnedProductDir.isEmpty()) {
+                    m_productWorkingDir = QDir(m_pinnedProductDir);
+                    m_pinnedProductDir.clear();
+                    ui->lineEditSubWorkingDir->setText(m_productWorkingDir.absolutePath());
+                    _loadProductSettings();
+                }
+                // Otherwise, if a product subdir already exists for this ASIN, show it
                 // immediately. Creation (with full ASIN-title name) is deferred
                 // to attributesFetched once the title is available.
-                if (m_treeModel->rowCount() > 0) {
+                else if (m_treeModel->rowCount() > 0) {
                     const QString asin = m_treeModel->data(
                         m_treeModel->index(0, TreeSizingAsins::ASIN),
                         Qt::DisplayRole).toString();
+                    const QString sku = m_treeModel->data(
+                        m_treeModel->index(0, TreeSizingAsins::SKU),
+                        Qt::DisplayRole).toString().trimmed();
                     if (!asin.isEmpty() && m_workingDir.exists()) {
-                        const QDir sizingRoot(m_workingDir.filePath(QStringLiteral("sizing")));
-                        const QString prefix = asin + QLatin1Char('-');
-                        for (const QString &entry : sizingRoot.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
-                            if (entry == asin || entry.startsWith(prefix)) {
-                                m_productWorkingDir = QDir(sizingRoot.filePath(entry));
-                                ui->lineEditSubWorkingDir->setText(m_productWorkingDir.absolutePath());
-                                _loadProductSettings();
-                                break;
-                            }
+                        const QString existing =
+                            _findExistingProductDir(asin, sku, m_requestedAsin);
+                        if (!existing.isEmpty()) {
+                            m_productWorkingDir = QDir(existing);
+                            ui->lineEditSubWorkingDir->setText(m_productWorkingDir.absolutePath());
+                            _loadProductSettings();
                         }
                     }
                 }
@@ -881,11 +991,13 @@ void PaneSizing::_ensureModel(const QDir &dir)
             this, [this](const QStringList& bullets, const QStringList& materials,
                          const QString& mainImageUrl, const QString& asin,
                          const QString& title, const QStringList& shoeWidths,
-                         const QString& brand) {
+                         const QString& brand, const QString& parentSku) {
                 m_productTitle = title;
                 m_currentAsin = asin;
                 m_mainImageUrl = mainImageUrl;
                 m_shoeWidths = shoeWidths;
+                m_currentBrand = brand;
+                m_currentBulletPoints = bullets;
                 TreeTemuStoreBrands::cacheBrand(brand);
                 QString text;
                 if (!bullets.isEmpty()) {
@@ -925,7 +1037,12 @@ void PaneSizing::_ensureModel(const QDir &dir)
                 _refreshAttributesText();
 
                 if (!asin.isEmpty()) {
-                    m_productWorkingDir = _resolveProductDir(asin, title);
+                    // Honor an explicit Load-Sub-Folder pin verbatim rather than
+                    // re-deriving (and potentially creating a new) folder — see
+                    // the modelReset handler, which clears the pin once consumed.
+                    m_productWorkingDir = m_pinnedProductDir.isEmpty()
+                        ? _resolveProductDir(asin, title, parentSku, m_requestedAsin)
+                        : QDir(m_pinnedProductDir);
                     ui->lineEditSubWorkingDir->setText(m_productWorkingDir.absolutePath());
                     _loadProductSettings();
                     // updateButtonStates() is called here unconditionally because
@@ -1400,7 +1517,8 @@ void PaneSizing::onAddFromAsinClicked()
         return;
 
     _refreshApi();
-    m_treeModel->load(asin.trimmed());
+    m_requestedAsin = asin.trimmed();
+    m_treeModel->load(m_requestedAsin);
 }
 
 void PaneSizing::onLoadSubFolderClicked()
@@ -1433,14 +1551,21 @@ void PaneSizing::onLoadSubFolderClicked()
         e.folderName = fi.fileName();
         e.date       = fi.lastModified();
 
-        // Extract ASIN: everything before the first '-'
-        const int dash = e.folderName.indexOf(QLatin1Char('-'));
-        e.asin = (dash > 0) ? e.folderName.left(dash) : e.folderName;
-
         // Read category from settings.ini if present
         const QSettings ini(fi.filePath() + QStringLiteral("/settings.ini"),
                             QSettings::IniFormat);
         e.category = ini.value(QStringLiteral("sizing/type")).toString();
+
+        // Folders are named after the seller SKU, not the ASIN (see
+        // _findExistingProductDir), so the ASIN needed to re-query the Amazon
+        // catalog must come from settings.ini. Fall back to parsing the
+        // folder-name prefix for legacy folders saved before this key existed
+        // (those are still named "{asin}-{title}").
+        e.asin = ini.value(QStringLiteral("sizing/parentAsin")).toString();
+        if (e.asin.isEmpty()) {
+            const int dash = e.folderName.indexOf(QLatin1Char('-'));
+            e.asin = (dash > 0) ? e.folderName.left(dash) : e.folderName;
+        }
 
         // Parse broken_child_health.json for EU/America broken-parent status
         {
@@ -1606,10 +1731,17 @@ void PaneSizing::onLoadSubFolderClicked()
     if (asin.isEmpty())
         return;
 
+    // The user explicitly picked this folder — reopen it verbatim rather than
+    // letting modelReset/attributesFetched re-derive it from ASIN/SKU
+    // heuristics (which could resolve to a different folder if this exact
+    // ASIN's SKU was never recorded, or land on a stale duplicate).
+    m_pinnedProductDir = sizingDir.filePath(entries[row].folderName);
+
     const QDir defaultDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
     _ensureModel(defaultDir);
     _refreshApi();
-    m_treeModel->load(asin);
+    m_requestedAsin = asin;
+    m_treeModel->load(m_requestedAsin);
 }
 
 void PaneSizing::onOpenSizeTableFolderClicked()
@@ -1659,7 +1791,7 @@ void PaneSizing::onFactorizeSizeTables()
     // --- Scan all product subdirs for size table txt files ---
     struct ProductInfo {
         QString dirPath;
-        QString parentAsin;
+        QString dirKey; // sku (or legacy asin) — the folder-name prefix, used only as a naming fallback below
         QString title;
         QStringList childAsins;
         QMap<QString, QString> groupTxtContents; // group key → file content
@@ -1675,10 +1807,10 @@ void PaneSizing::onFactorizeSizeTables()
         const QDir sizeTableDir(productDirPath + QStringLiteral("/size-table"));
         if (!sizeTableDir.exists()) continue;
 
-        // Parse dir name: "{parentAsin}-{title}" or just "{parentAsin}"
+        // Parse dir name: "{sku}-{title}" (or legacy "{asin}-{title}"), or just the key alone
         const int dashIdx = entry.indexOf(QLatin1Char('-'));
-        const QString parentAsin = (dashIdx > 0) ? entry.left(dashIdx) : entry;
-        const QString title      = (dashIdx > 0) ? entry.mid(dashIdx + 1) : QString{};
+        const QString dirKey = (dashIdx > 0) ? entry.left(dashIdx) : entry;
+        const QString title  = (dashIdx > 0) ? entry.mid(dashIdx + 1) : QString{};
 
         // Read size_table_*.txt files
         const QStringList txtFiles = sizeTableDir.entryList(
@@ -1686,9 +1818,9 @@ void PaneSizing::onFactorizeSizeTables()
         if (txtFiles.isEmpty()) continue;
 
         ProductInfo info;
-        info.dirPath    = productDirPath;
-        info.parentAsin = parentAsin;
-        info.title      = title;
+        info.dirPath = productDirPath;
+        info.dirKey  = dirKey;
+        info.title   = title;
 
         for (const QString &txtFile : txtFiles) {
             // "size_table_" = 11 chars, ".txt" = 4 chars
@@ -1745,8 +1877,8 @@ void PaneSizing::onFactorizeSizeTables()
                     allAsins << a;
         allAsins.sort();
 
-        // Dir name: first child ASIN (or parent ASIN) + title from representative
-        const QString firstAsin = allAsins.isEmpty() ? rep.parentAsin : allAsins.first();
+        // Dir name: first child ASIN (or the representative's dir key) + title
+        const QString firstAsin = allAsins.isEmpty() ? rep.dirKey : allAsins.first();
         QString dirName = firstAsin;
         if (!rep.title.isEmpty())
             dirName += QLatin1Char('-') + rep.title;
@@ -3420,6 +3552,279 @@ void PaneSizing::_rebuildAplusMenu()
     m_aplusMenu->addSeparator();
     QAction *faqAct = m_aplusMenu->addAction(tr("FAQ"));
     connect(faqAct, &QAction::triggered, this, &PaneSizing::onAplusGenerateFaq);
+}
+
+// ---------------------------------------------------------------------------
+// Temu store selection table
+// ---------------------------------------------------------------------------
+
+// Builds the store-selection table on the Temu page: one checkable row per
+// configured Temu store (Settings). At most one store may be selected per
+// country — checking a second store of the same country unchecks the first.
+void PaneSizing::_initTemuStoreTable()
+{
+    if (!m_temuStoreSelectModel) {
+        m_temuStoreSelectModel = new QStandardItemModel(this);
+        ui->tableViewTemuStores->setModel(m_temuStoreSelectModel);
+        ui->tableViewTemuStores->horizontalHeader()->setStretchLastSection(true);
+        ui->tableViewTemuStores->verticalHeader()->hide();
+        ui->tableViewTemuStores->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        connect(m_temuStoreSelectModel, &QStandardItemModel::itemChanged,
+                this, [this](QStandardItem *item) {
+                    if (m_temuStoreSelectGuard || item->column() != 0
+                        || item->checkState() != Qt::Checked)
+                        return;
+                    // Enforce one selected store per country.
+                    m_temuStoreSelectGuard = true;
+                    const QString country = item->data(Qt::UserRole + 1).toString();
+                    for (int r = 0; r < m_temuStoreSelectModel->rowCount(); ++r) {
+                        QStandardItem *other = m_temuStoreSelectModel->item(r, 0);
+                        if (other && other != item
+                            && other->data(Qt::UserRole + 1).toString() == country
+                            && other->checkState() == Qt::Checked)
+                            other->setCheckState(Qt::Unchecked);
+                    }
+                    m_temuStoreSelectGuard = false;
+                });
+    }
+
+    m_temuStoreSelectGuard = true;
+    m_temuStoreSelectModel->clear();
+    m_temuStoreSelectModel->setHorizontalHeaderLabels(
+        {tr("Use"), tr("Country"), tr("Store name")});
+
+    TemuStoreModel storeModel;
+    for (const TemuStore &store : storeModel.stores()) {
+        auto *check = new QStandardItem();
+        check->setCheckable(true);
+        check->setCheckState(Qt::Unchecked);
+        check->setData(store.country, Qt::UserRole + 1);
+        check->setData(store.label,   Qt::UserRole + 2);
+        auto *country = new QStandardItem(store.country);
+        auto *label   = new QStandardItem(store.label);
+        m_temuStoreSelectModel->appendRow({check, country, label});
+    }
+    ui->tableViewTemuStores->resizeColumnToContents(0);
+    ui->tableViewTemuStores->resizeColumnToContents(1);
+    m_temuStoreSelectGuard = false;
+}
+
+// Returns {country, label} pairs of the currently checked stores.
+QList<QPair<QString, QString>> PaneSizing::_selectedTemuStores() const
+{
+    QList<QPair<QString, QString>> out;
+    if (!m_temuStoreSelectModel)
+        return out;
+    for (int r = 0; r < m_temuStoreSelectModel->rowCount(); ++r) {
+        QStandardItem *check = m_temuStoreSelectModel->item(r, 0);
+        if (check && check->checkState() == Qt::Checked)
+            out.append({check->data(Qt::UserRole + 1).toString(),
+                        check->data(Qt::UserRole + 2).toString()});
+    }
+    return out;
+}
+
+// Resolves the Amazon product type (browse-node key) into m_productType from
+// the settings.ini cache or a quick fetch, without the slow all-listings report.
+QCoro::Task<void> PaneSizing::_ensureProductType()
+{
+    if (!m_productType.isEmpty())
+        co_return;
+    if (m_productWorkingDir.exists()) {
+        QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                     QSettings::IniFormat);
+        m_productType = ps.value(QStringLiteral("sizing/productType")).toString();
+    }
+    if (!m_productType.isEmpty() || !m_treeModel)
+        co_return;
+
+    // Find any child SKU in the tree, then ask Amazon for its product type.
+    QString sku;
+    for (int fi = 0; fi < m_treeModel->rowCount() && sku.isEmpty(); ++fi) {
+        const QModelIndex pi = m_treeModel->index(fi, 0);
+        for (int ci = 0; ci < m_treeModel->rowCount(pi) && sku.isEmpty(); ++ci)
+            sku = m_treeModel->data(
+                m_treeModel->index(ci, TreeSizingAsins::SKU, pi)).toString().trimmed();
+    }
+    if (sku.isEmpty())
+        co_return;
+    for (const QString &mpId : allMarketplaceIdsFromCountryList(ui->listWidgetCountries)) {
+        co_await m_api->fetchListingProductType(mpId, sku, &m_productType);
+        if (!m_productType.isEmpty()) break;
+    }
+    if (!m_productType.isEmpty() && m_productWorkingDir.exists()) {
+        QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                     QSettings::IniFormat);
+        ps.setValue(QStringLiteral("sizing/productType"), m_productType);
+    }
+}
+
+QCoro::Task<void> PaneSizing::onTemuCreateOrUpdate()
+{
+    const QList<QPair<QString, QString>> stores = _selectedTemuStores();
+    if (stores.isEmpty()) {
+        QMessageBox::information(this, tr("Create or update"),
+            tr("Select at least one store (one per country) first."));
+        co_return;
+    }
+    if (!m_productWorkingDir.exists()) {
+        QMessageBox::information(this, tr("Create or update"),
+            tr("Load a product first."));
+        co_return;
+    }
+
+    // Resolve the Amazon product type so the Temu category is remembered per
+    // Amazon category (picking it once then applies to every similar product).
+    co_await _ensureProductType();
+
+    // --- Assemble the product draft from the loaded product ---
+    DialogTemuCreateProduct::Draft draft;
+    draft.productDir  = m_productWorkingDir.absolutePath();
+    draft.title       = m_productTitle;
+    draft.description.clear(); // generated by the CLI in the dialog
+    draft.brand       = m_currentBrand;
+    draft.bulletPoints = m_currentBulletPoints;
+
+    // Amazon product type = the category key for the Temu-category mapping.
+    draft.amazonProductType = m_productType;
+    if (draft.amazonProductType.isEmpty()) {
+        QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                     QSettings::IniFormat);
+        draft.amazonProductType = ps.value(QStringLiteral("sizing/productType")).toString();
+    }
+
+    // Gallery images: every image file left in the product dir root (excluded
+    // colors' files were already moved to excluded/ by _applyColorExclusions).
+    _applyColorExclusions();
+    const QDir pdir(draft.productDir);
+    for (const QString &f : pdir.entryList({QStringLiteral("*.jpg"), QStringLiteral("*.jpeg"),
+                                            QStringLiteral("*.png")}, QDir::Files, QDir::Name)) {
+        if (f.endsWith(QStringLiteral("_main.jpg")))
+            draft.imagePaths.prepend(pdir.absoluteFilePath(f)); // main first
+        else
+            draft.imagePaths.append(pdir.absoluteFilePath(f));
+    }
+
+    // Size chart: only when the category generates one and it exists on disk.
+    const auto *cat = _currentCategory();
+    if (cat && cat->generatesSizeChart() && !m_groupImages.isEmpty()) {
+        const QString chartPath = pdir.absoluteFilePath(QStringLiteral("size_chart_temu.jpg"));
+        if (m_groupImages.at(0).save(chartPath, "JPEG", 90))
+            draft.sizeChartImagePath = chartPath;
+    }
+
+    // A+ (mobile) images — offered unchecked so they can optionally be added.
+    // Excluded colors' A+ elements are skipped.
+    if (m_aplusContent) {
+        const QDir aplusDir = m_aplusContent->dir();
+        const QSet<QString> hidden = _hiddenAplusElementIds();
+        for (const APlusElement &el : m_aplusContent->elements()) {
+            if (el.type != APlusElementType::Image || hidden.contains(el.id))
+                continue;
+            const APlusVersion *v = el.current();
+            if (!v || v->mobileFile.isEmpty())
+                continue;
+            const QString abs = aplusDir.filePath(v->mobileFile);
+            if (QFileInfo::exists(abs))
+                draft.extraImagePaths.append(abs);
+        }
+    }
+
+    // SKUs: one per variation child in the tree (skip excluded colors).
+    // The parent row's SKU becomes the Temu goods-level outGoodsSn.
+    if (m_treeModel) {
+        for (int i = 0; i < m_treeModel->rowCount(); ++i) {
+            const QModelIndex pi = m_treeModel->index(i, 0);
+            if (draft.parentSku.isEmpty()) {
+                draft.parentSku = m_treeModel->data(
+                    m_treeModel->index(i, TreeSizingAsins::SKU), Qt::DisplayRole).toString().trimmed();
+            }
+            for (int j = 0; j < m_treeModel->rowCount(pi); ++j) {
+                const QString asin = m_treeModel->data(
+                    m_treeModel->index(j, TreeSizingAsins::ASIN, pi), Qt::DisplayRole).toString().trimmed();
+                const QString sku = m_treeModel->data(
+                    m_treeModel->index(j, TreeSizingAsins::SKU, pi), Qt::DisplayRole).toString().trimmed();
+                if (asin.isEmpty() || _excludedColorAsins().contains(asin))
+                    continue;
+                DialogTemuCreateProduct::Draft::Sku s;
+                s.outSkuSn = sku.isEmpty() ? asin : sku;
+                s.color = m_treeModel->data(
+                    m_treeModel->index(j, TreeSizingAsins::Color, pi), Qt::DisplayRole).toString().trimmed();
+                s.size = m_treeModel->data(
+                    m_treeModel->index(j, TreeSizingAsins::Size, pi), Qt::DisplayRole).toString().trimmed();
+                // Package weight/dimensions from Amazon (FR), to prefill the Temu table.
+                AmazonCatalogApi::PackageDims dims;
+                co_await m_api->fetchPackageDims(QStringLiteral("A13V1IB3VIYZZH"), asin, &dims);
+                s.weightG  = dims.weightG;
+                s.lengthCm = dims.lengthCm;
+                s.widthCm  = dims.widthCm;
+                s.heightCm = dims.heightCm;
+                s.gtin     = dims.gtin;
+                if (draft.originCountry.isEmpty())
+                    draft.originCountry = dims.originCountry;
+                draft.skus.append(s);
+            }
+        }
+    }
+
+    // --- Build the store picks with per-store manufacturer/GSPR mapping ---
+    auto settings = WorkingDirectoryManager::instance()->settings();
+    const QString appKey    = settings->value(SettingsTable::KEY_TEMU_APP_KEY).toString();
+    const QString appSecret = settings->value(SettingsTable::KEY_TEMU_APP_SECRET).toString();
+    const QString imgbbKey  = settings->value(SettingsTable::KEY_IMGBB_API_KEY).toString();
+
+    TemuStoreModel storeModel;
+    QHash<QString, TemuStore> byKey;
+    for (const TemuStore &st : storeModel.stores())
+        byKey.insert(st.country + QLatin1Char('|') + st.label, st);
+
+    QList<DialogTemuCreateProduct::StorePick> picks;
+    for (const auto &sel : stores) {
+        const TemuStore st = byKey.value(sel.first + QLatin1Char('|') + sel.second);
+        DialogTemuCreateProduct::StorePick p;
+        p.country = sel.first;
+        p.label   = sel.second;
+        p.token   = st.token;
+        p.proxyHost = st.proxyHost;
+        p.proxyPort = st.proxyPort;
+        p.proxyUser = st.proxyUser;
+        p.proxyPassword = st.proxyPassword;
+        TreeTemuStoreBrands::lookupBrandEntities(sel.first, sel.second, draft.brand,
+                                                 &p.manufacturerName, &p.gsprRepName,
+                                                 &p.manufacturerId, &p.gsprRepId);
+        picks.append(p);
+    }
+
+    // Per-country listing text: fetch the title + bullets from each selected
+    // store's own Amazon marketplace so each country shows its own language.
+    {
+        const auto &code2mp = countryCodeToMarketplaceId();
+        QSet<QString> doneCountries;
+        for (const auto &sel : stores) {
+            const QString cc = sel.first.toUpper();
+            if (doneCountries.contains(cc)) continue;
+            doneCountries.insert(cc);
+            const QString mpId = code2mp.value(sel.first.toLower());
+            if (mpId.isEmpty() || m_currentAsin.isEmpty()) continue;
+            QString title; QStringList bullets;
+            co_await m_api->fetchListingText(mpId, m_currentAsin, &title, &bullets);
+            if (!title.isEmpty() || !bullets.isEmpty())
+                draft.textByCountry.insert(cc, {title, bullets});
+        }
+    }
+
+    // Amazon pricing context — FR marketplace (EUR) to fetch the base price.
+    DialogTemuCreateProduct::AmazonPricingCtx pricing;
+    pricing.clientId      = settings->value(SettingsTable::KEY_LWA_CLIENT_ID).toString();
+    pricing.secret        = settings->value(SettingsTable::KEY_LWA_CLIENT_SECRET).toString();
+    pricing.refreshTokenEu = settings->value(SettingsTable::KEY_EU_LWA_REFRESH_TOKEN).toString();
+    pricing.sellerIdEu    = settings->value(SettingsTable::KEY_EU_SELLER_ID).toString();
+    pricing.marketplaceId = QStringLiteral("A13V1IB3VIYZZH"); // Amazon France (EUR)
+
+    AbstractCli *cli = ui->comboBoxCli->currentData().value<AbstractCli *>();
+    DialogTemuCreateProduct dlg(appKey, appSecret, imgbbKey, cli,
+                                std::move(draft), std::move(picks), std::move(pricing), this);
+    dlg.exec();
 }
 
 void PaneSizing::onAplusExcludedColors()
@@ -8143,52 +8548,19 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
     QJsonObject parentAttrsFallback,
     QList<VariationTemplateEntry> tplEntries,
     QHash<QString,QString> familyAttrFallback,
+    QHash<QString,QString> sizeOverridesFr,
     QJsonArray* messagesOut, QStringList* logOut)
 {
     *messagesOut = QJsonArray{};
 
-    // ── Pre-scan THIS marketplace's own listings ────────────────────────────
-    // Size systems are REGIONAL (IT ≠ FR/ES ≠ DE/NL/SE/PL ≠ UK ≠ US/CA), so
-    // size_system / size_class must come from the TARGET marketplace itself —
-    // never borrowed from UK or another region's parent. We derive a reference
-    // from any CHILD that already has a composite on this marketplace, and cache
-    // each SKU's local attributes so the build loop below doesn't re-fetch.
-    QHash<QString, QJsonObject> localBySku;
-    QString refSizeSystem, refSizeClass;
-    QJsonObject parentLocalSizeObj; // parent's composite on THIS marketplace
-    for (const VariationTemplateEntry &e : tplEntries) {
-        if (e.sku.isEmpty()) continue;
-        QJsonObject la;
-        co_await m_api->fetchListingAttributes(mpId, e.sku, &la);
-        localBySku.insert(e.sku, la);
-        const QJsonArray sizeArr = la.value(QStringLiteral("apparel_size")).toArray();
-        if (sizeArr.isEmpty()) continue;
-        const QJsonObject o = sizeArr.first().toObject();
-        if (e.isParent) { parentLocalSizeObj = o; continue; } // children preferred
-        if (refSizeSystem.isEmpty() && o.contains(QStringLiteral("size_system")))
-            refSizeSystem = o.value(QStringLiteral("size_system")).toString();
-        if (refSizeClass.isEmpty() && o.contains(QStringLiteral("size_class")))
-            refSizeClass = o.value(QStringLiteral("size_class")).toString();
-    }
-    // Fallback: the parent's composite on this SAME marketplace. Even when it is
-    // partially corrupted (missing size/size_class), its size_system sub-field is
-    // still regional data stored on this marketplace — not borrowed from elsewhere.
-    if (refSizeSystem.isEmpty() && parentLocalSizeObj.contains(QStringLiteral("size_system")))
-        refSizeSystem = parentLocalSizeObj.value(QStringLiteral("size_system")).toString();
-    if (refSizeClass.isEmpty() && parentLocalSizeObj.contains(QStringLiteral("size_class")))
-        refSizeClass = parentLocalSizeObj.value(QStringLiteral("size_class")).toString();
-    logOut->append(tr("%1 region reference: size_system=%2 size_class=%3").arg(
-        mpCode,
-        refSizeSystem.isEmpty() ? QStringLiteral("(none)") : refSizeSystem,
-        refSizeClass.isEmpty()  ? QStringLiteral("(none)") : refSizeClass));
-
     // ── Schema-driven attribute selection ───────────────────────────────────
     // Attribute names DIFFER by product type: APPAREL uses `size` (simple
-    // {value, language_tag}) + `color`, while DRESS-like types use the
-    // `apparel_size` composite + `color_name`/`color_map`. Sending the wrong
-    // set is silently IGNORED by Amazon (feed warning 90000900) — the root
-    // cause of "accepted but nothing stored". Use the listings' ACTUAL product
-    // type on THIS marketplace, and let its schema pick the attribute names.
+    // {value, language_tag}) + `color`; dress-like types use the `apparel_size`
+    // composite + `color_name`/`color_map`; SWIMWEAR uses the `shapewear_size`
+    // composite + `color`. Sending the wrong set is silently IGNORED by Amazon
+    // (feed warning 90000900) — the root cause of "accepted but nothing stored".
+    // Read the listings' ACTUAL product type on THIS marketplace and let its
+    // schema pick the attribute names.
     QString actualPt;
     for (const VariationTemplateEntry &e : tplEntries) {
         if (e.isParent || e.sku.isEmpty()) continue;
@@ -8199,17 +8571,88 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
     if (actualPt.isEmpty()) actualPt = productType;
     QSet<QString> ptProps;
     co_await m_api->fetchProductTypeSchemaProps(mpId, actualPt, &ptProps);
-    const bool hasApparelSize = ptProps.contains(QStringLiteral("apparel_size"));
-    const bool hasSimpleSize  = ptProps.contains(QStringLiteral("size"));
     const bool hasColorName   = ptProps.contains(QStringLiteral("color_name"));
     const bool hasColor       = ptProps.contains(QStringLiteral("color"));
     const QString langTag     = langTagForMarketplace(mpId);
-    logOut->append(tr("%1 productType=%2 → size attr: %3, color attr: %4").arg(
+
+    // Composite size attribute (nested {size, size_system, size_class, …}):
+    // apparel_size (clothing) or shapewear_size (swimwear/shapewear).
+    QString compositeSizeAttr;
+    if (ptProps.contains(QStringLiteral("apparel_size")))        compositeSizeAttr = QStringLiteral("apparel_size");
+    else if (ptProps.contains(QStringLiteral("shapewear_size"))) compositeSizeAttr = QStringLiteral("shapewear_size");
+    const bool hasComposite = !compositeSizeAttr.isEmpty();
+    const bool isApparelComposite = compositeSizeAttr == QStringLiteral("apparel_size");
+
+    // Simple size attribute (free text {value, language_tag}) when there's no
+    // composite: `size` → `size_name` → a single other *size* candidate.
+    static const QSet<QString> kNonPrimarySize{
+        QStringLiteral("special_size_type"), QStringLiteral("garment_size_country"),
+        QStringLiteral("size_map"), QStringLiteral("size_chart_node_id"),
+        QStringLiteral("item_display_size"), QStringLiteral("size_class"),
+        QStringLiteral("size_system"), QStringLiteral("apparel_size"),
+        QStringLiteral("shapewear_size"), QStringLiteral("fit_to_size_sentiment"),
+    };
+    QString simpleSizeAttr;
+    QStringList sizeCandidates;
+    if (!hasComposite) {
+        for (const QString &p : ptProps)
+            if (p.contains(QStringLiteral("size"), Qt::CaseInsensitive) && !kNonPrimarySize.contains(p))
+                sizeCandidates << p;
+        if (ptProps.contains(QStringLiteral("size")))            simpleSizeAttr = QStringLiteral("size");
+        else if (ptProps.contains(QStringLiteral("size_name")))  simpleSizeAttr = QStringLiteral("size_name");
+        else if (sizeCandidates.size() == 1)                     simpleSizeAttr = sizeCandidates.first();
+    }
+    const bool hasSimpleSize = !simpleSizeAttr.isEmpty();
+
+    // Schema-allowed size_system/size_class for the composite. When the schema
+    // pins size_system to exactly ONE value (true for shapewear_size per region:
+    // FR/ES=as4, DE=as3, IT=as6), that is authoritative — no stored data needed.
+    QString schemaSizeSystem, schemaSizeClass;
+    if (hasComposite) {
+        QStringList sysE, clsE;
+        co_await m_api->fetchCompositeSizeEnums(mpId, actualPt, compositeSizeAttr, &sysE, &clsE);
+        if (sysE.size() == 1) schemaSizeSystem = sysE.first();
+        if (clsE.contains(QStringLiteral("numeric"))) schemaSizeClass = QStringLiteral("numeric");
+    }
+
+    // ── Pre-scan THIS marketplace's own listings ────────────────────────────
+    // Cache each SKU's attributes (avoid re-fetch) and derive a REGIONAL
+    // size_system/size_class reference from a child that already has the
+    // composite stored on this marketplace (never borrowed from another region).
+    QHash<QString, QJsonObject> localBySku;
+    QString refSizeSystem, refSizeClass;
+    QJsonObject parentLocalSizeObj;
+    for (const VariationTemplateEntry &e : tplEntries) {
+        if (e.sku.isEmpty()) continue;
+        QJsonObject la;
+        co_await m_api->fetchListingAttributes(mpId, e.sku, &la);
+        localBySku.insert(e.sku, la);
+        if (!hasComposite) continue;
+        const QJsonArray sizeArr = la.value(compositeSizeAttr).toArray();
+        if (sizeArr.isEmpty()) continue;
+        const QJsonObject o = sizeArr.first().toObject();
+        if (e.isParent) { parentLocalSizeObj = o; continue; } // children preferred
+        if (refSizeSystem.isEmpty() && o.contains(QStringLiteral("size_system")))
+            refSizeSystem = o.value(QStringLiteral("size_system")).toString();
+        if (refSizeClass.isEmpty() && o.contains(QStringLiteral("size_class")))
+            refSizeClass = o.value(QStringLiteral("size_class")).toString();
+    }
+    if (refSizeSystem.isEmpty() && parentLocalSizeObj.contains(QStringLiteral("size_system")))
+        refSizeSystem = parentLocalSizeObj.value(QStringLiteral("size_system")).toString();
+    if (refSizeClass.isEmpty() && parentLocalSizeObj.contains(QStringLiteral("size_class")))
+        refSizeClass = parentLocalSizeObj.value(QStringLiteral("size_class")).toString();
+    // Schema-pinned values fill any gap the stored listings didn't provide.
+    if (refSizeSystem.isEmpty()) refSizeSystem = schemaSizeSystem;
+    if (refSizeClass.isEmpty())  refSizeClass  = schemaSizeClass;
+
+    logOut->append(tr("%1 productType=%2 → size attr: %3, color attr: %4 | region size_system=%5 size_class=%6").arg(
         mpCode, actualPt,
-        hasApparelSize ? QStringLiteral("apparel_size") :
-        hasSimpleSize  ? QStringLiteral("size") : QStringLiteral("(NONE IN SCHEMA!)"),
+        hasComposite   ? compositeSizeAttr :
+        hasSimpleSize  ? simpleSizeAttr : QStringLiteral("(NONE IN SCHEMA!)"),
         hasColorName   ? QStringLiteral("color_name") :
-        hasColor       ? QStringLiteral("color") : QStringLiteral("(NONE IN SCHEMA!)")));
+        hasColor       ? QStringLiteral("color") : QStringLiteral("(NONE IN SCHEMA!)"),
+        refSizeSystem.isEmpty() ? QStringLiteral("(none)") : refSizeSystem,
+        refSizeClass.isEmpty()  ? QStringLiteral("(none)") : refSizeClass));
 
     int messageId = 1;
     for (const VariationTemplateEntry &e : tplEntries) {
@@ -8222,7 +8665,8 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
         // ── Legacy cleanup (direct PATCH delete — feeds cannot delete) ──────
         // 1. A stored apparel_size on a listing whose schema doesn't define it
         //    can never validate and permanently blocks the family (DE case).
-        if (!hasApparelSize && localAttrs.contains(QStringLiteral("apparel_size"))) {
+        if (!ptProps.contains(QStringLiteral("apparel_size"))
+                && localAttrs.contains(QStringLiteral("apparel_size"))) {
             const QJsonArray stale = localAttrs.value(QStringLiteral("apparel_size")).toArray();
             bool ok = false; QString det;
             co_await m_api->deleteListingAttribute(mpId, e.sku, actualPt,
@@ -8231,10 +8675,15 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
             logOut->append(tr("%1: delete legacy apparel_size → %2").arg(e.sku, det));
             if (ok) localAttrs.remove(QStringLiteral("apparel_size"));
         }
-        // 2. size/color entries stored under a language_tag the marketplace does
-        //    not accept (e.g. nl_BE on BE, which only allows fr_BE) — they raise
-        //    100720 and coexist with the correct entry (selector = language_tag).
-        for (const QString &attr : {QStringLiteral("size"), QStringLiteral("color")}) {
+        // 2. Language-tagged entries stored under a tag the marketplace does not
+        //    accept (e.g. nl_BE on BE, or a de_DE department pushed onto ES/IT by
+        //    earlier runs) raise 100720 and coexist with any correct entry
+        //    (selector = language_tag). Delete the wrong-language ones. `department`
+        //    is included because a stale wrong-language value keeps the child from
+        //    validating even though we no longer send it.
+        for (const QString &attr : {QStringLiteral("size"), QStringLiteral("color"),
+                                    QStringLiteral("department"),
+                                    QStringLiteral("special_size_type")}) {
             if (!ptProps.contains(attr) || !localAttrs.contains(attr)) continue;
             QJsonArray wrongLang;
             for (const QJsonValue &jv : localAttrs.value(attr).toArray()) {
@@ -8323,15 +8772,20 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
             return kMap.value(v.trimmed().toLower(), v);
         };
 
-        // Product identifier — mirrors external_product_id(+type) flat file columns.
-        if (!e.gtin.isEmpty() && !e.gtinType.isEmpty()) {
-            addPatch(QStringLiteral("externally_assigned_product_identifier"),
-                     QJsonArray{QJsonObject{
-                         {QStringLiteral("type_of_product_id"), e.gtinType},
-                         {QStringLiteral("product_id"),         e.gtin},
-                     }});
-        } else if (!e.asin.isEmpty()) {
-            addPatch(QStringLiteral("merchant_suggested_asin"), simpleVal(e.asin));
+        // Product identifier — children only. A child's GTIN (EAN/UPC) is a stable
+        // per-child identity. NEVER send merchant_suggested_asin on the PARENT: its
+        // per-marketplace parent ASIN differs, so a single value is rejected as
+        // inconsistent across marketplaces (101077). Parents are identified by SKU.
+        if (!e.isParent) {
+            if (!e.gtin.isEmpty() && !e.gtinType.isEmpty()) {
+                addPatch(QStringLiteral("externally_assigned_product_identifier"),
+                         QJsonArray{QJsonObject{
+                             {QStringLiteral("type_of_product_id"), e.gtinType},
+                             {QStringLiteral("product_id"),         e.gtin},
+                         }});
+            } else if (!e.asin.isEmpty()) {
+                addPatch(QStringLiteral("merchant_suggested_asin"), simpleVal(e.asin));
+            }
         }
 
         addPatch(QStringLiteral("parentage_level"),
@@ -8355,13 +8809,23 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
                 QStringLiteral("product_description"),
                 QStringLiteral("bullet_point"),
                 QStringLiteral("recommended_browse_nodes"),
-                QStringLiteral("department"),
                 QStringLiteral("country_of_origin"),
                 QStringLiteral("condition_type"),
             };
+            // Language-tagged attributes must NEVER come from another marketplace's
+            // listing (its language_tag would be wrong → 100720). For those, use the
+            // parent's own local value only; the rest may use the cross-marketplace
+            // fallback (marketplace_id swapped).
+            static const QSet<QString> kLangTagged{
+                QStringLiteral("brand"), QStringLiteral("item_name"),
+                QStringLiteral("product_description"), QStringLiteral("bullet_point"),
+                QStringLiteral("department"),
+            };
             for (const QString &k : kParentCopyKeys) {
                 if (!ptProps.contains(k)) continue; // not defined by this schema
-                const QJsonValue v = rawOr(k, parentAttrsFallback);
+                const QJsonValue v = kLangTagged.contains(k)
+                    ? (localAttrs.contains(k) ? localAttrs.value(k) : QJsonValue())
+                    : rawOr(k, parentAttrsFallback);
                 if (usable(v)) addPatch(k, v);
             }
             // NOTE: a delete op ({"op":"delete"}) is NOT supported by JSON_LISTINGS_FEED
@@ -8369,7 +8833,7 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
             // apparel_size already stored on the parent (e.g. DE) cannot be removed via
             // feed. The only way to overwrite it is a `replace` with a COMPLETE valid
             // composite — done below when the parent already carries an apparel_size.
-            if (hasApparelSize && localAttrs.contains(QStringLiteral("apparel_size"))) {
+            if (isApparelComposite && localAttrs.contains(QStringLiteral("apparel_size"))) {
                 const QJsonArray pSize = localAttrs.value(QStringLiteral("apparel_size")).toArray();
                 QJsonObject pObj = pSize.isEmpty() ? QJsonObject{} : pSize.first().toObject();
                 // Ensure the composite is complete & valid so it stops failing
@@ -8425,11 +8889,9 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
                          {QStringLiteral("parent_sku"),              parentSku},
                          {QStringLiteral("marketplace_id"),          mpId}}});
 
-            // department — only when the schema defines it (APPAREL does not).
-            if (ptProps.contains(QStringLiteral("department"))) {
-                const QJsonValue dept = rawOr(QStringLiteral("department"), parentAttrsFallback);
-                if (usable(dept)) addPatch(QStringLiteral("department"), dept);
-            }
+            // department is intentionally NOT sent: it is not a variation dimension,
+            // not schema-required, and the listings' own stored value is often
+            // wrong-language (→ 100720). Leaving it untouched avoids that error.
 
             // Color — theme attribute; the schema decides the attribute name.
             if (hasColorName) {
@@ -8465,20 +8927,31 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
             if (mpId != kUkMpId)
                 co_await m_api->fetchListingAttributes(kUkMpId, e.sku, &ukAttrs);
 
+            // User-reviewed size override (from the pre-fix size dialog): the
+            // corrected size in FR/ES numbering; other regions convert from it.
+            QString srcSize = e.size;
+            QString srcCountry = e.sizeSource;
+            if (sizeOverridesFr.contains(e.sku)) {
+                srcSize    = sizeOverridesFr.value(e.sku);
+                srcCountry = QStringLiteral("FR");
+            }
+
             // The child's size in THIS country's numbering (bare, e.g. "38").
-            QString bareSize = e.size;
-            if (!bareSize.isEmpty() && !e.sizeSource.isEmpty() && e.sizeSource != mpCode)
-                bareSize = FillerSize::convertSize(bareSize, e.sizeSource, mpCode);
+            QString bareSize = srcSize;
+            if (!bareSize.isEmpty() && !srcCountry.isEmpty() && srcCountry != mpCode)
+                bareSize = FillerSize::convertSize(bareSize, srcCountry, mpCode);
             if (bareSize.startsWith(QStringLiteral("numeric_")))
                 bareSize = bareSize.mid(8);
 
-            if (hasApparelSize) {
-                // apparel_size is a COMPOSITE: [{size, size_system, size_class, …}].
+            if (hasComposite) {
+                // COMPOSITE size (apparel_size or shapewear_size):
+                //   [{ size, size_system, size_class, marketplace_id, … }]
                 // size_system / size_class are REGIONAL — child's own local composite
-                // first, then the region reference from sibling children (pre-scan).
-                // Canonical numeric size value is "numeric_<n>" (proven on IT).
-                // body_type/height_type = "regular" for women's clothing.
-                const QJsonArray localSizeArr = localAttrs.value(QStringLiteral("apparel_size")).toArray();
+                // first, then the region reference (stored sibling / schema-pinned).
+                // Canonical numeric size value is "numeric_<n>". body_type/height_type
+                // = "regular" ONLY for apparel_size (shapewear uses different enums
+                // and doesn't require them).
+                const QJsonArray localSizeArr = localAttrs.value(compositeSizeAttr).toArray();
 
                 QJsonObject sizeObj;
                 if (!localSizeArr.isEmpty()) {
@@ -8492,8 +8965,16 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
                     sizeObj.insert(QStringLiteral("size_system"), refSizeSystem);
                 if (!sizeObj.contains(QStringLiteral("size_class")) && !refSizeClass.isEmpty())
                     sizeObj.insert(QStringLiteral("size_class"), refSizeClass);
-                sizeObj.insert(QStringLiteral("body_type"),   QStringLiteral("regular"));
-                sizeObj.insert(QStringLiteral("height_type"), QStringLiteral("regular"));
+                // body_type / height_type = "regular": these are OPPOSITE between the
+                // two composites — REQUIRED for shapewear_size (error 99022 without
+                // them) but NOT ALLOWED for apparel_size (error 90248 with them). So
+                // send them only for shapewear_size; never inject them for apparel.
+                if (!isApparelComposite) {
+                    if (!sizeObj.contains(QStringLiteral("body_type")))
+                        sizeObj.insert(QStringLiteral("body_type"),   QStringLiteral("regular"));
+                    if (!sizeObj.contains(QStringLiteral("height_type")))
+                        sizeObj.insert(QStringLiteral("height_type"), QStringLiteral("regular"));
+                }
 
                 QString sizeVal;
                 if (!localSizeArr.isEmpty())
@@ -8518,37 +8999,40 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
                 }
                 if (!sizeObj.isEmpty()) {
                     sizeObj.insert(QStringLiteral("marketplace_id"), mpId);
-                    addPatch(QStringLiteral("apparel_size"), QJsonArray{sizeObj});
+                    addPatch(compositeSizeAttr, QJsonArray{sizeObj});
                 }
                 QStringList miss;
                 if (!sizeObj.contains(QStringLiteral("size")))        miss << QStringLiteral("size");
                 if (!sizeObj.contains(QStringLiteral("size_system"))) miss << QStringLiteral("size_system");
                 if (!sizeObj.contains(QStringLiteral("size_class")))  miss << QStringLiteral("size_class");
-                logOut->append(tr("%1 apparel_size=%2%3")
-                    .arg(e.sku,
+                logOut->append(tr("%1 %2=%3%4")
+                    .arg(e.sku, compositeSizeAttr,
                          QString::fromUtf8(QJsonDocument(sizeObj).toJson(QJsonDocument::Compact)),
                          miss.isEmpty() ? QString()
                                         : QStringLiteral("  ⚠ MISSING: ") + miss.join(QStringLiteral(","))));
             } else if (hasSimpleSize) {
-                // Simple `size`: [{value, language_tag, marketplace_id}] — free text,
-                // language_tag REQUIRED. Prefer the child's own stored value (already
-                // the right language); else the converted bare size for this country.
-                QJsonValue sizeV = rawOr(QStringLiteral("size"), {});
+                // Simple size attribute (name from schema, e.g. `size`/`size_name`):
+                // [{value, language_tag, marketplace_id}] — free text, language_tag
+                // REQUIRED. Prefer the child's own stored value (already the right
+                // language); else the converted bare size for this country.
+                QJsonValue sizeV = rawOr(simpleSizeAttr, {});
                 if (!usable(sizeV) && !bareSize.isEmpty())
                     sizeV = QJsonArray{QJsonObject{
                         {QStringLiteral("value"),          bareSize},
                         {QStringLiteral("language_tag"),   langTag},
                         {QStringLiteral("marketplace_id"), mpId}}};
                 if (usable(sizeV)) {
-                    addPatch(QStringLiteral("size"), sizeV);
-                    logOut->append(tr("%1 size=%2").arg(
-                        e.sku,
+                    addPatch(simpleSizeAttr, sizeV);
+                    logOut->append(tr("%1 %2=%3").arg(
+                        e.sku, simpleSizeAttr,
                         QString::fromUtf8(QJsonDocument(sizeV.toArray()).toJson(QJsonDocument::Compact))));
                 } else {
                     logOut->append(tr("⚠ %1: no size available — theme attribute missing!").arg(e.sku));
                 }
             } else {
-                logOut->append(tr("⚠ %1: schema has neither apparel_size nor size!").arg(e.sku));
+                logOut->append(tr("⚠ %1: schema has no usable size attribute (candidates: %2)!")
+                                   .arg(e.sku, sizeCandidates.isEmpty()
+                                        ? QStringLiteral("none") : sizeCandidates.join(QStringLiteral(", "))));
             }
 
             // target_gender / age_range_description — only when the schema defines
@@ -9359,29 +9843,35 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                 const QString ptForSchema = actualPt.isEmpty() ? m_productType : actualPt;
                 QSet<QString> ptProps;
                 co_await m_api->fetchProductTypeSchemaProps(mpId, ptForSchema, &ptProps);
-                QStringList sizingProps;
-                for (const QString &p : {QStringLiteral("size"), QStringLiteral("apparel_size"),
-                                         QStringLiteral("color"), QStringLiteral("color_name"),
-                                         QStringLiteral("color_map"),
-                                         QStringLiteral("special_size_type")}) {
-                    if (ptProps.contains(p)) sizingProps << p;
+                // List EVERY top-level property whose name contains "size" or
+                // "color" — reveals the exact attribute name a product type uses
+                // (e.g. SWIMWEAR's size dimension) without guessing.
+                QStringList sizeCols, colorCols;
+                for (const QString &p : ptProps) {
+                    if (p.contains(QStringLiteral("size"), Qt::CaseInsensitive))  sizeCols  << p;
+                    if (p.contains(QStringLiteral("color"), Qt::CaseInsensitive)) colorCols << p;
                 }
-                appendLog(tr("  schema (%1): %2 top-level attrs; sizing-related: %3")
-                              .arg(ptForSchema)
-                              .arg(ptProps.size())
-                              .arg(sizingProps.isEmpty() ? tr("(none)")
-                                                         : sizingProps.join(QStringLiteral(", "))));
-                if (ptProps.contains(QStringLiteral("apparel_size"))) {
+                sizeCols.sort(); colorCols.sort();
+                appendLog(tr("  schema (%1): %2 top-level attrs").arg(ptForSchema).arg(ptProps.size()));
+                appendLog(tr("    size-named attrs: %1").arg(
+                    sizeCols.isEmpty() ? tr("(none)") : sizeCols.join(QStringLiteral(", "))));
+                appendLog(tr("    color-named attrs: %1").arg(
+                    colorCols.isEmpty() ? tr("(none)") : colorCols.join(QStringLiteral(", "))));
+                // Always dump the full schema to /tmp so conditional (allOf) size
+                // definitions can be inspected even when there's no top-level size.
+                {
                     QStringList sysEnums, clsEnums;
                     QString schemaDump;
                     co_await m_api->fetchApparelSizeSchemaInfo(mpId, ptForSchema,
                                                                &sysEnums, &clsEnums, &schemaDump);
-                    appendLog(tr("  apparel_size.size_system allowed: %1").arg(
-                        sysEnums.isEmpty() ? tr("(none found)") : sysEnums.join(QStringLiteral(", "))));
-                    appendLog(tr("  apparel_size.size_class allowed: %1").arg(
-                        clsEnums.isEmpty() ? tr("(none found)") : clsEnums.join(QStringLiteral(", "))));
                     if (!schemaDump.isEmpty())
-                        appendLog(tr("  schema dump: %1").arg(schemaDump));
+                        appendLog(tr("    full schema dump: %1").arg(schemaDump));
+                    if (!sysEnums.isEmpty())
+                        appendLog(tr("    apparel_size.size_system allowed: %1")
+                                      .arg(sysEnums.join(QStringLiteral(", "))));
+                    if (!clsEnums.isEmpty())
+                        appendLog(tr("    apparel_size.size_class allowed: %1")
+                                      .arg(clsEnums.join(QStringLiteral(", "))));
                 }
             }
             ++step;
@@ -9766,6 +10256,60 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                         }
                     }
 
+                    // ── Size review dialog (before any submission) ──────────
+                    // Collected child sizes are sometimes wrong in the source data.
+                    // Show every child's size in FR/ES numbering and let the user
+                    // correct it before the feed runs. Corrections are per-child in
+                    // FR numbering; the feed converts them to each region.
+                    QHash<QString, QString> sizeOverridesFr;
+                    {
+                        QDialog dlg(this);
+                        dlg.setWindowTitle(tr("Review sizes (FR/ES numbering)"));
+                        auto *vlay = new QVBoxLayout(&dlg);
+                        vlay->addWidget(new QLabel(tr(
+                            "Check each child's size (FR/ES numbering). Correct any wrong value;\n"
+                            "other marketplaces are converted from it. Leave as-is if correct.")));
+                        auto *form = new QFormLayout;
+                        QHash<QString, QLineEdit*> edits;
+                        QHash<QString, QString> prefill;
+                        for (const auto &e : tplEntries) {
+                            if (e.isParent || e.sku.isEmpty()) continue;
+                            QString fr = e.size;
+                            if (!fr.isEmpty() && !e.sizeSource.isEmpty()
+                                    && e.sizeSource != QLatin1String("FR"))
+                                fr = FillerSize::convertSize(fr, e.sizeSource, QStringLiteral("FR"));
+                            if (fr.startsWith(QStringLiteral("numeric_"))) fr = fr.mid(8);
+                            auto *edit = new QLineEdit(fr);
+                            edit->setMaximumWidth(90);
+                            const QString label = e.sku + (e.color.isEmpty()
+                                ? QString() : QStringLiteral(" (%1)").arg(e.color));
+                            // Selectable so the SKU/ASIN can be copied out.
+                            auto *rowLabel = new QLabel(label);
+                            rowLabel->setTextInteractionFlags(Qt::TextSelectableByMouse
+                                                              | Qt::TextSelectableByKeyboard);
+                            form->addRow(rowLabel, edit);
+                            edits.insert(e.sku, edit);
+                            prefill.insert(e.sku, fr);
+                        }
+                        vlay->addLayout(form);
+                        auto *btns = new QDialogButtonBox(
+                            QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+                        vlay->addWidget(btns);
+                        connect(btns, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+                        connect(btns, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+                        if (dlg.exec() == QDialog::Accepted) {
+                            for (auto it = edits.constBegin(); it != edits.constEnd(); ++it) {
+                                const QString v = it.value()->text().trimmed();
+                                // Only record real corrections (changed & non-empty).
+                                if (!v.isEmpty() && v != prefill.value(it.key()))
+                                    sizeOverridesFr.insert(it.key(), v);
+                            }
+                            if (!sizeOverridesFr.isEmpty())
+                                appendLog(tr("Size corrections: %1").arg(
+                                    QStringList(sizeOverridesFr.keys()).join(QStringLiteral(", "))));
+                        }
+                    }
+
                     // ── Full-fidelity JSON_LISTINGS_FEED, one per marketplace ──
                     // Mirrors the manual flat file: complete parent row + complete
                     // child rows, localized per country. checkListing before/after
@@ -9802,7 +10346,7 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                         co_await _buildFullVariationMessages(
                             feedMpId, feedMpCode, feedParentSku, m_productType,
                             variationTheme, parentAttrs, tplEntries,
-                            familyAttrFallback, &feedMessages, &buildLog);
+                            familyAttrFallback, sizeOverridesFr, &feedMessages, &buildLog);
                         for (const QString &l : buildLog)
                             appendLog(QStringLiteral("  ") + l);
 

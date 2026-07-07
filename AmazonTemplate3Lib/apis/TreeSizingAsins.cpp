@@ -405,7 +405,8 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
                                    family.parentAsin,
                                    family.children.first().title,
                                    shoeWidths,
-                                   brand);
+                                   brand,
+                                   p.sku);
 
             // Emit images grouped by unique color. Dedup by canonical color key
             // (lowercased + cross-language translation) so that "Black" and "Schwarz"

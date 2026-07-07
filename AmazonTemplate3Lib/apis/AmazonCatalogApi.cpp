@@ -811,6 +811,82 @@ QCoro::Task<void> AmazonCatalogApi::fetchCatalogApparelAttrs(
     co_return;
 }
 
+// ---------------------------------------------------------------------------
+// fetchPackageDims — item_package_weight / item_package_dimensions → g / cm
+// ---------------------------------------------------------------------------
+QCoro::Task<void> AmazonCatalogApi::fetchPackageDims(
+    QString marketplaceId, QString asin, PackageDims* out)
+{
+    *out = PackageDims{};
+    static const QStringList kData{QStringLiteral("attributes")};
+    QByteArray body;
+    co_await _doGet(marketplaceId, asin, kData, &body);
+    if (body.isEmpty()) co_return;
+    const QJsonObject attrs =
+        QJsonDocument::fromJson(body).object().value(QStringLiteral("attributes")).toObject();
+
+    auto toGrams = [](double v, const QString &u) {
+        const QString l = u.toLower();
+        if (l.startsWith(QStringLiteral("kilo")) || l == QStringLiteral("kg")) return v * 1000.0;
+        if (l.startsWith(QStringLiteral("pound")) || l == QStringLiteral("lb")) return v * 453.592;
+        if (l.startsWith(QStringLiteral("ounce")) || l == QStringLiteral("oz")) return v * 28.3495;
+        if (l.startsWith(QStringLiteral("milligram"))) return v / 1000.0;
+        return v; // grams
+    };
+    auto toCm = [](double v, const QString &u) {
+        const QString l = u.toLower();
+        if (l.startsWith(QStringLiteral("millimet")) || l == QStringLiteral("mm")) return v / 10.0;
+        if (l.startsWith(QStringLiteral("met")) || l == QStringLiteral("m")) return v * 100.0;
+        if (l.startsWith(QStringLiteral("inch")) || l == QStringLiteral("in")) return v * 2.54;
+        if (l.startsWith(QStringLiteral("f")) /*feet*/) return v * 30.48;
+        return v; // centimeters
+    };
+    // A measure attribute is an array of objects with "value" + "unit".
+    auto readMeasure = [](const QJsonValue &v, double *value, QString *unit) {
+        const QJsonObject o = v.isArray() ? v.toArray().first().toObject() : v.toObject();
+        *value = o.value(QStringLiteral("value")).toDouble();
+        *unit  = o.value(QStringLiteral("unit")).toString();
+    };
+
+    if (attrs.contains(QStringLiteral("item_package_weight"))) {
+        double v = 0; QString u;
+        readMeasure(attrs.value(QStringLiteral("item_package_weight")), &v, &u);
+        out->weightG = toGrams(v, u);
+    }
+    const QJsonValue dimVal = attrs.value(QStringLiteral("item_package_dimensions"));
+    if (!dimVal.isUndefined()) {
+        const QJsonObject dim = dimVal.isArray() ? dimVal.toArray().first().toObject()
+                                                 : dimVal.toObject();
+        auto axis = [&](const QString &key) -> double {
+            const QJsonObject a = dim.value(key).toObject();
+            return toCm(a.value(QStringLiteral("value")).toDouble(),
+                        a.value(QStringLiteral("unit")).toString());
+        };
+        out->lengthCm = axis(QStringLiteral("length"));
+        out->widthCm  = axis(QStringLiteral("width"));
+        out->heightCm = axis(QStringLiteral("height"));
+    }
+
+    // GTIN/EAN/UPC (product identifier) and country of origin.
+    const QJsonArray idArr = attrs.value(QStringLiteral("externally_assigned_product_identifier")).toArray();
+    if (!idArr.isEmpty())
+        out->gtin = idArr.first().toObject().value(QStringLiteral("value")).toString();
+    out->originCountry = firstAttrValue(attrs, QStringLiteral("country_of_origin"));
+    co_return;
+}
+
+QCoro::Task<void> AmazonCatalogApi::fetchListingText(
+    QString marketplaceId, QString asin, QString* title, QStringList* bullets)
+{
+    title->clear();
+    bullets->clear();
+    AsinItem item;
+    co_await _fetchAsinItem(asin, marketplaceId, &item);
+    *title   = item.title;
+    *bullets = item.bulletPoints;
+    co_return;
+}
+
 // searchCatalogForApparelAttrs — keyword search for a similar product that has the wanted attrs
 // ---------------------------------------------------------------------------
 QCoro::Task<void> AmazonCatalogApi::searchCatalogForApparelAttrs(
@@ -1776,6 +1852,28 @@ QCoro::Task<void> AmazonCatalogApi::fetchProductTypeSchemaProps(
     const QJsonObject props = root.value(QStringLiteral("properties")).toObject();
     for (auto it = props.constBegin(); it != props.constEnd(); ++it)
         propsOut->insert(it.key());
+    co_return;
+}
+
+QCoro::Task<void> AmazonCatalogApi::fetchCompositeSizeEnums(
+    QString marketplaceId, QString productType, QString compositeAttr,
+    QStringList* sizeSystems, QStringList* sizeClasses)
+{
+    sizeSystems->clear();
+    sizeClasses->clear();
+
+    QByteArray schemaData;
+    co_await _fetchPtSchema(marketplaceId, productType, &schemaData);
+    if (schemaData.isEmpty()) co_return;
+    const QJsonObject root = QJsonDocument::fromJson(schemaData).object();
+    const QJsonObject node = findSchemaProperty(root, compositeAttr);
+    if (node.isEmpty()) co_return;
+
+    QMap<QString, QString> sysPairs, clsPairs;
+    collectEnumPairs(findSchemaProperty(node, QStringLiteral("size_system")), &sysPairs);
+    collectEnumPairs(findSchemaProperty(node, QStringLiteral("size_class")),  &clsPairs);
+    for (auto it = sysPairs.constBegin(); it != sysPairs.constEnd(); ++it) *sizeSystems << it.key();
+    for (auto it = clsPairs.constBegin(); it != clsPairs.constEnd(); ++it) *sizeClasses << it.key();
     co_return;
 }
 

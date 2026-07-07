@@ -37,6 +37,14 @@ public:
     static void        cacheBrand(const QString &brand);
     static QStringList knownBrands();
 
+    // Looks up the manufacturer / GSPR representative names mapped to a brand
+    // in a given store (country + label). Empty outputs if not configured.
+    static void lookupBrandEntities(const QString &country, const QString &label,
+                                    const QString &brand,
+                                    QString *manufacturerName, QString *gsprRepName,
+                                    qint64 *manufacturerId = nullptr,
+                                    qint64 *gsprRepId = nullptr);
+
     // Known brands not yet used by a store of the same country (per-country
     // uniqueness rule) — candidates for "Add brand" on that store.
     QStringList availableBrandsForStore(int storeRow) const;

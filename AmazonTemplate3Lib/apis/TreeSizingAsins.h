@@ -66,9 +66,11 @@ signals:
     // bullet points and material/fabric attributes for use in content generation.
     // shoeWidths: unique shoe_width values collected across ALL children (empty for non-shoe products).
     // brand: first non-empty "brand" attribute across children (empty if none).
+    // parentSku: seller SKU of the parent, constant across marketplaces (unlike
+    // parentAsin, which depends on which region's catalog answered first).
     void attributesFetched(QStringList bulletPoints, QStringList materialAttrs,
                            QString mainImageUrl, QString parentAsin, QString firstChildTitle,
-                           QStringList shoeWidths, QString brand);
+                           QStringList shoeWidths, QString brand, QString parentSku);
     // Images grouped by color variant: each pair is (colorName, imageUrls).
     // For size-only products, deduplication by color yields a single entry.
     // For color variants, one entry per unique color is emitted so each

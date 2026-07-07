@@ -126,6 +126,24 @@ public:
     QCoro::Task<void> fetchCatalogApparelAttrs(QString marketplaceId, QString asin,
                                                CatalogApparelAttrs* out);
 
+    // Package weight (grams) and dimensions (cm) from the listing's
+    // item_package_weight / item_package_dimensions attributes. Any field left
+    // at 0 was absent. Units are converted to g / cm.
+    struct PackageDims {
+        double weightG = 0;
+        double lengthCm = 0;
+        double widthCm = 0;
+        double heightCm = 0;
+        QString gtin;          // EAN/UPC/GTIN from externally_assigned_product_identifier
+        QString originCountry; // country_of_origin (value as returned, e.g. "China")
+    };
+    QCoro::Task<void> fetchPackageDims(QString marketplaceId, QString asin, PackageDims* out);
+
+    // Localized title + bullet points for an ASIN on a specific marketplace,
+    // so each Temu country store can be filled with its own language's text.
+    QCoro::Task<void> fetchListingText(QString marketplaceId, QString asin,
+                                       QString* title, QStringList* bullets);
+
     // Search the catalog for a product matching keywords that has at least one of wantedAttrs
     // filled. Writes the first matching attrs into *out and the ASIN into *foundAsin.
     QCoro::Task<void> searchCatalogForApparelAttrs(QString marketplaceId,
@@ -261,6 +279,17 @@ public:
     QCoro::Task<void> fetchProductTypeSchemaProps(QString marketplaceId,
                                                   QString productType,
                                                   QSet<QString>* propsOut);
+
+    // Raw allowed enum values of a composite size attribute's size_system and
+    // size_class sub-fields (e.g. apparel_size or shapewear_size). Unlike
+    // fetchApparelSizeSchemaInfo these are the bare enum tokens (no display
+    // names) — usable directly as feed values. Empty on failure.
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> fetchCompositeSizeEnums(QString marketplaceId,
+                                              QString productType,
+                                              QString compositeAttr,
+                                              QStringList* sizeSystems,
+                                              QStringList* sizeClasses);
 
     // Direct Listings Items API PATCH with op=delete — removes the given stored
     // entries of an attribute. Unlike JSON_LISTINGS_FEED (which does not support

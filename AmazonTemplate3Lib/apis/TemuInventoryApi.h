@@ -70,6 +70,92 @@ public:
     static constexpr int COMPLIANCE_TYPE_MANUFACTURER = 3;
     QCoro::Task<void> fetchComplianceEntities(int complianceInfoType, QList<RepEntity> *out);
 
+    // ----- Product create/update (bg.local.goods.*) -------------------------
+
+    // An existing goods matched by seller SKU (temu.local.goods.list.retrieve).
+    struct ExistingGoods {
+        bool    found = false;
+        qint64  goodsId = 0;
+        QString catId;
+        QString catName; // full category path when resolvable
+        QHash<QString, qint64> skuIdBySkuSn; // outSkuSn → skuId
+    };
+    QCoro::Task<void> lookupGoods(const QStringList &outSkuSns, ExistingGoods *out);
+
+    // One category attribute definition (bg.local.goods.template.get).
+    struct CategoryAttr {
+        qint64  pid = 0;
+        qint64  templatePid = 0;
+        qint64  refPid = 0;
+        QString name;
+        bool    required = false;
+        int     controlType = 1;        // 1 = pick from values, 0 = free number/text
+        qint64  parentTemplatePid = 0;  // 0 = always; else conditional on that parent
+        // Allowed values (value text → vid) when controlType == 1.
+        QList<QPair<QString, qint64>> values;
+    };
+    QCoro::Task<void> fetchCategoryTemplate(qint64 catId, QList<CategoryAttr> *out);
+
+    // One node of the category tree (bg.local.goods.cats.get).
+    struct CatNode {
+        qint64  catId = 0;
+        QString catName;
+        bool    leaf = false;
+    };
+    // Children of parentCatId (0 = the top-level categories).
+    QCoro::Task<void> fetchCategories(qint64 parentCatId, QList<CatNode> *out);
+
+    // Category suggestion (bg.local.goods.category.recommend). Returns a list
+    // of CANDIDATE leaf category ids (not a path). Names must be resolved via
+    // resolveCategoryPaths(); Temu exposes no id→name endpoint.
+    QCoro::Task<void> recommendCategory(const QString &goodsName, const QString &description,
+                                        const QString &imageUrl, QList<qint64> *candidateCatIds);
+
+    // Resolves the full "A › B › Leaf" path name for each target id by crawling
+    // the category tree from the root (bg.local.goods.cats.get), bounded to
+    // maxCalls fetches. Fills idToPath for the ids it locates; the internal
+    // node cache is reused across calls on the same instance.
+    QCoro::Task<void> resolveCategoryPaths(const QList<qint64> &targetIds, int maxCalls,
+                                           QHash<qint64, QString> *idToPath);
+
+    // Re-hosts a publicly reachable image URL onto Temu's CDN
+    // (bg.local.goods.image.upload). Returns the Temu CDN URL (empty on error).
+    QCoro::Task<QString> uploadImageToTemu(const QString &publicUrl);
+
+    // First configured shipping/cost template id for this store (empty if none).
+    QCoro::Task<void> fetchFreightTemplateId(QString *out);
+
+    // Generates (or fetches) a custom variation spec id under a parent spec
+    // (bg.local.goods.spec.id.get). parentSpecId e.g. 1001=Color, 3001=Size.
+    QCoro::Task<void> generateSpecId(qint64 catId, qint64 parentSpecId,
+                                     const QString &childSpecName, qint64 *specIdOut);
+
+    // Create (bg.local.goods.add) or update (bg.local.goods.update) a goods.
+    // payload holds the assembled objects; on update, goodsId is injected.
+    // Returns the goodsId on success, 0 on failure (see lastError()).
+    QCoro::Task<qint64> publishGoods(const QJsonObject &payload, bool isUpdate, qint64 goodsId);
+
+    // Create a product via the V3 publishing API (temu.local.goods.v3.add) —
+    // the simpler, current path: image URLs are fetched by Temu, the category
+    // is given by name (extCatName), attributes/variations are free name/value,
+    // and price is basePrice/listPrice objects. Returns goodsId (0 on failure).
+    QCoro::Task<qint64> publishGoodsV3(const QJsonObject &payload);
+
+    // Partially updates an existing goods (bg.local.goods.partial.update): pass
+    // goodsId + the fields to change (goodsBasic, bulletPoints, …). Note Temu
+    // rejects edits until the product finishes processing (~10 min after
+    // creation) with 150010205. Returns false on error (see lastError()).
+    QCoro::Task<bool> updateGoodsPartial(qint64 goodsId, const QJsonObject &fields);
+
+    // Submits GPSR compliance for a created goods (bg.local.goods.compliance.edit).
+    // Verified shapes: manufacturer (repType 3) + EU responsible person (repType 2)
+    // via gpsrInfo, and Product Identification (templateId 51) via extraTemplate.
+    // Any repId of 0 is skipped; an empty productIdentifier is skipped. Returns
+    // false on error (see lastError()).
+    QCoro::Task<bool> submitCompliance(qint64 goodsId, qint64 manufacturerRepId,
+                                       qint64 gsprRepId,
+                                       const QString &productIdentifier = {});
+
     QString lastError() const { return m_lastError; }
 
 private:
@@ -84,6 +170,9 @@ private:
 
     QNetworkAccessManager *m_nam = nullptr;
     QNetworkAccessManager *_nam();
+
+    // Category-path cache reused across resolveCategoryPaths() calls.
+    QHash<qint64, QString> m_catPathCache;
 
     QCoro::Task<void> _postRequest(const QString &method, const QJsonObject &businessParams, QJsonObject *resultOut);
 
