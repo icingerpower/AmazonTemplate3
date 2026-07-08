@@ -24,6 +24,7 @@ class QFormLayout;
 class QPushButton;
 class QDoubleSpinBox;
 class QTableWidget;
+class QTreeWidget;
 
 // Review-and-publish dialog for creating/updating a product page on Temu from
 // the data loaded in PaneSizing. One product, one or more target stores (one
@@ -69,11 +70,16 @@ public:
         // One entry per variation child.
         struct Sku {
             QString outSkuSn;
+            QString asin;  // child ASIN (same across EU marketplaces)
             QString color;
             QString size;
             QString gtin; // EAN/UPC/GTIN from Amazon (product identifier)
             // Package weight/dimensions from Amazon (0 = unknown).
             double  weightG = 0, lengthCm = 0, widthCm = 0, heightCm = 0;
+            // Localized colour/size names per country code ("FR","DE",…), fetched
+            // from each store's own Amazon marketplace. Falls back to color/size.
+            QMap<QString, QString> colorByCountry;
+            QMap<QString, QString> sizeByCountry;
         };
         QList<Sku>  skus;
         QString     originCountry; // country of origin (e.g. "China")
@@ -106,6 +112,8 @@ private:
     QCoro::Task<void> _aiPickCategory();     // CLI walks the named tree to a leaf
     QCoro::Task<void> _browseCategory();     // cascading cats.get picker
     QCoro::Task<void> _fetchAmazonPrices();  // per-SKU Amazon price → base/reference
+    QCoro::Task<void> _fetchAmazonStock();   // per-SKU Amazon qty → Amz Qty col + stock
+    QCoro::Task<void> _fetchAmazonData();     // prices then stock, in sequence
     void _applyRowToAll();                   // copy current row's price+packaging to all
     QCoro::Task<void> _publish();            // assemble payload + create/update
     QCoro::Task<bool> _submitCompliance(qint64 goodsId); // GPSR manufacturer + EU rep
@@ -170,6 +178,10 @@ private:
     QPlainTextEdit *m_bulletsEdit = nullptr;
     QPlainTextEdit *m_descEdit = nullptr;
     QTableWidget   *m_skuTable = nullptr; // one row per variation SKU
+    // Per-country variation names: top-level per SKU, one child per selected
+    // country showing that country's localized Color / Size (editable). Row r
+    // aligns with m_skuTable row r and m_draft.skus[r].
+    QTreeWidget    *m_variantTree = nullptr;
     QPlainTextEdit *m_logEdit = nullptr;
     QPushButton    *m_publishBtn = nullptr;
 

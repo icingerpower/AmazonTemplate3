@@ -118,7 +118,12 @@ BrokenChildTable::getFixTargets(bool forParents, bool forImages) const
             const int maxImgs = m_maxImages.value(ck).value(mi, 0);
 
             const bool needsParent = forParents && !h.hasParent;
-            const bool needsImages = forImages && maxImgs > 0 && h.imageCount < maxImgs;
+            // Image count is "wrong" only when the listing HAS some images but fewer
+            // than the family max (0 < count < max). count == 0 usually means the
+            // page was never created — nothing to copy images onto — so it is not an
+            // image-fix target (it's flagged dark-orange in the table instead).
+            const bool needsImages = forImages && maxImgs > 0
+                                     && h.imageCount > 0 && h.imageCount < maxImgs;
             if (!needsParent && !needsImages) continue;
 
             targets.append({ri, mi, needsParent, needsImages});
@@ -160,6 +165,12 @@ QColor BrokenChildTable::_cellColor(int row, int mi) const
         return {};
     const QString ck = m_rows[row].color.toLower();
     const int maxImgs = m_maxImages.value(ck).value(mi, 0);
+    // No images at all usually means the page was never created on this
+    // marketplace — flag dark orange (distinct from a genuine broken cell).
+    if (h.imageCount == 0)
+        return QColor(160, 90, 0);
+    // Broken parent link, or a partial image set (some images but fewer than the
+    // family max) — a genuine "needs fixing" cell → red.
     if (!h.hasParent || (maxImgs > 0 && h.imageCount < maxImgs))
         return QColor(160, 20, 20);
     return {};

@@ -38,15 +38,20 @@
 
 #include <QHeaderView>
 #include <QTableWidget>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
 
 #include "AbstractCli.h"
 #include "DialogKeywordTemplates.h"
 #include "apis/AmazonPricingApi.h"
+#include "AbstractInventorySource.h"
+#include "AbstractInventorySourceFactory.h"
+#include "MarketplaceTypes.h"
 #include "../../common/workingdirectory/WorkingDirectoryManager.h"
 
 namespace {
 // Columns of the per-variation SKU table.
-enum SkuCol { kColSku = 0, kColAmazon, kColBase, kColRef, kColStock,
+enum SkuCol { kColSku = 0, kColAmazon, kColBase, kColRef, kColAmzQty, kColStock,
               kColWeight, kColL, kColW, kColH, kSkuColCount };
 } // namespace
 
@@ -236,7 +241,7 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     m_skuTable = new QTableWidget(m_draft.skus.size(), kSkuColCount, this);
     m_skuTable->setHorizontalHeaderLabels({
         tr("SKU"), tr("Amazon €"), tr("Base € (retailPrice)"), tr("Reference € (listPrice)"),
-        tr("Stock"), tr("Weight g"), tr("L cm"), tr("W cm"), tr("H cm")});
+        tr("Amz Qty"), tr("Stock"), tr("Weight g"), tr("L cm"), tr("W cm"), tr("H cm")});
     m_skuTable->horizontalHeader()->setStretchLastSection(false);
     m_skuTable->verticalHeader()->setVisible(false);
     for (int r = 0; r < m_draft.skus.size(); ++r) {
@@ -248,6 +253,8 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
         m_skuTable->setItem(r, kColAmazon, amz);
         for (int c = kColBase; c < kSkuColCount; ++c)
             m_skuTable->setItem(r, c, new QTableWidgetItem());
+        // Amazon quantity is fetched, not edited.
+        m_skuTable->item(r, kColAmzQty)->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
         m_skuTable->item(r, kColStock)->setText(QStringLiteral("0")); // default stock
         // Prefill packaging from Amazon (blank if unknown).
         const auto &ds = m_draft.skus.at(r);
@@ -261,10 +268,44 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     }
     m_skuTable->resizeColumnsToContents();
 
+    // --- Per-country variation-names tree: SKU → one child per selected country
+    // with that country's localized Colour / Size (editable). ---
+    QStringList variantCountries; // deduped, in selection order
+    for (const StorePick &sp : m_stores) {
+        const QString cc = sp.country.toUpper();
+        if (!cc.isEmpty() && !variantCountries.contains(cc))
+            variantCountries << cc;
+    }
+    m_variantTree = new QTreeWidget(this);
+    m_variantTree->setColumnCount(3);
+    m_variantTree->setHeaderLabels({tr("SKU / Country"), tr("Color"), tr("Size")});
+    m_variantTree->setEditTriggers(QAbstractItemView::DoubleClicked
+                                   | QAbstractItemView::SelectedClicked
+                                   | QAbstractItemView::EditKeyPressed);
+    m_variantTree->setMaximumHeight(200);
+    for (int r = 0; r < m_draft.skus.size(); ++r) {
+        const auto &ds = m_draft.skus.at(r);
+        auto *top = new QTreeWidgetItem(m_variantTree);
+        top->setText(0, ds.outSkuSn);
+        top->setText(1, ds.color);
+        top->setText(2, ds.size);
+        top->setFlags(top->flags() & ~Qt::ItemIsEditable); // source row read-only
+        for (const QString &cc : variantCountries) {
+            auto *child = new QTreeWidgetItem(top);
+            child->setText(0, cc);
+            child->setText(1, ds.colorByCountry.value(cc, ds.color));
+            child->setText(2, ds.sizeByCountry.value(cc, ds.size));
+            child->setFlags(child->flags() | Qt::ItemIsEditable); // colour/size editable
+        }
+        top->setExpanded(true);
+    }
+    m_variantTree->resizeColumnToContents(0);
+    m_variantTree->resizeColumnToContents(1);
+
     m_originEdit = new QLineEdit(m_draft.originCountry.isEmpty() ? QStringLiteral("China")
                                                                  : m_draft.originCountry, this);
     m_originEdit->setMaximumWidth(160);
-    auto *fetchPriceBtn = new QPushButton(tr("Fetch Amazon prices"), this);
+    auto *fetchPriceBtn = new QPushButton(tr("Fetch Amazon prices + stock"), this);
     auto *applyAllBtn   = new QPushButton(tr("Apply selected row to all"), this);
     auto *priceRow = new QHBoxLayout;
     priceRow->addWidget(new QLabel(tr("Country of origin:"), this));
@@ -292,6 +333,9 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     lay->addWidget(new QLabel(tr("Variations (price = base/selling; reference = base +20%):"), this));
     lay->addWidget(m_skuTable);
     lay->addLayout(priceRow);
+    lay->addWidget(new QLabel(tr("Per-country variation names (from each Amazon marketplace — "
+                                 "edit any colour/size):"), this));
+    lay->addWidget(m_variantTree);
     lay->addWidget(new QLabel(tr("Log:"), this));
     lay->addWidget(m_logEdit);
     lay->addWidget(buttons);
@@ -304,7 +348,7 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     connect(m_aiPickBtn,  &QPushButton::clicked, this, [this]() { m_catTask = _aiPickCategory(); });
     connect(m_browseBtn,  &QPushButton::clicked, this, [this]() { m_catTask = _browseCategory(); });
     connect(genBtn, &QPushButton::clicked, this, [this]() { m_textTask = _generateText(); });
-    connect(fetchPriceBtn, &QPushButton::clicked, this, [this]() { m_priceTask = _fetchAmazonPrices(); });
+    connect(fetchPriceBtn, &QPushButton::clicked, this, [this]() { m_priceTask = _fetchAmazonData(); });
     connect(applyAllBtn, &QPushButton::clicked, this, [this]() { _applyRowToAll(); });
     connect(editKwBtn, &QPushButton::clicked, this, [this]() {
         DialogKeywordTemplates dlg(this);
@@ -341,7 +385,7 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     _applySavedCategory();
     if (!m_stores.isEmpty())
         m_storeTask = _onStoreChanged();
-    m_priceTask = _fetchAmazonPrices(); // prefill base/reference prices
+    m_priceTask = _fetchAmazonData(); // prefill base/reference prices + Amazon stock
 }
 
 // Swaps the title/bullets/description editors to the given country's text,
@@ -755,6 +799,63 @@ QCoro::Task<void> DialogTemuCreateProduct::_fetchAmazonPrices()
     }
     api->deleteLater();
     m_logEdit->appendPlainText(tr("Prices ready. Edit any cell, or 'Apply selected row to all'."));
+}
+
+// Fetches the Amazon on-hand quantity per SKU via the shared inventory source
+// (the same AbstractInventorySource used by PaneMarketplaces — Amazon FBA today,
+// Octopia later), fills the "Amz Qty" column, and derives the Temu stock:
+// 1 unit when Amazon has at least 2 on hand, 0 otherwise.
+QCoro::Task<void> DialogTemuCreateProduct::_fetchAmazonStock()
+{
+    auto settings = WorkingDirectoryManager::instance()->settings();
+    QList<AbstractInventorySource *> sources =
+        AbstractInventorySourceFactory::buildAllInstances(settings.data());
+    auto cleanup = qScopeGuard([&] { qDeleteAll(sources); });
+    if (sources.isEmpty()) {
+        m_logEdit->appendPlainText(tr("No inventory source configured — stock left at 0."));
+        co_return;
+    }
+    AbstractInventorySource *src = sources.first();
+
+    QStringList skus;
+    for (int r = 0; r < m_skuTable->rowCount(); ++r) {
+        const QString sku = m_skuTable->item(r, kColSku)->text();
+        if (!sku.isEmpty()) skus << sku;
+    }
+    if (skus.isEmpty())
+        co_return;
+
+    m_logEdit->appendPlainText(tr("Fetching Amazon stock (%1)…").arg(src->displayName()));
+    QList<StockRecord> records;
+    co_await src->fetchInventory(skus, &records,
+        [this](const QString &m) { m_logEdit->appendPlainText(QStringLiteral("  ") + m); });
+
+    QHash<QString, int> availBySku;
+    for (const StockRecord &rec : records)
+        availBySku.insert(rec.sku, rec.available);
+
+    for (int r = 0; r < m_skuTable->rowCount(); ++r) {
+        const QString sku = m_skuTable->item(r, kColSku)->text();
+        if (!availBySku.contains(sku)) {
+            m_skuTable->item(r, kColAmzQty)->setText(QStringLiteral("?"));
+            continue;
+        }
+        const int avail = availBySku.value(sku);
+        m_skuTable->item(r, kColAmzQty)->setText(avail < 0 ? QStringLiteral("?")
+                                                           : QString::number(avail));
+        // 1 in stock when Amazon has ≥ 2 units, else 0.
+        m_skuTable->item(r, kColStock)->setText(avail >= 2 ? QStringLiteral("1")
+                                                           : QStringLiteral("0"));
+    }
+    m_logEdit->appendPlainText(tr("Stock set: 1 where Amazon ≥ 2 units, else 0 "
+                                  "(edit any cell to override)."));
+}
+
+// Prices then stock, in sequence, so the log stays readable.
+QCoro::Task<void> DialogTemuCreateProduct::_fetchAmazonData()
+{
+    co_await _fetchAmazonPrices();
+    co_await _fetchAmazonStock();
 }
 
 void DialogTemuCreateProduct::_applyRowToAll()
@@ -1438,9 +1539,21 @@ QCoro::Task<void> DialogTemuCreateProduct::_publish()
         if (ref <= 0) ref = base * 1.20;
 
         const DialogTemuCreateProduct::Draft::Sku &ds = m_draft.skus.value(r);
-        QString varName = QStringLiteral("Color"), varValue = ds.color;
-        if (varValue.isEmpty()) { varName = QStringLiteral("Size");  varValue = ds.size; }
-        if (varValue.isEmpty()) { varName = QStringLiteral("Color"); varValue = QStringLiteral("Standard"); }
+        // Colour/size for THIS store's country, from the per-country tree (which
+        // holds the localized, possibly hand-edited names); fall back to source.
+        const QString cc = _currentStore().country.toUpper();
+        QString varColor = ds.colorByCountry.value(cc, ds.color);
+        QString varSize  = ds.sizeByCountry.value(cc, ds.size);
+        if (m_variantTree && r < m_variantTree->topLevelItemCount()) {
+            QTreeWidgetItem *top = m_variantTree->topLevelItem(r);
+            for (int k = 0; k < top->childCount(); ++k) {
+                if (top->child(k)->text(0).compare(cc, Qt::CaseInsensitive) == 0) {
+                    varColor = top->child(k)->text(1).trimmed();
+                    varSize  = top->child(k)->text(2).trimmed();
+                    break;
+                }
+            }
+        }
 
         QJsonObject price;
         price.insert(QStringLiteral("basePrice"), eurPrice(base));
@@ -1452,9 +1565,27 @@ QCoro::Task<void> DialogTemuCreateProduct::_publish()
         pkg.insert(QStringLiteral("width"),  pkgVal(m_skuTable->item(r, kColW)->text().trimmed().toDouble()));
         pkg.insert(QStringLiteral("height"), pkgVal(m_skuTable->item(r, kColH)->text().trimmed().toDouble()));
 
-        QJsonObject variation;
-        variation.insert(QStringLiteral("name"), varName);
-        variation.insert(QStringLiteral("value"), varValue);
+        // Send BOTH variation dimensions when present (a colour+size product
+        // like Blue-S must not collapse all "Blue-*" onto one Color=Blue).
+        QJsonArray variations;
+        if (!varColor.isEmpty()) {
+            QJsonObject v;
+            v.insert(QStringLiteral("name"), QStringLiteral("Color"));
+            v.insert(QStringLiteral("value"), varColor);
+            variations.append(v);
+        }
+        if (!varSize.isEmpty()) {
+            QJsonObject v;
+            v.insert(QStringLiteral("name"), QStringLiteral("Size"));
+            v.insert(QStringLiteral("value"), varSize);
+            variations.append(v);
+        }
+        if (variations.isEmpty()) {
+            QJsonObject v;
+            v.insert(QStringLiteral("name"), QStringLiteral("Color"));
+            v.insert(QStringLiteral("value"), QStringLiteral("Standard"));
+            variations.append(v);
+        }
 
         QJsonArray imgs;
         for (const QString &u : temuImages) imgs.append(u);
@@ -1465,7 +1596,7 @@ QCoro::Task<void> DialogTemuCreateProduct::_publish()
         s.insert(QStringLiteral("price"), price);
         s.insert(QStringLiteral("quantity"), m_skuTable->item(r, kColStock)->text().trimmed().toInt());
         s.insert(QStringLiteral("packageInfo"), pkg);
-        s.insert(QStringLiteral("variations"), QJsonArray{variation});
+        s.insert(QStringLiteral("variations"), variations);
         // Product identifier (GTIN/EAN) from Amazon, when present.
         if (!ds.gtin.isEmpty()) {
             QJsonObject bc;

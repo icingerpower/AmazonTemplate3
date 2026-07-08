@@ -10,6 +10,7 @@
 #include <QMap>
 #include <QMenu>
 #include <QPair>
+#include <QPointer>
 #include <memory>
 
 #include <QCoro/QCoroTask>
@@ -31,6 +32,7 @@ class AmazonCatalogApi;
 class TreeSizingAsins;
 class QStandardItemModel;
 class QDoubleSpinBox;
+class QTableWidget;
 class AbstractSizeCategory;
 class QNetworkAccessManager;
 
@@ -184,6 +186,12 @@ private:
     void _ensureModel(const QDir &dir);
     void _refreshApi();
     QCoro::Task<void> _loadBrokenChildData(bool forceRefresh = false);
+    // Re-runs the parent check for a set of sizing subfolders without loading
+    // each product into the pane: fetches the family, checks each child's parent
+    // across marketplaces, and rewrites broken_child_health.json. Shows a
+    // tab-aware progress dialog (re-open the list to see refreshed columns).
+    // (GCC 13 ICE workaround: non-trivially-destructible params by value.)
+    QCoro::Task<void> _rerunParentChecks(QStringList folderNames, QString sizingDirPath);
     void _appendFixLog(const QString &asin, const QString &marketplace, const QString &details);
     // Runs the parent/image fix workflow on the Broken child table.
     // checkOnly: read-only diagnostic — settled listing state, issues,
@@ -317,6 +325,7 @@ private:
     // lookup, so the Temu category can be remembered per Amazon category.
     QCoro::Task<void> _ensureProductType();
     QCoro::Task<void> m_temuDialogTask;
+    QCoro::Task<void> m_parentCheckTask; // Re-run parent check (Load Sub Folder)
     // Rebuilds textEditAttributes from m_attributesBaseText + m_colorLogs,
     // stripping excluded colors.
     void _refreshAttributesText();

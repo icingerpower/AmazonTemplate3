@@ -705,6 +705,9 @@ void PaneSizing::_saveProductSettings()
     // have to parse it back out of the folder name.
     if (!m_currentAsin.isEmpty())
         s.setValue(QStringLiteral("sizing/parentAsin"), m_currentAsin);
+    // Persist the product brand so the Load Sub Folder list can show it.
+    if (!m_currentBrand.isEmpty())
+        s.setValue(QStringLiteral("sizing/brand"), m_currentBrand);
 
     s.setValue(QStringLiteral("sizing/mode"), ui->sizeRangeMain->mode());
     s.setValue(QStringLiteral("sizing/from"), ui->sizeRangeMain->from());
@@ -1534,6 +1537,7 @@ void PaneSizing::onLoadSubFolderClicked()
     struct SubFolderEntry {
         QDateTime  date;
         QString    category;
+        QString    brand;
         QString    folderName;
         QString    asin;
         bool       euParentFailed     = false;  // any EU mp has exists+!hasParent
@@ -1555,6 +1559,7 @@ void PaneSizing::onLoadSubFolderClicked()
         const QSettings ini(fi.filePath() + QStringLiteral("/settings.ini"),
                             QSettings::IniFormat);
         e.category = ini.value(QStringLiteral("sizing/type")).toString();
+        e.brand    = ini.value(QStringLiteral("sizing/brand")).toString();
 
         // Folders are named after the seller SKU, not the ASIN (see
         // _findExistingProductDir), so the ASIN needed to re-query the Amazon
@@ -1642,11 +1647,22 @@ void PaneSizing::onLoadSubFolderClicked()
     dlg.resize(900, 480);
     auto *layout = new QVBoxLayout(&dlg);
 
-    auto *table = new QTableWidget(entries.size(), 7, &dlg);
+    // Top row: re-run the parent check for the selected folder(s) without having
+    // to load each product one by one.
+    auto *topRow = new QHBoxLayout;
+    auto *rerunBtn = new QPushButton(tr("Re-run parent check (selected)"), &dlg);
+    rerunBtn->setToolTip(tr("Re-checks the EU/America parent links for the selected "
+                            "folders and rewrites broken_child_health.json."));
+    topRow->addWidget(rerunBtn);
+    topRow->addStretch();
+    layout->addLayout(topRow);
+
+    auto *table = new QTableWidget(entries.size(), 8, &dlg);
     table->setHorizontalHeaderLabels(
-        {tr("Date"), tr("Category"), tr("EU Parent"), tr("America"), tr("Size Image"), tr("A+ Upload"), tr("Folder")});
+        {tr("Date"), tr("Category"), tr("Brand"), tr("EU Parent"), tr("America"),
+         tr("Size Image"), tr("A+ Upload"), tr("Folder")});
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
-    table->setSelectionMode(QAbstractItemView::SingleSelection);
+    table->setSelectionMode(QAbstractItemView::ExtendedSelection);
     table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table->horizontalHeader()->setStretchLastSection(true);
     table->verticalHeader()->hide();
@@ -1656,6 +1672,7 @@ void PaneSizing::onLoadSubFolderClicked()
         table->setItem(i, 0, new QTableWidgetItem(
             e.date.toString(QStringLiteral("yyyy-MM-dd HH:mm"))));
         table->setItem(i, 1, new QTableWidgetItem(e.category));
+        table->setItem(i, 2, new QTableWidgetItem(e.brand));
 
         // EU Parent column
         {
@@ -1664,7 +1681,7 @@ void PaneSizing::onLoadSubFolderClicked()
             it->setTextAlignment(Qt::AlignCenter);
             if (e.euParentFailed)
                 it->setBackground(QColor(220, 60, 60));
-            table->setItem(i, 2, it);
+            table->setItem(i, 3, it);
         }
         // America column
         {
@@ -1673,7 +1690,7 @@ void PaneSizing::onLoadSubFolderClicked()
             it->setTextAlignment(Qt::AlignCenter);
             if (e.amParentFailed)
                 it->setBackground(QColor(220, 60, 60));
-            table->setItem(i, 3, it);
+            table->setItem(i, 4, it);
         }
         // Size Image upload status column
         {
@@ -1688,7 +1705,7 @@ void PaneSizing::onLoadSubFolderClicked()
                 it->setText(QStringLiteral("✗"));
                 it->setBackground(QColor(220, 60, 60));
             }
-            table->setItem(i, 4, it);
+            table->setItem(i, 5, it);
         }
         // A+ Upload column
         {
@@ -1700,18 +1717,34 @@ void PaneSizing::onLoadSubFolderClicked()
             } else {
                 it->setText(QStringLiteral("—"));
             }
-            table->setItem(i, 5, it);
+            table->setItem(i, 6, it);
         }
-        table->setItem(i, 6, new QTableWidgetItem(e.folderName));
+        table->setItem(i, 7, new QTableWidgetItem(e.folderName));
     }
-    table->resizeColumnToContents(0);
-    table->resizeColumnToContents(1);
-    table->resizeColumnToContents(2);
-    table->resizeColumnToContents(3);
-    table->resizeColumnToContents(4);
-    table->resizeColumnToContents(5);
+    for (int c = 0; c <= 6; ++c)
+        table->resizeColumnToContents(c);
     table->selectRow(0);
     layout->addWidget(table);
+
+    // "Re-run parent check": collect the selected folders, then close the (modal)
+    // list with a custom result code so the check runs in the background with a
+    // tab-aware progress dialog (the user can switch tabs while it works, then
+    // re-open the list to see the refreshed columns).
+    constexpr int kRerunResult = 2;
+    QStringList rerunFolders;
+    connect(rerunBtn, &QPushButton::clicked, &dlg, [&]() {
+        const QModelIndexList sel = table->selectionModel()->selectedRows();
+        if (sel.isEmpty()) {
+            QMessageBox::information(&dlg, tr("Re-run parent check"),
+                                     tr("Select one or more rows first."));
+            return;
+        }
+        rerunFolders.clear();
+        for (const QModelIndex &mi : sel)
+            if (mi.row() >= 0 && mi.row() < entries.size())
+                rerunFolders << entries[mi.row()].folderName;
+        dlg.done(kRerunResult);
+    });
 
     auto *btns = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
     connect(btns, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
@@ -1720,7 +1753,13 @@ void PaneSizing::onLoadSubFolderClicked()
     connect(table, &QTableWidget::cellDoubleClicked, &dlg, &QDialog::accept);
     layout->addWidget(btns);
 
-    if (dlg.exec() != QDialog::Accepted)
+    const int dlgResult = dlg.exec();
+    if (dlgResult == kRerunResult) {
+        if (!rerunFolders.isEmpty())
+            m_parentCheckTask = _rerunParentChecks(rerunFolders, sizingDir.absolutePath());
+        return;
+    }
+    if (dlgResult != QDialog::Accepted)
         return;
 
     const int row = table->currentRow();
@@ -3748,6 +3787,7 @@ QCoro::Task<void> PaneSizing::onTemuCreateOrUpdate()
                     continue;
                 DialogTemuCreateProduct::Draft::Sku s;
                 s.outSkuSn = sku.isEmpty() ? asin : sku;
+                s.asin = asin;
                 s.color = m_treeModel->data(
                     m_treeModel->index(j, TreeSizingAsins::Color, pi), Qt::DisplayRole).toString().trimmed();
                 s.size = m_treeModel->data(
@@ -3810,6 +3850,20 @@ QCoro::Task<void> PaneSizing::onTemuCreateOrUpdate()
             co_await m_api->fetchListingText(mpId, m_currentAsin, &title, &bullets);
             if (!title.isEmpty() || !bullets.isEmpty())
                 draft.textByCountry.insert(cc, {title, bullets});
+
+            // Localized colour/size names: one variation-family fetch per country
+            // (child ASINs are the same across EU marketplaces), mapped by ASIN.
+            AmazonCatalogApi::VariationFamily fam;
+            co_await m_api->fetchVariationFamily(m_currentAsin, mpId, &fam);
+            QHash<QString, QPair<QString, QString>> byAsin; // asin → (color,size)
+            for (const AmazonCatalogApi::AsinItem &ch : fam.children)
+                byAsin.insert(ch.asin, {ch.color, ch.size});
+            for (auto &s : draft.skus) {
+                if (!byAsin.contains(s.asin)) continue;
+                const auto cs = byAsin.value(s.asin);
+                if (!cs.first.isEmpty())  s.colorByCountry.insert(cc, cs.first);
+                if (!cs.second.isEmpty()) s.sizeByCountry.insert(cc, cs.second);
+            }
         }
     }
 
@@ -8090,6 +8144,104 @@ void PaneSizing::onSavedSizeEditClicked()
 // ---------------------------------------------------------------------------
 // BrokenChildTable population
 // ---------------------------------------------------------------------------
+
+QCoro::Task<void> PaneSizing::_rerunParentChecks(QStringList folderNames, QString sizingDirPath)
+{
+    _refreshApi();
+    if (!m_api || folderNames.isEmpty())
+        co_return;
+
+    const QDir sizingDir(sizingDirPath);
+
+    // Marketplace columns to check — the same set the pane uses.
+    QList<BrokenChildTable::MarketplaceSpec> specs;
+    for (const AmazonMarketplace &mp : AmazonMarketplace::all())
+        specs.append({mp.marketplaceId(), mp.countryCode()});
+
+    // EU / America marketplace IDs (to summarize which side has a broken parent).
+    static const QSet<QString> euSet = {
+        QStringLiteral("A1F83G8C2ARO7P"), QStringLiteral("A1PA6795UKMFR9"),
+        QStringLiteral("A13V1IB3VIYZZH"), QStringLiteral("A1RKKUPIHCS9HS"),
+        QStringLiteral("APJ6JRA9NG5V4"),  QStringLiteral("A1805IZSGTT6HS"),
+    };
+    static const QSet<QString> amSet = {
+        QStringLiteral("ATVPDKIKX0DER"), QStringLiteral("A2EUQ1WTGCTBG2"),
+    };
+
+    AplusProgressUi progressUi = createAplusProgressDialog(this, folderNames.size());
+    if (progressUi.statusPtr && progressUi.statusPtr->window())
+        progressUi.statusPtr->window()->setWindowTitle(tr("Re-run parent check"));
+    setAplusStatus(progressUi, tr("Re-running parent check for %1 folder(s)…")
+                   .arg(folderNames.size()), 0);
+
+    int done = 0;
+    for (const QString &folderName : folderNames) {
+        const QDir folder(sizingDir.filePath(folderName));
+        appendAplusLog(progressUi.logPtr, tr("── %1 ──").arg(folderName));
+
+        QSettings ini(folder.filePath(QStringLiteral("settings.ini")), QSettings::IniFormat);
+        QString parentAsin = ini.value(QStringLiteral("sizing/parentAsin")).toString();
+        if (parentAsin.isEmpty()) {
+            const int dash = folderName.indexOf(QLatin1Char('-'));
+            parentAsin = (dash > 0) ? folderName.left(dash) : folderName;
+        }
+        if (parentAsin.isEmpty()) {
+            appendAplusLog(progressUi.logPtr, tr("  no parent ASIN — skipped"));
+            continue;
+        }
+
+        appendAplusLog(progressUi.logPtr, tr("  parent %1 — fetching variation family…").arg(parentAsin));
+        AmazonCatalogApi::VariationFamily fam;
+        co_await m_api->fetchVariationFamily(parentAsin, QStringLiteral("A13V1IB3VIYZZH"), &fam);
+        if (fam.children.isEmpty()) {
+            appendAplusLog(progressUi.logPtr, tr("  no children found (%1)")
+                .arg(m_api->lastError().isEmpty() ? tr("empty family") : m_api->lastError()));
+            ++done;
+            setAplusStatus(progressUi, tr("Checked %1/%2").arg(done).arg(folderNames.size()), done);
+            continue;
+        }
+
+        QList<BrokenChildTable::ChildEntry> childEntries;
+        for (const AmazonCatalogApi::AsinItem &ch : fam.children) {
+            if (ch.asin.isEmpty()) continue;
+            BrokenChildTable::ChildEntry e;
+            e.asin       = ch.asin;
+            e.color      = ch.color;
+            e.size       = ch.size;
+            e.parentAsin = parentAsin;
+            childEntries.append(e);
+        }
+        appendAplusLog(progressUi.logPtr,
+            tr("  %1 child(ren) — checking parent links across marketplaces…").arg(childEntries.size()));
+
+        BrokenChildTable checkTable;
+        checkTable.setMarketplaces(specs);
+        co_await checkTable.populate(m_api.get(), std::move(childEntries));
+        checkTable.saveToDir(folder);
+
+        bool euFailed = false, amFailed = false;
+        for (const auto &row : checkTable.rows()) {
+            for (int s = 0; s < row.health.size() && s < specs.size(); ++s) {
+                const auto &h = row.health.at(s);
+                if (h.loaded && h.exists && !h.hasParent) {
+                    if (euSet.contains(specs.at(s).id)) euFailed = true;
+                    if (amSet.contains(specs.at(s).id)) amFailed = true;
+                }
+            }
+        }
+        appendAplusLog(progressUi.logPtr, tr("  done — EU parent %1, America parent %2. Saved.")
+            .arg(euFailed ? tr("BROKEN ✗") : tr("ok ✓"), amFailed ? tr("BROKEN ✗") : tr("ok ✓")));
+
+        ++done;
+        setAplusStatus(progressUi, tr("Checked %1/%2").arg(done).arg(folderNames.size()), done);
+    }
+
+    appendAplusLog(progressUi.logPtr,
+        tr("All done — %1 folder(s) checked. Re-open 'Load Sub Folder' to see the refreshed columns.")
+        .arg(done));
+    setAplusStatus(progressUi, tr("Complete — %1/%2 checked.").arg(done).arg(folderNames.size()),
+                   folderNames.size());
+}
 
 QCoro::Task<void> PaneSizing::_loadBrokenChildData(bool forceRefresh)
 {
