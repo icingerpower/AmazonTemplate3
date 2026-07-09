@@ -2157,16 +2157,20 @@ QString PaneSizing::_filterColorLog(const QString &log) const
 // colors must not appear in it.
 void PaneSizing::_refreshAttributesText()
 {
-    QString text = m_attributesBaseText;
+    // The attributes box IS the product description injected into every A+ prompt.
+    // We deliberately DO NOT append the colour-detection summary ("→ N distinct
+    // color(s): Orange", etc.) any more: naming a single "major" colour there made
+    // the AI recolour mixed-design products into that one colour (e.g. a whole
+    // orange product). The per-image paths already tell the AI the real design, so
+    // the colour summary is redundant and harmful. Colour detection still runs for
+    // the image→colour mapping and exclusion logic; it just no longer pollutes the
+    // prompt. (Kept in m_colorLogs for the console log below.)
     for (const QString &log : m_colorLogs) {
-        const QString filtered = _filterColorLog(log);
-        if (filtered.trimmed().isEmpty())
-            continue;
-        if (!text.isEmpty())
-            text += QStringLiteral("\n\n");
-        text += filtered;
+        const QString filtered = _filterColorLog(log).trimmed();
+        if (!filtered.isEmpty())
+            qDebug().noquote() << "PaneSizing colour detection:\n" << filtered;
     }
-    ui->textEditAttributes->setPlainText(text.trimmed());
+    ui->textEditAttributes->setPlainText(m_attributesBaseText.trimmed());
 }
 
 // The product main image comes from the FIRST child, which may be an excluded
@@ -3862,7 +3866,14 @@ QCoro::Task<void> PaneSizing::onTemuCreateOrUpdate()
                 if (!byAsin.contains(s.asin)) continue;
                 const auto cs = byAsin.value(s.asin);
                 if (!cs.first.isEmpty())  s.colorByCountry.insert(cc, cs.first);
-                if (!cs.second.isEmpty()) s.sizeByCountry.insert(cc, cs.second);
+                if (!cs.second.isEmpty()) {
+                    // Localize the physical size to this country's unit system:
+                    // Amazon can store a rectangle product's size in inches on
+                    // every marketplace (including FR) — convertUnit turns that
+                    // into cm for metric countries and "inch / cm" for English.
+                    s.sizeByCountry.insert(cc,
+                        FillerSize::convertUnit(cc, cs.second).toString());
+                }
             }
         }
     }

@@ -282,7 +282,6 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     m_variantTree->setEditTriggers(QAbstractItemView::DoubleClicked
                                    | QAbstractItemView::SelectedClicked
                                    | QAbstractItemView::EditKeyPressed);
-    m_variantTree->setMaximumHeight(200);
     for (int r = 0; r < m_draft.skus.size(); ++r) {
         const auto &ds = m_draft.skus.at(r);
         auto *top = new QTreeWidgetItem(m_variantTree);
@@ -301,6 +300,7 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     }
     m_variantTree->resizeColumnToContents(0);
     m_variantTree->resizeColumnToContents(1);
+    m_variantTree->setMinimumHeight(90);
 
     m_originEdit = new QLineEdit(m_draft.originCountry.isEmpty() ? QStringLiteral("China")
                                                                  : m_draft.originCountry, this);
@@ -325,19 +325,53 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     m_publishBtn = buttons->addButton(tr("Create / Update"), QDialogButtonBox::AcceptRole);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
+    // Stack the resizable sections in a vertical splitter so the user can drag a
+    // handle to give more room to whichever section they're working in — e.g.
+    // enlarge the images/preview/attributes row when reordering images.
+    auto *mainSplit = new QSplitter(Qt::Vertical, this);
+    mainSplit->setChildrenCollapsible(false);
+
+    mainSplit->addWidget(topSplit); // images | preview | attributes
+
+    auto *textWidget = new QWidget(mainSplit);
+    textWidget->setLayout(textForm);
+    mainSplit->addWidget(textWidget);
+
+    auto *varWidget = new QWidget(mainSplit);
+    auto *varLay = new QVBoxLayout(varWidget);
+    varLay->setContentsMargins(0, 0, 0, 0);
+    varLay->addWidget(new QLabel(tr("Variations (price = base/selling; reference = base +20%):"),
+                                 varWidget));
+    varLay->addWidget(m_skuTable);
+    varLay->addLayout(priceRow);
+    mainSplit->addWidget(varWidget);
+
+    auto *treeWidget = new QWidget(mainSplit);
+    auto *treeLay = new QVBoxLayout(treeWidget);
+    treeLay->setContentsMargins(0, 0, 0, 0);
+    treeLay->addWidget(new QLabel(tr("Per-country variation names (from each Amazon marketplace — "
+                                     "edit any colour/size):"), treeWidget));
+    treeLay->addWidget(m_variantTree);
+    mainSplit->addWidget(treeWidget);
+
+    auto *logWidget = new QWidget(mainSplit);
+    auto *logLay = new QVBoxLayout(logWidget);
+    logLay->setContentsMargins(0, 0, 0, 0);
+    logLay->addWidget(new QLabel(tr("Log:"), logWidget));
+    logLay->addWidget(m_logEdit);
+    mainSplit->addWidget(logWidget);
+
+    // Sensible default share (images area gets the most).
+    mainSplit->setStretchFactor(0, 4); // images / preview / attributes
+    mainSplit->setStretchFactor(1, 2); // text
+    mainSplit->setStretchFactor(2, 3); // variations table
+    mainSplit->setStretchFactor(3, 2); // per-country tree
+    mainSplit->setStretchFactor(4, 1); // log
+
     auto *lay = new QVBoxLayout(this);
     lay->addLayout(header);
     lay->addLayout(catRow);
-    lay->addWidget(topSplit, 1);
-    lay->addLayout(textForm);
-    lay->addWidget(new QLabel(tr("Variations (price = base/selling; reference = base +20%):"), this));
-    lay->addWidget(m_skuTable);
-    lay->addLayout(priceRow);
-    lay->addWidget(new QLabel(tr("Per-country variation names (from each Amazon marketplace — "
-                                 "edit any colour/size):"), this));
-    lay->addWidget(m_variantTree);
-    lay->addWidget(new QLabel(tr("Log:"), this));
-    lay->addWidget(m_logEdit);
+    lay->addWidget(mainSplit, 1);
     lay->addWidget(buttons);
 
     // --- Wiring ---

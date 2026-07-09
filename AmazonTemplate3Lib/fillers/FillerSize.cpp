@@ -432,7 +432,7 @@ QCoro::Task<void> FillerSize::askAiToUpdateSettingsForProductType(
     co_return;
 }
 
-QVariant FillerSize::convertUnit(const QString &countryTo, const QVariant &origValue) const
+QVariant FillerSize::convertUnit(const QString &countryTo, const QVariant &origValue)
 {
     QString val = origValue.toString();
     // Regex for "Dimension Chain"

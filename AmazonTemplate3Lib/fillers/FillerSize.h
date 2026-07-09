@@ -63,6 +63,13 @@ public:
                                const QString &gender = QStringLiteral("female"),
                                bool isShoes = false);
 
+    // Localizes a physical dimension string to the target country's unit system:
+    // metric countries → cm only (converts an inch value if that's all it has);
+    // English/inch countries → "inch / cm". Values with no cm/inch unit (e.g. a
+    // plain clothing size like "M" or "38") are returned unchanged. Pure (no
+    // member state), so callable without an instance.
+    static QVariant convertUnit(const QString &countryTo, const QVariant &origValue);
+
 
 private:
     QVariant convertClothingSize(
@@ -80,10 +87,6 @@ private:
             Gender targetGender,
             Age age_range_description,
             const QString &productType,
-            const QVariant &origValue) const;
-
-    QVariant convertUnit(
-            const QString &countryTo,
             const QVariant &origValue) const;
 
     QCoro::Task<void> askAiToUpdateSettingsForProductType(
