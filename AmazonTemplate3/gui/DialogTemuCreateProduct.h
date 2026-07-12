@@ -98,6 +98,11 @@ public:
 
 private:
     QCoro::Task<void> _onStoreChanged();     // lookup create/update + load template
+    // Loads the Temu attribute template for the category currently in m_catIdEdit.
+    // Split out of _onStoreChanged so the category pickers can refresh attributes
+    // WITHOUT re-running the store lookup (which would overwrite the just-picked
+    // category with the existing product's category).
+    QCoro::Task<void> _loadCategoryTemplate();
     // Runs the CLI via the async API bridged to a QFuture — co_awaiting
     // cli->runPrompt() directly crashes (GCC frees the Task frame while the
     // QProcess::finished signal is still queued).

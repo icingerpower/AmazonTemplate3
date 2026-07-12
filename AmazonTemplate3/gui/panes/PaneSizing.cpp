@@ -8190,40 +8190,68 @@ QCoro::Task<void> PaneSizing::_rerunParentChecks(QStringList folderNames, QStrin
         const QDir folder(sizingDir.filePath(folderName));
         appendAplusLog(progressUi.logPtr, tr("── %1 ──").arg(folderName));
 
-        QSettings ini(folder.filePath(QStringLiteral("settings.ini")), QSettings::IniFormat);
-        QString parentAsin = ini.value(QStringLiteral("sizing/parentAsin")).toString();
-        if (parentAsin.isEmpty()) {
-            const int dash = folderName.indexOf(QLatin1Char('-'));
-            parentAsin = (dash > 0) ? folderName.left(dash) : folderName;
-        }
-        if (parentAsin.isEmpty()) {
-            appendAplusLog(progressUi.logPtr, tr("  no parent ASIN — skipped"));
-            continue;
+        // Reuse the child ASINs already stored in broken_child_health.json from
+        // the original load. The saved parent ASIN is marketplace-specific and is
+        // often absent in FR, so a fresh single-marketplace family fetch fails
+        // (that was the bug). The child ASINs don't change — we only need to
+        // re-check their parent health across marketplaces.
+        QList<BrokenChildTable::ChildEntry> childEntries;
+        {
+            BrokenChildTable existing;
+            existing.setMarketplaces(specs);
+            if (existing.loadFromDir(folder)) {
+                for (const auto &row : existing.rows()) {
+                    if (row.asin.isEmpty()) continue;
+                    BrokenChildTable::ChildEntry e;
+                    e.asin       = row.asin;       e.parentAsin = row.parentAsin;
+                    e.parentSku  = row.parentSku;  e.sku        = row.sku;
+                    e.color      = row.color;      e.size       = row.size;
+                    e.sizeSource = row.sizeSource;
+                    childEntries.append(e);
+                }
+                if (!childEntries.isEmpty())
+                    appendAplusLog(progressUi.logPtr,
+                        tr("  %1 cached child(ren) from the last check.").arg(childEntries.size()));
+            }
         }
 
-        appendAplusLog(progressUi.logPtr, tr("  parent %1 — fetching variation family…").arg(parentAsin));
-        AmazonCatalogApi::VariationFamily fam;
-        co_await m_api->fetchVariationFamily(parentAsin, QStringLiteral("A13V1IB3VIYZZH"), &fam);
-        if (fam.children.isEmpty()) {
-            appendAplusLog(progressUi.logPtr, tr("  no children found (%1)")
-                .arg(m_api->lastError().isEmpty() ? tr("empty family") : m_api->lastError()));
+        // Fallback when there's no cache yet: resolve the family by trying each
+        // marketplace, since the parent ASIN varies per country.
+        if (childEntries.isEmpty()) {
+            QSettings ini(folder.filePath(QStringLiteral("settings.ini")), QSettings::IniFormat);
+            QString parentAsin = ini.value(QStringLiteral("sizing/parentAsin")).toString();
+            if (parentAsin.isEmpty()) {
+                const int dash = folderName.indexOf(QLatin1Char('-'));
+                parentAsin = (dash > 0) ? folderName.left(dash) : folderName;
+            }
+            appendAplusLog(progressUi.logPtr,
+                tr("  no cache — fetching family for parent %1…").arg(parentAsin));
+            AmazonCatalogApi::VariationFamily fam;
+            if (!parentAsin.isEmpty()) {
+                for (const auto &spec : specs) {
+                    co_await m_api->fetchVariationFamily(parentAsin, spec.id, &fam);
+                    if (!fam.children.isEmpty()) {
+                        appendAplusLog(progressUi.logPtr, tr("    resolved in %1").arg(spec.code));
+                        break;
+                    }
+                }
+            }
+            for (const AmazonCatalogApi::AsinItem &ch : fam.children) {
+                if (ch.asin.isEmpty()) continue;
+                BrokenChildTable::ChildEntry e;
+                e.asin = ch.asin; e.color = ch.color; e.size = ch.size; e.parentAsin = parentAsin;
+                childEntries.append(e);
+            }
+        }
+
+        if (childEntries.isEmpty()) {
+            appendAplusLog(progressUi.logPtr, tr("  no children found — skipped"));
             ++done;
             setAplusStatus(progressUi, tr("Checked %1/%2").arg(done).arg(folderNames.size()), done);
             continue;
         }
-
-        QList<BrokenChildTable::ChildEntry> childEntries;
-        for (const AmazonCatalogApi::AsinItem &ch : fam.children) {
-            if (ch.asin.isEmpty()) continue;
-            BrokenChildTable::ChildEntry e;
-            e.asin       = ch.asin;
-            e.color      = ch.color;
-            e.size       = ch.size;
-            e.parentAsin = parentAsin;
-            childEntries.append(e);
-        }
         appendAplusLog(progressUi.logPtr,
-            tr("  %1 child(ren) — checking parent links across marketplaces…").arg(childEntries.size()));
+            tr("  %1 child(ren) — re-checking parent links across marketplaces…").arg(childEntries.size()));
 
         BrokenChildTable checkTable;
         checkTable.setMarketplaces(specs);

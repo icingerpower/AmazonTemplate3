@@ -612,6 +612,13 @@ QCoro::Task<void> DialogTemuCreateProduct::_onStoreChanged()
         m_statusLabel->setText(tr("○ will CREATE (SKU not found on this store)"));
     }
 
+    co_await _loadCategoryTemplate();
+}
+
+QCoro::Task<void> DialogTemuCreateProduct::_loadCategoryTemplate()
+{
+    if (!m_api)
+        co_return;
     const qint64 catId = m_catIdEdit->text().trimmed().toLongLong();
     if (catId <= 0) {
         m_logEdit->appendPlainText(tr("Set a category id, then click \"Load attributes\"."));
@@ -1158,7 +1165,7 @@ QCoro::Task<void> DialogTemuCreateProduct::_suggestCategory()
     m_catNameLabel->setText(chosenName.isEmpty() ? tr("(suggested)") : chosenName);
     m_logEdit->appendPlainText(tr("  chose %1 %2").arg(chosen).arg(chosenName));
     _saveCategoryMapping(chosen, chosenName); // remember for this Amazon type
-    co_await _onStoreChanged(); // load attributes for the chosen category
+    co_await _loadCategoryTemplate(); // load attributes for the chosen category
 }
 
 QCoro::Task<void> DialogTemuCreateProduct::_aiPickCategory()
@@ -1350,7 +1357,7 @@ QCoro::Task<void> DialogTemuCreateProduct::_aiPickCategory()
     m_catNameLabel->setText(best.path);
     _saveCategoryMapping(best.id, best.path);
     m_logEdit->appendPlainText(tr("Chosen: %1").arg(best.path));
-    co_await _onStoreChanged();
+    co_await _loadCategoryTemplate();
 }
 
 QCoro::Task<void> DialogTemuCreateProduct::_browseCategory()
@@ -1449,7 +1456,7 @@ QCoro::Task<void> DialogTemuCreateProduct::_browseCategory()
         m_catIdEdit->setText(QString::number(chosenId));
         m_catNameLabel->setText(m_catPath.value(chosenId, chosenName));
         _saveCategoryMapping(chosenId, m_catPath.value(chosenId, chosenName));
-        co_await _onStoreChanged();
+        co_await _loadCategoryTemplate();
     }
 }
 
