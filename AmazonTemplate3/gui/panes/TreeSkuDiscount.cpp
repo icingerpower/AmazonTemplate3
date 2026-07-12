@@ -108,6 +108,11 @@ QVariant TreeSkuDiscount::data(const QModelIndex &index, int role) const
         if (role == Qt::ToolTipRole && col == ColAgedUnits && p.minMonths > 0)
             return tr("%1 of %2 units have been stored for at least %3 month(s).")
                        .arg(p.agedUnits).arg(p.available).arg(p.minMonths);
+        // Checkbox on the product row: untick to exclude it from Apply.
+        if (role == Qt::CheckStateRole && col == ColSku)
+            return p.checked ? Qt::Checked : Qt::Unchecked;
+        if (role == Qt::ToolTipRole && col == ColSku)
+            return tr("Untick to skip this product when applying discounts.");
         return {};
     }
 
@@ -222,7 +227,21 @@ Qt::ItemFlags TreeSkuDiscount::flags(const QModelIndex &index) const
     // (no editor, not user-toggleable).
     if (index.column() == ColEraseMinMax)
         return Qt::ItemIsEnabled | Qt::ItemIsSelectable;
-    // Other cells are editable purely to allow text selection/copy from the
-    // editor on double-click; changes are discarded (setData is not overridden).
-    return Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsEditable;
+    Qt::ItemFlags f = Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsEditable;
+    // Product (parent) rows: first column carries a user checkbox to include/
+    // exclude the product from Apply.
+    if (isProduct(index) && index.column() == ColSku)
+        f |= Qt::ItemIsUserCheckable;
+    return f;
+}
+
+bool TreeSkuDiscount::setData(const QModelIndex &index, const QVariant &value, int role)
+{
+    if (role == Qt::CheckStateRole && index.isValid() && isProduct(index)
+        && index.column() == ColSku && index.row() < m_products.size()) {
+        m_products[index.row()].checked = (value.toInt() == Qt::Checked);
+        emit dataChanged(index, index, {Qt::CheckStateRole});
+        return true;
+    }
+    return false;   // all other edits are read-only (copy-only cells)
 }

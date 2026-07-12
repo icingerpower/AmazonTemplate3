@@ -31,10 +31,6 @@
 #include <zlib.h>
 #include <functional>
 
-namespace {
-const QString kEuEndpoint = QStringLiteral("sellingpartnerapi-eu.amazon.com");
-}
-
 static QByteArray gunzip(const QByteArray &data)
 {
     if (data.isEmpty()) return {};
@@ -54,6 +50,29 @@ static QByteArray gunzip(const QByteArray &data)
     } while (ret == Z_OK);
     inflateEnd(&zs);
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// Regional endpoint
+// ---------------------------------------------------------------------------
+
+QString AmazonInventoryApi::endpointForMarketplace(const QString &marketplaceId)
+{
+    static const QStringList naIds = {
+        QStringLiteral("ATVPDKIKX0DER"),  // US
+        QStringLiteral("A2EUQ1WTGCTBG2"), // CA
+        QStringLiteral("A1AM78C64UM0Y8"), // MX
+        QStringLiteral("A2Q3Y263D00KWC"), // BR
+    };
+    static const QStringList feIds = {
+        QStringLiteral("A1VC38T7YXB528"), // JP
+        QStringLiteral("A39IBJ37TRP1C6"), // AU
+    };
+    if (naIds.contains(marketplaceId))
+        return QStringLiteral("sellingpartnerapi-na.amazon.com");
+    if (feIds.contains(marketplaceId))
+        return QStringLiteral("sellingpartnerapi-fe.amazon.com");
+    return QStringLiteral("sellingpartnerapi-eu.amazon.com"); // EU default
 }
 
 // ---------------------------------------------------------------------------
@@ -167,7 +186,7 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventory(QStringList skus,
     for (int start = 0; start < skus.size(); start += kChunk) {
         const QStringList chunk = skus.mid(start, kChunk);
 
-        QUrl url(QStringLiteral("https://%1/fba/inventory/v1/summaries").arg(kEuEndpoint));
+        QUrl url(QStringLiteral("https://%1/fba/inventory/v1/summaries").arg(endpointForMarketplace(m_marketplaceId)));
         QUrlQuery query;
         query.addQueryItem("details", "true");
         query.addQueryItem("granularityType", "Marketplace");
@@ -283,7 +302,7 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventoryReport(
         }
 
         // Step 1: create report
-        QUrl createUrl(QStringLiteral("https://%1/reports/2021-06-30/reports").arg(kEuEndpoint));
+        QUrl createUrl(QStringLiteral("https://%1/reports/2021-06-30/reports").arg(endpointForMarketplace(m_marketplaceId)));
         QNetworkRequest createReq(createUrl);
         createReq.setRawHeader("x-amz-access-token", token.toUtf8());
         createReq.setRawHeader("Accept", "application/json");
@@ -317,7 +336,7 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventoryReport(
         // Step 2: poll until DONE (max ~5 min per attempt)
         bool shouldRetry = false;
         QUrl pollUrl(QStringLiteral("https://%1/reports/2021-06-30/reports/%2")
-                     .arg(kEuEndpoint, reportId));
+                     .arg(endpointForMarketplace(m_marketplaceId), reportId));
         for (int attempt = 0; attempt < 30; ++attempt) {
             QTimer pollTimer;
             pollTimer.setSingleShot(true);
@@ -348,7 +367,7 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventoryReport(
                 const QString errDocId = reportObj.value(QStringLiteral("reportDocumentId")).toString();
                 if (!errDocId.isEmpty()) {
                     QUrl errDocUrl(QStringLiteral("https://%1/reports/2021-06-30/documents/%2")
-                                   .arg(kEuEndpoint, errDocId));
+                                   .arg(endpointForMarketplace(m_marketplaceId), errDocId));
                     QNetworkRequest errDocReq(errDocUrl);
                     errDocReq.setRawHeader("x-amz-access-token", token.toUtf8());
                     errDocReq.setRawHeader("Accept", "application/json");
@@ -392,7 +411,7 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventoryReport(
     // Step 3: get download URL
     co_await _getAccessToken(&token);
     const QUrl docUrl(QStringLiteral("https://%1/reports/2021-06-30/documents/%2")
-                      .arg(kEuEndpoint, reportDocumentId));
+                      .arg(endpointForMarketplace(m_marketplaceId), reportDocumentId));
     QNetworkRequest docReq(docUrl);
     docReq.setRawHeader("x-amz-access-token", token.toUtf8());
     docReq.setRawHeader("Accept", "application/json");
@@ -613,7 +632,7 @@ QCoro::Task<void> AmazonInventoryApi::_runReport(
         }
 
         // Step 1: create report
-        QUrl createUrl(QStringLiteral("https://%1/reports/2021-06-30/reports").arg(kEuEndpoint));
+        QUrl createUrl(QStringLiteral("https://%1/reports/2021-06-30/reports").arg(endpointForMarketplace(m_marketplaceId)));
         QNetworkRequest createReq(createUrl);
         createReq.setRawHeader("x-amz-access-token", token.toUtf8());
         createReq.setRawHeader("Accept", "application/json");
@@ -647,7 +666,7 @@ QCoro::Task<void> AmazonInventoryApi::_runReport(
         // Step 2: poll until DONE (max ~5 min per attempt)
         bool shouldRetry = false;
         QUrl pollUrl(QStringLiteral("https://%1/reports/2021-06-30/reports/%2")
-                     .arg(kEuEndpoint, reportId));
+                     .arg(endpointForMarketplace(m_marketplaceId), reportId));
         for (int attempt = 0; attempt < 30; ++attempt) {
             QTimer pollTimer;
             pollTimer.setSingleShot(true);
@@ -676,7 +695,7 @@ QCoro::Task<void> AmazonInventoryApi::_runReport(
                 const QString errDocId = reportObj.value(QStringLiteral("reportDocumentId")).toString();
                 if (!errDocId.isEmpty()) {
                     QUrl errDocUrl(QStringLiteral("https://%1/reports/2021-06-30/documents/%2")
-                                   .arg(kEuEndpoint, errDocId));
+                                   .arg(endpointForMarketplace(m_marketplaceId), errDocId));
                     QNetworkRequest errDocReq(errDocUrl);
                     errDocReq.setRawHeader("x-amz-access-token", token.toUtf8());
                     errDocReq.setRawHeader("Accept", "application/json");
@@ -720,7 +739,7 @@ QCoro::Task<void> AmazonInventoryApi::_runReport(
     // Step 3: get download URL
     co_await _getAccessToken(&token);
     const QUrl docUrl(QStringLiteral("https://%1/reports/2021-06-30/documents/%2")
-                      .arg(kEuEndpoint, reportDocumentId));
+                      .arg(endpointForMarketplace(m_marketplaceId), reportDocumentId));
     QNetworkRequest docReq(docUrl);
     docReq.setRawHeader("x-amz-access-token", token.toUtf8());
     docReq.setRawHeader("Accept", "application/json");
@@ -954,7 +973,7 @@ QCoro::Task<void> AmazonInventoryApi::fetchSalesUnits(QString sku, int days,
         for (int attempt = 0; attempt < 3; ++attempt) {
             co_await _getAccessToken(&token);
 
-            QUrl url(QStringLiteral("https://%1/sales/v1/orderMetrics").arg(kEuEndpoint));
+            QUrl url(QStringLiteral("https://%1/sales/v1/orderMetrics").arg(endpointForMarketplace(m_marketplaceId)));
             QUrlQuery query;
             query.addQueryItem("marketplaceIds", mpId);
             query.addQueryItem("interval", interval);
@@ -1019,7 +1038,7 @@ QCoro::Task<QJsonArray> AmazonInventoryApi::fetchFulfillmentOrders(const QDateTi
         co_return {};
     }
 
-    QUrl url(QStringLiteral("https://%1/fba/outbound/2020-07-01/fulfillmentOrders").arg(kEuEndpoint));
+    QUrl url(QStringLiteral("https://%1/fba/outbound/2020-07-01/fulfillmentOrders").arg(endpointForMarketplace(m_marketplaceId)));
     QUrlQuery query;
     query.addQueryItem("queryStartDate", startDateTime.toString(Qt::ISODate));
     url.setQuery(query);
@@ -1088,7 +1107,7 @@ QCoro::Task<bool> AmazonInventoryApi::createFulfillmentOrder(const QJsonObject &
         co_return false;
     }
 
-    QUrl url(QStringLiteral("https://%1/fba/outbound/2020-07-01/fulfillmentOrders").arg(kEuEndpoint));
+    QUrl url(QStringLiteral("https://%1/fba/outbound/2020-07-01/fulfillmentOrders").arg(endpointForMarketplace(m_marketplaceId)));
     const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
 
     for (int attempt = 0; attempt < 3; ++attempt) {
@@ -1143,7 +1162,7 @@ QCoro::Task<QJsonObject> AmazonInventoryApi::getFulfillmentOrder(const QString &
     }
 
     QUrl url(QStringLiteral("https://%1/fba/outbound/2020-07-01/fulfillmentOrders/%2")
-                 .arg(kEuEndpoint)
+                 .arg(endpointForMarketplace(m_marketplaceId))
                  .arg(QString::fromUtf8(QUrl::toPercentEncoding(sellerFulfillmentOrderId))));
 
     for (int attempt = 0; attempt < 3; ++attempt) {

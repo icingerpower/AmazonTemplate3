@@ -115,6 +115,9 @@ public:
     QString lastError() const { return m_lastError; }
     void clearLastError() { m_lastError.clear(); }
 
+    // SP-API regional host for a marketplace ID (EU / NA / FE). Defaults to EU.
+    static QString endpointForMarketplace(const QString &marketplaceId);
+
 private:
     QString m_lwaClientId;
     QString m_lwaClientSecret;

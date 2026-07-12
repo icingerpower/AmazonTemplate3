@@ -59,6 +59,7 @@ public:
         QString asin;
         QString title;                 // preferred-language title (FR→EN)
         QString productType;           // SP-API product type (needed for PATCH)
+        bool    checked     = true;    // when false, Apply skips this product
         int     available   = 0;       // shared pan-EU FBA pool (parent Units)
         int     agedUnits   = 0;       // units stored >= the min-months threshold
         int     unitsSold90 = -1;      // units sold last 90d across marketplaces (-1 = unknown)
@@ -78,6 +79,10 @@ public:
     int rowCount(const QModelIndex &parent = {}) const override;
     int columnCount(const QModelIndex &parent = {}) const override;
     QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override;
+    // Only handles toggling a product (parent) row's check state; all other
+    // edits are rejected (returns false) so cell text stays read-only.
+    bool setData(const QModelIndex &index, const QVariant &value,
+                 int role = Qt::EditRole) override;
     QVariant headerData(int section, Qt::Orientation orientation,
                         int role = Qt::DisplayRole) const override;
     // Editable so a double-click opens an editor whose text can be selected and

@@ -12,6 +12,7 @@
 #include "SettingsTable.h"
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDateTime>
 #include <QDialog>
 #include <QHeaderView>
@@ -26,24 +27,50 @@
 #include <QtMath>
 
 namespace {
-// EU marketplaces: they share the pan-EU FBA pool and the EU SP-API endpoint,
-// so the (EU) inventory-age report and per-country pricing all apply. IDs match
-// TableCurrencyRates entries so currency + EUR rate resolve. NA markets are
-// deliberately excluded — they don't share the EU inventory pool. Display order.
-const QStringList kEuMarketplaceIds = {
-    QStringLiteral("A1PA6795UKMFR9"), // DE
-    QStringLiteral("A1F83G8C2ARO7P"), // UK
-    QStringLiteral("A13V1IB3VIYZZH"), // FR
-    QStringLiteral("A1RKKUPIHCS9HS"), // ES
-    QStringLiteral("APJ6JRA9NG5V4"),  // IT
-    QStringLiteral("A1805IZSGTT6HS"), // NL
-    QStringLiteral("AMEN7PMS3EDWL"),  // BE
-    QStringLiteral("A1C3SOZRARQ6R3"), // PL
-    QStringLiteral("A2NODRKZP88ZB9"), // SE
+// A discount region: one FBA inventory pool + SP-API endpoint. Countries,
+// inventory age and sales are all scoped to it. isNa picks the EU vs NA LWA
+// token/seller. Marketplace IDs match TableCurrencyRates so currency + rate
+// resolve. homeMp is queried for the inventory-age report and product type;
+// preferred/fallback title marketplaces set the parent-row title language.
+struct RegionDef {
+    QString     name;
+    QStringList marketplaceIds;
+    QString     homeMp;
+    QString     preferredTitleMp;
+    QString     fallbackTitleMp;
+    bool        isNa;
 };
-const QString kDeMarketplaceId = QStringLiteral("A1PA6795UKMFR9");
-const QString kFrMarketplaceId = QStringLiteral("A13V1IB3VIYZZH"); // preferred title
-const QString kUkMarketplaceId = QStringLiteral("A1F83G8C2ARO7P"); // English fallback
+
+const QList<RegionDef> &regions()
+{
+    static const QList<RegionDef> r = {
+        { QStringLiteral("Europe"),
+          { QStringLiteral("A1PA6795UKMFR9"), // DE
+            QStringLiteral("A1F83G8C2ARO7P"), // UK
+            QStringLiteral("A13V1IB3VIYZZH"), // FR
+            QStringLiteral("A1RKKUPIHCS9HS"), // ES
+            QStringLiteral("APJ6JRA9NG5V4"),  // IT
+            QStringLiteral("A1805IZSGTT6HS"), // NL
+            QStringLiteral("AMEN7PMS3EDWL"),  // BE
+            QStringLiteral("A1C3SOZRARQ6R3"), // PL
+            QStringLiteral("A2NODRKZP88ZB9")  // SE
+          },
+          QStringLiteral("A1PA6795UKMFR9"),   // home: DE
+          QStringLiteral("A13V1IB3VIYZZH"),   // preferred title: FR
+          QStringLiteral("A1F83G8C2ARO7P"),   // fallback title: UK (English)
+          false },
+        { QStringLiteral("North America"),
+          { QStringLiteral("ATVPDKIKX0DER"),  // US
+            QStringLiteral("A2EUQ1WTGCTBG2"), // CA
+            QStringLiteral("A1AM78C64UM0Y8")  // MX
+          },
+          QStringLiteral("ATVPDKIKX0DER"),    // home: US
+          QStringLiteral("ATVPDKIKX0DER"),    // preferred title: US (English)
+          QStringLiteral("A2EUQ1WTGCTBG2"),   // fallback title: CA
+          true },
+    };
+    return r;
+}
 } // namespace
 
 PaneDiscount::PaneDiscount(QWidget *parent)
@@ -61,6 +88,21 @@ PaneDiscount::PaneDiscount(QWidget *parent)
     // copied. Edits are not saved (model has no setData).
     ui->treeViewProducts->setEditTriggers(
         QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
+
+    // Region selector (Europe / North America) — drives which countries load and
+    // which FBA pool/endpoint is used. Persisted.
+    for (const RegionDef &r : regions())
+        ui->comboRegion->addItem(r.name);
+    {
+        const int saved = QSettings().value(QStringLiteral("discount/region"), 0).toInt();
+        ui->comboRegion->setCurrentIndex(qBound(0, saved, regions().size() - 1));
+    }
+    connect(ui->comboRegion, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int idx) {
+        QSettings().setValue(QStringLiteral("discount/region"), idx);
+        m_model->clear();                 // previous region's rows no longer apply
+        _buildCountriesModel();           // rebuild the country checkboxes
+    });
 
     _buildCountriesModel();
 
@@ -84,11 +126,15 @@ PaneDiscount::~PaneDiscount()
 
 void PaneDiscount::_buildCountriesModel()
 {
+    QStandardItemModel *oldModel = m_countriesModel;
     m_countriesModel = new QStandardItemModel(this);
     QSettings s;
     // Country label (code) comes from the shared currency table, keyed by id.
+    // Countries are those of the currently-selected region.
+    const RegionDef &region = regions().at(
+        qBound(0, ui->comboRegion->currentIndex(), regions().size() - 1));
     TableCurrencyRates rates;
-    for (const QString &id : kEuMarketplaceIds) {
+    for (const QString &id : region.marketplaceIds) {
         QString cc;
         for (const TableCurrencyRates::Entry &e : rates.entries())
             if (e.marketplaceId == id) { cc = e.country; break; }
@@ -103,6 +149,7 @@ void PaneDiscount::_buildCountriesModel()
         m_countriesModel->appendRow(item);
     }
     ui->listViewCountries->setModel(m_countriesModel);
+    delete oldModel;   // safe now that the view points at the new model
 
     // Horizontal, wrapping strip (like PaneSizing's country list) rather than a
     // tall vertical list.
@@ -170,14 +217,22 @@ QCoro::Task<void> PaneDiscount::_onLoad()
     ui->pushButton->setEnabled(false);
     ui->buttonApplyDiscount->setEnabled(false);
 
+    // Selected region: drives which LWA token/seller and home marketplace the
+    // (region-scoped) inventory-age report and sales use.
+    const RegionDef &region = regions().at(
+        qBound(0, ui->comboRegion->currentIndex(), regions().size() - 1));
+    appendLog(tr("→ Region: %1").arg(region.name));
+
     // --- Build APIs from settings ---
     const auto *st = SettingsTable::instance();
     AmazonInventoryApi inventoryApi(
         st->value(SettingsTable::KEY_LWA_CLIENT_ID),
         st->value(SettingsTable::KEY_LWA_CLIENT_SECRET),
-        st->value(SettingsTable::KEY_EU_LWA_REFRESH_TOKEN),
-        st->value(SettingsTable::KEY_EU_SELLER_ID),
-        kDeMarketplaceId,
+        st->value(region.isNa ? SettingsTable::KEY_NA_LWA_REFRESH_TOKEN
+                              : SettingsTable::KEY_EU_LWA_REFRESH_TOKEN),
+        st->value(region.isNa ? SettingsTable::KEY_NA_SELLER_ID
+                              : SettingsTable::KEY_EU_SELLER_ID),
+        region.homeMp,
         this);
     AmazonPricingApi pricingApi(
         st->value(SettingsTable::KEY_LWA_CLIENT_ID),
@@ -247,19 +302,20 @@ QCoro::Task<void> PaneDiscount::_onLoad()
         setStatus(tr("SKU %1/%2: %3 — fetching titles & prices…")
                       .arg(i + 1).arg(total).arg(a.sku));
 
-        // Preferred-language title: FR, then English (UK), then report name.
+        // Preferred-language title (region's preferred marketplace), then the
+        // region's English fallback, then the report's product name.
         QString title; QStringList bullets;
-        co_await catalogApi.fetchListingText(kFrMarketplaceId, a.asin, &title, &bullets);
+        co_await catalogApi.fetchListingText(region.preferredTitleMp, a.asin, &title, &bullets);
         if (title.isEmpty()) {
             bullets.clear();
-            co_await catalogApi.fetchListingText(kUkMarketplaceId, a.asin, &title, &bullets);
+            co_await catalogApi.fetchListingText(region.fallbackTitleMp, a.asin, &title, &bullets);
         }
         if (title.isEmpty()) title = a.productName;
 
-        // Product type (needed for the discount PATCH) from the DE listing.
-        double  dePrice = -1.0; bool deExists = false; QString productType;
-        co_await pricingApi.fetchListingPrice(kDeMarketplaceId, a.sku,
-                                              &dePrice, &deExists, &productType);
+        // Product type (needed for the discount PATCH) from the region's home listing.
+        double  homePrice = -1.0; bool homeExists = false; QString productType;
+        co_await pricingApi.fetchListingPrice(region.homeMp, a.sku,
+                                              &homePrice, &homeExists, &productType);
 
         TreeSkuDiscount::Product p;
         p.sku         = a.sku;
@@ -386,6 +442,11 @@ QCoro::Task<void> PaneDiscount::_onApply()
 
     int applied = 0, failed = 0, skipped = 0;
     for (const TreeSkuDiscount::Product &p : products) {
+        if (!p.checked) {
+            appendLog(tr("  ⊘ %1: unticked, skipped").arg(p.sku));
+            skipped += p.countries.size();
+            continue;
+        }
         for (const TreeSkuDiscount::CountryRow &c : p.countries) {
             if (!c.eligible || c.newPrice <= 0.0 || c.origAmount <= 0.0) {
                 ++skipped;
