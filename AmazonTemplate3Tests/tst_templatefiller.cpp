@@ -42,6 +42,15 @@ QString TemplateFillerTests::createTemplateFile(const QString &fileName, const Q
         doc.write(3, i + 1, headers[i]);
     }
     
+    int feedProductTypeIdx = headers.indexOf("feed_product_type");
+    if (feedProductTypeIdx != -1) {
+        doc.write(5, feedProductTypeIdx + 1, "shirt");
+    }
+    int productTypeValIdx = headers.indexOf("product_type#1.value");
+    if (productTypeValIdx != -1) {
+        doc.write(7, productTypeValIdx + 1, "shirt");
+    }
+    
     // Also need to ensure it's recognized as a valid template if strict checks exist.
     // TemplateFiller checks _get_productType(doc).
     // _get_productType looks at row 1, col 1 roughly or "Product Type" header.

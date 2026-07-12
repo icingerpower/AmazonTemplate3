@@ -85,20 +85,15 @@ TestOpenAi2::~TestOpenAi2()
 
 void TestOpenAi2::initTestCase()
 {
-#if !defined(OPEN_AI_API_KEY)
-#if defined(DO_REAL_TESTS) && DO_REAL_TESTS
-    // We have key (checked in CMake), proceed.
-    // But if we need the string value:
-#else
-    QSKIP("OPEN_AI_API_KEY not defined (DO_REAL_TESTS=OFF). Skipping integration test.");
+    QString apiKey = "dummy";
+#ifdef OPEN_AI_API_KEY
+    apiKey = QString::fromUtf8(OPEN_AI_API_KEY);
 #endif
-#else
-    OpenAi2::instance()->init(QString::fromUtf8(OPEN_AI_API_KEY)
+    OpenAi2::instance()->init(apiKey
                               , 2 // maxQueriesSameTime
                               , 1 //maxQueriesImageSameTime
                               , 30000 //timeoutMsBetweenImageQueries
                            );
-#endif
 }
 
 void TestOpenAi2::cleanupTestCase()
@@ -107,13 +102,7 @@ void TestOpenAi2::cleanupTestCase()
 
 void TestOpenAi2::test_case1()
 {
-#if !defined(OPEN_AI_API_KEY)
 #if defined(DO_REAL_TESTS) && DO_REAL_TESTS
-    // Proceed
-#else
-    QSKIP("OPEN_AI_API_KEY not defined. Integration test skipped.");
-#endif
-#else
     auto step = QSharedPointer<OpenAi2::Step>::create();
     step->id = "basic_yes";
     step->name = "Basic yes test";
@@ -176,6 +165,8 @@ void TestOpenAi2::test_case1()
     }
 
     QCOMPARE(finalReply, QStringLiteral("yes"));
+#else
+    QSKIP("DO_REAL_TESTS=OFF. Skipping real integration test.");
 #endif
 }
 

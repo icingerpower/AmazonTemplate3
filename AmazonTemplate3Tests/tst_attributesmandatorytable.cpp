@@ -97,7 +97,7 @@ void AttributesMandatoryTableTests::test_manual_overrides()
             }
         }
         QVERIFY(colorIdx.isValid());
-        table.setData(colorIdx, true, Qt::CheckStateRole);
+        table.setData(colorIdx, true, Qt::EditRole);
         
         QVERIFY(table.getMandatoryIds().contains("color_name"));
         
@@ -109,7 +109,7 @@ void AttributesMandatoryTableTests::test_manual_overrides()
                 break;
             }
         }
-        table.setData(brandIdx, false, Qt::CheckStateRole);
+        table.setData(brandIdx, false, Qt::EditRole);
         QVERIFY(!table.getMandatoryIds().contains("brand_name"));
     }
     

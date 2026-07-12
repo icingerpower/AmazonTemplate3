@@ -1221,7 +1221,10 @@ QString TemplateFiller::_get_productType(QXlsx::Document &doc) const
         {
             Q_ASSERT(false);
         }
-        return *fieldId_possibleValues[fieldId].begin();
+        if (fieldId_possibleValues.contains(fieldId) && !fieldId_possibleValues[fieldId].isEmpty())
+        {
+            return *fieldId_possibleValues[fieldId].begin();
+        }
     }
     return QString{};
 }
