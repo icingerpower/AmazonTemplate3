@@ -18,6 +18,13 @@ SET(GUI_FILES
     ${CMAKE_CURRENT_LIST_DIR}/panes/PanePricing.cpp
     ${CMAKE_CURRENT_LIST_DIR}/panes/PanePricing.h
     ${CMAKE_CURRENT_LIST_DIR}/panes/PanePricing.ui
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneDiscount.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneDiscount.h
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneDiscount.ui
+    ${CMAKE_CURRENT_LIST_DIR}/panes/TreeSkuDiscount.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/panes/TreeSkuDiscount.h
+    ${CMAKE_CURRENT_LIST_DIR}/panes/ProgressDialog.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/panes/ProgressDialog.h
     ${CMAKE_CURRENT_LIST_DIR}/panes/TableCurrencyRates.cpp
     ${CMAKE_CURRENT_LIST_DIR}/panes/TableCurrencyRates.h
     ${CMAKE_CURRENT_LIST_DIR}/panes/TablePricing.cpp

@@ -25,10 +25,14 @@ public:
     // *priceOut       : listing price in the marketplace's currency (-1.0 if no price data).
     // *existsOut      : true when the SKU has an active listing (HTTP 200).
     // *productTypeOut : SP-API product type string from summaries (may be empty); pass nullptr to ignore.
+    // *minPriceOut    : seller's minimum_seller_allowed_price from purchasable_offer (-1.0 if none); nullptr to ignore.
+    // *maxPriceOut    : seller's maximum_seller_allowed_price from purchasable_offer (-1.0 if none); nullptr to ignore.
     // GCC 13 ICE workaround: params passed by value.
     QCoro::Task<void> fetchListingPrice(QString marketplaceId, QString sku,
                                         double *priceOut, bool *existsOut,
-                                        QString *productTypeOut = nullptr);
+                                        QString *productTypeOut = nullptr,
+                                        double *minPriceOut = nullptr,
+                                        double *maxPriceOut = nullptr);
 
     // PATCH the purchasable_offer attribute to set a new B2C price.
     // currency: the marketplace currency code (e.g. "EUR", "GBP").
@@ -38,6 +42,24 @@ public:
     QCoro::Task<void> patchListingPrice(QString marketplaceId, QString sku,
                                         QString productType, QString currency,
                                         double newPrice, bool *success);
+
+    // PATCH purchasable_offer to schedule a time-boxed sale (strike-through)
+    // price. listPrice keeps our_price (the regular price); discountedPrice is
+    // the sale price applied between startAt and endAt (inclusive). Both are in
+    // the marketplace currency. This is the closest the SP-API gets to a
+    // "promotion" — it is a scheduled discounted price, not a coupon/deal.
+    // *success: true on HTTP 200/202 with no INVALID status from Amazon.
+    // GCC 13 ICE workaround: params passed by value.
+    // This op replaces the whole purchasable_offer, so both
+    // minimum_seller_allowed_price and maximum_seller_allowed_price are
+    // deliberately NOT written — i.e. any existing price floor/ceiling is
+    // removed (a floor could block the discounted price; the ceiling is dropped
+    // by request too).
+    QCoro::Task<void> patchListingDiscount(QString marketplaceId, QString sku,
+                                           QString productType, QString currency,
+                                           double listPrice, double discountedPrice,
+                                           QDateTime startAt, QDateTime endAt,
+                                           bool *success);
 
     QString lastError() const { return m_lastError; }
 

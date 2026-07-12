@@ -5,6 +5,7 @@
 #include "panes/PaneWarnings.h"
 #include "panes/PaneMarketplaces.h"
 #include "panes/PanePricing.h"
+#include "panes/PaneDiscount.h"
 #include "panes/PaneStore.h"
 #include "panes/PaneSettings.h"
 #include "AbstractCli.h"
@@ -55,6 +56,8 @@ MainWindow::MainWindow(QWidget *parent)
     auto *panePricing = new PanePricing(this);
     panePricing->setAvailableClis(m_availableClis);
     ui->tabWidget->addTab(panePricing, tr("Pricing"));
+
+    ui->tabWidget->addTab(new PaneDiscount(this), tr("Discount"));
 
     auto *paneStore = new PaneStore(this);
     paneStore->setWorkingDir(WorkingDirectoryManager::instance()->workingDir());

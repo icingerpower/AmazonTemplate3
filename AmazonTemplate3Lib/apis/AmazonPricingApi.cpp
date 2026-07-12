@@ -4,6 +4,7 @@
 #include "AmazonPricingApi.h"
 
 #include <QDateTime>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -214,13 +215,36 @@ static double parsePriceFromBody(const QByteArray &json, const QString &marketpl
     return (amt > 0.0) ? amt : -1.0;
 }
 
+// Reads a named schedule-based sub-price (e.g. maximum_seller_allowed_price)
+// from attributes.purchasable_offer for the given marketplace. Returns -1.0
+// when absent.
+static double parsePurchasableSubPrice(const QByteArray &json,
+                                       const QString &marketplaceId,
+                                       const char *field)
+{
+    const QJsonObject attrs = QJsonDocument::fromJson(json).object()
+                                  .value("attributes").toObject();
+    for (const QJsonValue &v : attrs.value("purchasable_offer").toArray()) {
+        const QJsonObject po = v.toObject();
+        if (po.value("marketplace_id").toString() != marketplaceId)
+            continue;
+        return po.value(QLatin1String(field)).toArray().first().toObject()
+                 .value("schedule").toArray().first().toObject()
+                 .value("value_with_tax").toDouble(-1.0);
+    }
+    return -1.0;
+}
+
 QCoro::Task<void> AmazonPricingApi::fetchListingPrice(
     QString marketplaceId, QString sku,
-    double *priceOut, bool *existsOut, QString *productTypeOut)
+    double *priceOut, bool *existsOut, QString *productTypeOut,
+    double *minPriceOut, double *maxPriceOut)
 {
     *priceOut  = -1.0;
     *existsOut = false;
     if (productTypeOut) productTypeOut->clear();
+    if (minPriceOut) *minPriceOut = -1.0;
+    if (maxPriceOut) *maxPriceOut = -1.0;
     m_lastError.clear();
 
     const QString region   = lwaRegionForMarketplace(marketplaceId);
@@ -273,6 +297,12 @@ QCoro::Task<void> AmazonPricingApi::fetchListingPrice(
 
     *existsOut = true;
     *priceOut  = parsePriceFromBody(body, marketplaceId, productTypeOut);
+    if (minPriceOut)
+        *minPriceOut = parsePurchasableSubPrice(
+            body, marketplaceId, "minimum_seller_allowed_price");
+    if (maxPriceOut)
+        *maxPriceOut = parsePurchasableSubPrice(
+            body, marketplaceId, "maximum_seller_allowed_price");
 }
 
 // ---------------------------------------------------------------------------
@@ -371,6 +401,160 @@ QCoro::Task<void> AmazonPricingApi::patchListingPrice(
     }
 
     // Amazon can return HTTP 200 with "status":"INVALID" on validation failure
+    const QJsonObject respObj = QJsonDocument::fromJson(respData).object();
+    if (respObj.value("status").toString() == QStringLiteral("INVALID")) {
+        const QJsonArray issues = respObj.value("issues").toArray();
+        QStringList msgs;
+        for (const QJsonValue &iv : issues)
+            msgs << iv.toObject().value("message").toString();
+        m_lastError = QStringLiteral("INVALID: ") + msgs.join("; ");
+        co_return;
+    }
+
+    *success = true;
+}
+
+// ---------------------------------------------------------------------------
+// patchListingDiscount — schedule a time-boxed sale price (our_price kept,
+// discounted_price added with a start/end schedule).
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonPricingApi::patchListingDiscount(
+    QString marketplaceId, QString sku,
+    QString productType, QString currency,
+    double listPrice, double discountedPrice,
+    QDateTime startAt, QDateTime endAt,
+    bool *success)
+{
+    *success = false;
+    m_lastError.clear();
+
+    if (productType.isEmpty()) {
+        m_lastError = QStringLiteral("Cannot PATCH SKU %1: product type is unknown").arg(sku);
+        qWarning() << "AmazonPricingApi:" << m_lastError;
+        co_return;
+    }
+    if (discountedPrice <= 0.0 || listPrice <= 0.0 || discountedPrice >= listPrice) {
+        m_lastError = QStringLiteral("Invalid discount for SKU %1: list=%2 discounted=%3")
+            .arg(sku).arg(listPrice).arg(discountedPrice);
+        co_return;
+    }
+
+    const QString region   = lwaRegionForMarketplace(marketplaceId);
+    const QString endpoint = endpointForMarketplace(marketplaceId);
+    const QString sellerId = sellerIdForMarketplace(marketplaceId);
+
+    if (sellerId.isEmpty()) {
+        m_lastError = QStringLiteral("No seller ID for marketplace %1").arg(marketplaceId);
+        co_return;
+    }
+
+    QString token;
+    co_await _getAccessToken(region, &token);
+    if (token.isEmpty()) co_return;
+
+    co_await _rateLimit();
+
+    const double roundedList = qRound(listPrice * 100.0) / 100.0;
+    const double roundedDisc = qRound(discountedPrice * 100.0) / 100.0;
+
+    // SP-API expects ISO 8601 UTC timestamps for the discount schedule.
+    const QString startIso = startAt.toUTC().toString(QStringLiteral("yyyy-MM-ddTHH:mm:ssZ"));
+    const QString endIso   = endAt.toUTC().toString(QStringLiteral("yyyy-MM-ddTHH:mm:ssZ"));
+
+    // purchasable_offer is one of the two attributes that support the "merge"
+    // op. Per Amazon's docs, a sub-attribute is REMOVED by merging an explicit
+    // null (omitting it in a replace does NOT delete it — it is kept). So we
+    // merge our_price + discounted_price and set minimum/maximum_seller_allowed_price
+    // to null to erase any existing floor/ceiling.
+    const QJsonObject offerValue{
+        {QStringLiteral("audience"),       QStringLiteral("ALL")},
+        {QStringLiteral("currency"),       currency},
+        {QStringLiteral("marketplace_id"), marketplaceId},
+        {QStringLiteral("our_price"), QJsonArray{
+            QJsonObject{{QStringLiteral("schedule"), QJsonArray{
+                QJsonObject{{QStringLiteral("value_with_tax"), roundedList}}
+            }}}
+        }},
+        {QStringLiteral("discounted_price"), QJsonArray{
+            QJsonObject{{QStringLiteral("schedule"), QJsonArray{
+                QJsonObject{
+                    {QStringLiteral("value_with_tax"), roundedDisc},
+                    {QStringLiteral("start_at"),       startIso},
+                    {QStringLiteral("end_at"),         endIso}
+                }
+            }}}
+        }},
+        {QStringLiteral("minimum_seller_allowed_price"), QJsonValue(QJsonValue::Null)},
+        {QStringLiteral("maximum_seller_allowed_price"), QJsonValue(QJsonValue::Null)},
+    };
+
+    const QJsonObject patchBody{
+        {QStringLiteral("productType"), productType},
+        {QStringLiteral("patches"), QJsonArray{
+            QJsonObject{
+                {QStringLiteral("op"),    QStringLiteral("merge")},
+                {QStringLiteral("path"),  QStringLiteral("/attributes/purchasable_offer")},
+                {QStringLiteral("value"), QJsonArray{offerValue}}
+            }
+        }}
+    };
+    const QByteArray jsonBody = QJsonDocument(patchBody).toJson(QJsonDocument::Compact);
+
+    QUrl url;
+    url.setScheme(QStringLiteral("https"));
+    url.setHost(endpoint);
+    url.setPath(QStringLiteral("/listings/2021-08-01/items/%1/%2").arg(sellerId, sku));
+
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("marketplaceIds"), marketplaceId);
+    url.setQuery(query);
+
+    QNetworkRequest req(url);
+    req.setRawHeader("x-amz-access-token", token.toUtf8());
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    req.setRawHeader("accept", "application/json");
+
+    qDebug() << "AmazonPricingApi: PATCH discount" << sku << marketplaceId
+             << "list=" << roundedList << "disc=" << roundedDisc << currency
+             << startIso << "→" << endIso;
+
+    QNetworkReply *reply = _nam()->sendCustomRequest(req, "PATCH", jsonBody);
+    co_await qCoro(reply).waitForFinished();
+
+    const QByteArray respData = reply->readAll();
+    const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    reply->deleteLater();
+
+    qDebug() << "AmazonPricingApi: PATCH discount response HTTP" << httpStatus
+             << QString::fromUtf8(respData.left(400));
+
+    // Diagnostic dump so we can inspect exactly what was sent/returned
+    // (esp. whether min/max removal was accepted). Attach to Amazon cases.
+    {
+        const QString dumpPath = QStringLiteral("/tmp/sp-api-discount-%1-%2-%3.txt")
+            .arg(sku, marketplaceId,
+                 QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
+        QFile f(dumpPath);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            f.write("PATCH ");     f.write(url.toString().toUtf8());          f.write("\n\n");
+            f.write("REQUEST BODY:\n"); f.write(jsonBody);                    f.write("\n\n");
+            f.write(QStringLiteral("RESPONSE HTTP %1:\n").arg(httpStatus).toUtf8());
+            f.write(respData);
+            f.close();
+            qDebug() << "AmazonPricingApi: discount dump saved to" << dumpPath;
+        }
+    }
+
+    if (httpStatus != 200 && httpStatus != 202) {
+        m_lastError = QStringLiteral("HTTP %1").arg(httpStatus);
+        const QJsonObject errObj = QJsonDocument::fromJson(respData).object();
+        const QString errMsg = errObj.value("message").toString();
+        if (!errMsg.isEmpty())
+            m_lastError += QStringLiteral(": ") + errMsg;
+        co_return;
+    }
+
     const QJsonObject respObj = QJsonDocument::fromJson(respData).object();
     if (respObj.value("status").toString() == QStringLiteral("INVALID")) {
         const QJsonArray issues = respObj.value("issues").toArray();

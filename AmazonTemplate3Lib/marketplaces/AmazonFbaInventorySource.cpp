@@ -21,10 +21,10 @@ const QStringList kEuMarketplaceIds = {
     QStringLiteral("A13V1IB3VIYZZH"), // FR
     QStringLiteral("APJ6JRA9NG5V4"),  // IT
     QStringLiteral("A1RKKUPIHCS9HS"), // ES
-    QStringLiteral("A1805IZSGTT6HW"), // NL
+    QStringLiteral("A1805IZSGTT6HS"), // NL
     QStringLiteral("A2NODRKZP88ZB9"), // SE
     QStringLiteral("A1C3SOZRARQ6R3"), // PL
-    QStringLiteral("ARBP9OOSHTCHU"),  // BE
+    QStringLiteral("AMEN7PMS3EDWL"),  // BE
 };
 
 QList<StockRecord> toStockRecords(const QList<AmazonInventoryApi::InventorySummary> &summaries)

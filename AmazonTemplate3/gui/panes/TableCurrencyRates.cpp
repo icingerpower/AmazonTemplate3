@@ -8,10 +8,10 @@ static const QList<TableCurrencyRates::Entry> k_defaultEntries = {
     { QStringLiteral("A13V1IB3VIYZZH"), QStringLiteral("FR"), QStringLiteral("EUR"), 1.0000, false },
     { QStringLiteral("APJ6JRA9NG5V4"),  QStringLiteral("IT"), QStringLiteral("EUR"), 1.0000, false },
     { QStringLiteral("A1RKKUPIHCS9HS"), QStringLiteral("ES"), QStringLiteral("EUR"), 1.0000, false },
-    { QStringLiteral("A1805IZSGTT6HW"), QStringLiteral("NL"), QStringLiteral("EUR"), 1.0000, false },
+    { QStringLiteral("A1805IZSGTT6HS"), QStringLiteral("NL"), QStringLiteral("EUR"), 1.0000, false },
     { QStringLiteral("A2NODRKZP88ZB9"), QStringLiteral("SE"), QStringLiteral("SEK"), 11.450, false },
     { QStringLiteral("A1C3SOZRARQ6R3"), QStringLiteral("PL"), QStringLiteral("PLN"), 4.2500, false },
-    { QStringLiteral("ARBP9OOSHTCHU"),  QStringLiteral("BE"), QStringLiteral("EUR"), 1.0000, false },
+    { QStringLiteral("AMEN7PMS3EDWL"),  QStringLiteral("BE"), QStringLiteral("EUR"), 1.0000, false },
     // Americas
     { QStringLiteral("ATVPDKIKX0ER"),   QStringLiteral("US"), QStringLiteral("USD"), 1.0800, false },
     { QStringLiteral("A2EUQ1WTGCTBG2"), QStringLiteral("CA"), QStringLiteral("CAD"), 1.4700, false },

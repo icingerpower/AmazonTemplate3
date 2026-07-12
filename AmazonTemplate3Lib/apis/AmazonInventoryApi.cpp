@@ -19,6 +19,8 @@
 #include <QJsonValue>
 #include <QDateTime>
 #include <QFile>
+#include <QPair>
+#include <QRegularExpression>
 #include <QSet>
 #include <QTimer>
 #include <QDebug>
@@ -573,6 +575,347 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventoryReport(
             m_lastError = savedError;
         }
     }
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
+// Generic report runner: create → poll → download → decompress.
+// Extracted from the report machinery so age/health reports don't duplicate it.
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonInventoryApi::_runReport(
+    QString reportType,
+    QByteArray *outContent,
+    std::function<void(const QString &)> onProgress)
+{
+    auto progress = [&onProgress](const QString &msg) {
+        if (onProgress) onProgress(msg);
+    };
+
+    QString token;
+    co_await _getAccessToken(&token);
+    if (token.isEmpty()) {
+        if (m_lastError.isEmpty()) m_lastError = QStringLiteral("No LWA access token");
+        co_return;
+    }
+
+    QString reportDocumentId;
+    static const int kMaxReportAttempts = 3;
+    for (int outerAttempt = 0; outerAttempt < kMaxReportAttempts; ++outerAttempt) {
+        if (outerAttempt > 0) {
+            progress(QStringLiteral("  Retrying report creation in 30 s… (attempt %1/%2)")
+                .arg(outerAttempt + 1).arg(kMaxReportAttempts));
+            QTimer retryTimer;
+            retryTimer.setSingleShot(true);
+            retryTimer.start(30000);
+            co_await qCoro(&retryTimer).waitForTimeout();
+            co_await _getAccessToken(&token);
+        }
+
+        // Step 1: create report
+        QUrl createUrl(QStringLiteral("https://%1/reports/2021-06-30/reports").arg(kEuEndpoint));
+        QNetworkRequest createReq(createUrl);
+        createReq.setRawHeader("x-amz-access-token", token.toUtf8());
+        createReq.setRawHeader("Accept", "application/json");
+        createReq.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+        const QJsonDocument bodyDoc(QJsonObject{
+            {QStringLiteral("reportType"),     reportType},
+            {QStringLiteral("marketplaceIds"), QJsonArray{m_marketplaceId}}
+        });
+        QNetworkReply *createReply = _nam()->post(createReq, bodyDoc.toJson());
+        co_await qCoro(createReply).waitForFinished();
+
+        const int createStatus = createReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray createData = createReply->readAll();
+        createReply->deleteLater();
+
+        if (createStatus != 202) {
+            m_lastError = QStringLiteral("Report create HTTP %1 — %2")
+                .arg(createStatus).arg(QString::fromUtf8(createData.left(500)));
+            co_return;
+        }
+
+        const QString reportId = QJsonDocument::fromJson(createData).object()
+            .value(QStringLiteral("reportId")).toString();
+        if (reportId.isEmpty()) {
+            m_lastError = QStringLiteral("Report create: no reportId in response");
+            co_return;
+        }
+        progress(QStringLiteral("  Report created (id: %1), polling…").arg(reportId));
+
+        // Step 2: poll until DONE (max ~5 min per attempt)
+        bool shouldRetry = false;
+        QUrl pollUrl(QStringLiteral("https://%1/reports/2021-06-30/reports/%2")
+                     .arg(kEuEndpoint, reportId));
+        for (int attempt = 0; attempt < 30; ++attempt) {
+            QTimer pollTimer;
+            pollTimer.setSingleShot(true);
+            pollTimer.start(10000);
+            co_await qCoro(&pollTimer).waitForTimeout();
+
+            co_await _getAccessToken(&token);
+            QNetworkRequest pollReq(pollUrl);
+            pollReq.setRawHeader("x-amz-access-token", token.toUtf8());
+            pollReq.setRawHeader("Accept", "application/json");
+
+            QNetworkReply *pollReply = _nam()->get(pollReq);
+            co_await qCoro(pollReply).waitForFinished();
+            const QByteArray pollData = pollReply->readAll();
+            pollReply->deleteLater();
+
+            const QJsonObject reportObj = QJsonDocument::fromJson(pollData).object();
+            const QString ps = reportObj.value(QStringLiteral("processingStatus")).toString();
+
+            if (ps == QStringLiteral("DONE")) {
+                reportDocumentId = reportObj.value(QStringLiteral("reportDocumentId")).toString();
+                break;
+            }
+            if (ps == QStringLiteral("FATAL") || ps == QStringLiteral("CANCELLED")) {
+                progress(QStringLiteral("  Report returned %1").arg(ps));
+                const QString errDocId = reportObj.value(QStringLiteral("reportDocumentId")).toString();
+                if (!errDocId.isEmpty()) {
+                    QUrl errDocUrl(QStringLiteral("https://%1/reports/2021-06-30/documents/%2")
+                                   .arg(kEuEndpoint, errDocId));
+                    QNetworkRequest errDocReq(errDocUrl);
+                    errDocReq.setRawHeader("x-amz-access-token", token.toUtf8());
+                    errDocReq.setRawHeader("Accept", "application/json");
+                    QNetworkReply *errDocReply = _nam()->get(errDocReq);
+                    co_await qCoro(errDocReply).waitForFinished();
+                    const QJsonObject errDocObj = QJsonDocument::fromJson(errDocReply->readAll()).object();
+                    errDocReply->deleteLater();
+                    const QString errUrl = errDocObj.value(QStringLiteral("url")).toString();
+                    if (!errUrl.isEmpty()) {
+                        QUrl errDlUrl(errUrl);
+                        QNetworkRequest errDlReq(errDlUrl);
+                        QNetworkReply *errDlReply = _nam()->get(errDlReq);
+                        co_await qCoro(errDlReply).waitForFinished();
+                        QByteArray errContent = errDlReply->readAll();
+                        errDlReply->deleteLater();
+                        if (errDocObj.value(QStringLiteral("compressionAlgorithm")).toString()
+                                .compare(QStringLiteral("GZIP"), Qt::CaseInsensitive) == 0)
+                            errContent = gunzip(errContent);
+                        progress(QStringLiteral("  FATAL details: %1")
+                                 .arg(QString::fromUtf8(errContent.left(400))));
+                    }
+                }
+                m_lastError = QStringLiteral("Report ended with status: %1").arg(ps);
+                shouldRetry = (ps == QStringLiteral("FATAL")); // CANCELLED is final
+                break;
+            }
+            progress(QStringLiteral("  Report %1, polling… (%2/30)").arg(ps).arg(attempt + 1));
+        }
+
+        if (!reportDocumentId.isEmpty()) break; // success
+        if (!shouldRetry) co_return;            // CANCELLED or HTTP error — give up
+    }
+
+    if (reportDocumentId.isEmpty()) {
+        if (m_lastError.isEmpty())
+            m_lastError = QStringLiteral("Report timed out or failed after %1 attempts")
+                .arg(kMaxReportAttempts);
+        co_return;
+    }
+
+    // Step 3: get download URL
+    co_await _getAccessToken(&token);
+    const QUrl docUrl(QStringLiteral("https://%1/reports/2021-06-30/documents/%2")
+                      .arg(kEuEndpoint, reportDocumentId));
+    QNetworkRequest docReq(docUrl);
+    docReq.setRawHeader("x-amz-access-token", token.toUtf8());
+    docReq.setRawHeader("Accept", "application/json");
+
+    QNetworkReply *docReply = _nam()->get(docReq);
+    co_await qCoro(docReply).waitForFinished();
+    const QByteArray docMeta = docReply->readAll();
+    docReply->deleteLater();
+
+    const QJsonObject docObj = QJsonDocument::fromJson(docMeta).object();
+    const QString downloadUrl     = docObj.value(QStringLiteral("url")).toString();
+    const QString compressionAlgo = docObj.value(QStringLiteral("compressionAlgorithm")).toString();
+
+    if (downloadUrl.isEmpty()) {
+        m_lastError = QStringLiteral("Report document: no download URL");
+        co_return;
+    }
+    progress(QStringLiteral("  Downloading report document…"));
+
+    // Step 4: download (no auth header — URL is pre-signed)
+    QUrl dlUrl(downloadUrl);
+    QNetworkRequest dlReq(dlUrl);
+    QNetworkReply *dlReply = _nam()->get(dlReq);
+    co_await qCoro(dlReply).waitForFinished();
+    QByteArray content = dlReply->readAll();
+    dlReply->deleteLater();
+
+    if (compressionAlgo.compare(QStringLiteral("GZIP"), Qt::CaseInsensitive) == 0)
+        content = gunzip(content);
+
+    *outContent = content;
+    co_return;
+}
+
+// ---------------------------------------------------------------------------
+// Inventory age / health report (GET_FBA_INVENTORY_PLANNING_DATA)
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> AmazonInventoryApi::fetchInventoryAgeReport(
+    QStringList filterSkus,
+    QList<InventoryAge> *out,
+    std::function<void(const QString &)> onProgress)
+{
+    auto progress = [&onProgress](const QString &msg) {
+        if (onProgress) onProgress(msg);
+    };
+
+    QByteArray content;
+    co_await _runReport(QStringLiteral("GET_FBA_INVENTORY_PLANNING_DATA"),
+                        &content, onProgress);
+    if (content.isEmpty()) {
+        if (m_lastError.isEmpty())
+            m_lastError = QStringLiteral("Inventory planning report: empty content");
+        co_return;
+    }
+
+    // Diagnostic dump so column-layout surprises can be inspected.
+    {
+        const QString dumpPath = QStringLiteral("/tmp/fba-inventory-planning-%1.tsv")
+            .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
+        QFile dumpFile(dumpPath);
+        if (dumpFile.open(QIODevice::WriteOnly)) {
+            dumpFile.write(content);
+            dumpFile.close();
+            progress(QStringLiteral("  Raw report saved to %1").arg(dumpPath));
+        }
+    }
+
+    const QStringList lines = QString::fromUtf8(content).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    if (lines.isEmpty()) {
+        m_lastError = QStringLiteral("Inventory planning report: empty content");
+        co_return;
+    }
+
+    const QStringList headers = lines.first().split(QLatin1Char('\t'));
+
+    // Resolve a column by trying several candidate header names (returns -1 if none).
+    auto findCol = [&headers](std::initializer_list<const char *> names) {
+        for (const char *n : names) {
+            const int c = headers.indexOf(QLatin1String(n));
+            if (c >= 0) return c;
+        }
+        return -1;
+    };
+
+    int skuCol = findCol({"sku", "seller-sku", "merchant-sku"});
+    const int asinCol   = findCol({"asin"});
+    const int nameCol   = findCol({"product-name"});
+    const int availCol  = findCol({"available", "afn-fulfillable-quantity", "quantity-available"});
+    const int dosCol    = findCol({"days-of-supply"});
+    const int sold90Col = findCol({"sales-shipped-last-90-days", "units-shipped-t90",
+                                   "units-shipped-last-90-days"});
+
+    if (skuCol < 0 || asinCol < 0) {
+        m_lastError = QStringLiteral("Inventory planning report: unexpected column layout (headers: %1)")
+            .arg(lines.first().left(300));
+        co_return;
+    }
+
+    // Age buckets. The report carries TWO OVERLAPPING sets of inv-age-* columns:
+    // the canonical coarse set (0-to-90, 91-to-180, 181-to-270, 271-to-365,
+    // 366-to-455, 456-plus) AND a partial fine/alternate set (0-to-30, 31-to-60,
+    // 61-to-90, 181-to-330, 331-to-365). Summing every inv-age-* column double-
+    // counts (e.g. 181-to-270 AND 181-to-330 both hold the same unit), which made
+    // "aged" exceed available. So use ONLY the canonical coarse columns by name.
+    const int c0_90    = findCol({"inv-age-0-to-90-days"});
+    const int c91_180  = findCol({"inv-age-91-to-180-days"});
+    const int c181_270 = findCol({"inv-age-181-to-270-days"});
+    const int c271_365 = findCol({"inv-age-271-to-365-days"});
+    const int c366_455 = findCol({"inv-age-366-to-455-days"});
+    const int c456p    = findCol({"inv-age-456-plus-days"});
+    const int c365p    = findCol({"inv-age-365-plus-days"}); // older single 365+ column
+
+    // Fallback for stores whose report lacks the coarse set: discover fine
+    // inv-age-* columns by lower bound (no overlap when the coarse set is absent).
+    enum Bucket { B_0_90, B_91_180, B_181_270, B_271_365, B_365P, B_NONE };
+    QList<QPair<int, Bucket>> fineCols;
+    const bool haveCoarse = c0_90 >= 0 || c91_180 >= 0 || c181_270 >= 0
+                            || c271_365 >= 0 || c366_455 >= 0 || c456p >= 0 || c365p >= 0;
+    if (!haveCoarse) {
+        static const QRegularExpression kInvAgeRe(QStringLiteral("^inv-age-(\\d+)"));
+        for (int c = 0; c < headers.size(); ++c) {
+            const QString h = headers.at(c);
+            if (!h.startsWith(QStringLiteral("inv-age-"))) continue;
+            Bucket b = B_NONE;
+            if (h.contains(QStringLiteral("plus"))) {
+                b = B_365P;
+            } else {
+                const auto m = kInvAgeRe.match(h);
+                const int low = m.hasMatch() ? m.captured(1).toInt() : -1;
+                if (low < 0)         b = B_NONE;
+                else if (low <= 90)  b = B_0_90;
+                else if (low <= 180) b = B_91_180;
+                else if (low <= 270) b = B_181_270;
+                else if (low <= 365) b = B_271_365;
+                else                 b = B_365P;
+            }
+            if (b != B_NONE) fineCols.append({c, b});
+        }
+        if (fineCols.isEmpty())
+            progress(QStringLiteral("  ⚠ No inv-age-* columns found — age buckets will be 0"));
+    }
+
+    QSet<QString> filterSet;
+    for (const QString &s : filterSkus)
+        filterSet.insert(s.toLower());
+
+    for (int i = 1; i < lines.size(); ++i) {
+        const QStringList cols = lines[i].split(QLatin1Char('\t'));
+        if (cols.size() <= skuCol || cols.size() <= asinCol) continue;
+
+        const QString sku = cols[skuCol].trimmed();
+        if (!filterSet.isEmpty() && !filterSet.contains(sku.toLower())) continue;
+
+        auto colInt = [&cols](int c) {
+            return (c >= 0 && c < cols.size()) ? cols[c].trimmed().toInt() : 0;
+        };
+        auto colStr = [&cols](int c) {
+            return (c >= 0 && c < cols.size()) ? cols[c].trimmed() : QString();
+        };
+
+        InventoryAge a;
+        a.sku         = sku;
+        a.asin        = cols[asinCol].trimmed();
+        a.productName = colStr(nameCol);
+        a.available   = colInt(availCol);
+        a.daysOfSupply = (dosCol >= 0 && dosCol < cols.size())
+                             ? static_cast<int>(cols[dosCol].trimmed().toDouble()) : -1;
+        a.unitsSold90  = (sold90Col >= 0 && sold90Col < cols.size())
+                             ? cols[sold90Col].trimmed().toInt() : -1;
+
+        if (haveCoarse) {
+            a.age0_90    = colInt(c0_90);
+            a.age91_180  = colInt(c91_180);
+            a.age181_270 = colInt(c181_270);
+            a.age271_365 = colInt(c271_365);
+            a.age365plus = colInt(c366_455) + colInt(c456p) + colInt(c365p);
+        } else {
+            for (const auto &pc : fineCols) {
+                const int units = colInt(pc.first);
+                switch (pc.second) {
+                case B_0_90:    a.age0_90    += units; break;
+                case B_91_180:  a.age91_180  += units; break;
+                case B_181_270: a.age181_270 += units; break;
+                case B_271_365: a.age271_365 += units; break;
+                case B_365P:    a.age365plus += units; break;
+                case B_NONE:    break;
+                }
+            }
+        }
+        out->append(a);
+    }
+
+    progress(QStringLiteral("  Parsed %1 SKU(s) from inventory planning report (%2 total rows)")
+             .arg(out->size()).arg(lines.size() - 1));
     co_return;
 }
 
