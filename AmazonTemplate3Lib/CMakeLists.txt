@@ -67,6 +67,10 @@ add_library(AmazonTemplate3Lib STATIC
   BrokenChildTable.cpp
   TableUnresolvedAsins.h
   TableUnresolvedAsins.cpp
+  CaseGroup.h
+  CaseGroup.cpp
+  CaseWorkerRunner.h
+  CaseWorkerRunner.cpp
   aplus/APlusContent.h
   aplus/APlusContent.cpp
   aplus/APlusTreeModel.h
@@ -123,6 +127,11 @@ add_definitions(-DSTR_FALSE="false")
 
 target_compile_definitions(AmazonTemplate3Lib PRIVATE AMAZONTEMPLATE3LIB_LIBRARY)
 
+# Absolute path to the one-shot Node case-worker, so the app can launch it via
+# QProcess with zero configuration in a source build.
+target_compile_definitions(AmazonTemplate3Lib PRIVATE
+    CASE_WORKER_DIR="${CMAKE_SOURCE_DIR}/case-worker")
+
 # Compatibility stub: newer QXlsx versions reference xlsxreadsax.h in
 # xlsxdocument.h but don't install it; the compat/ dir provides the stub.
 target_include_directories(AmazonTemplate3Lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
@@ -166,6 +175,10 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   BrokenChildTable.cpp
   TableUnresolvedAsins.h
   TableUnresolvedAsins.cpp
+  CaseGroup.h
+  CaseGroup.cpp
+  CaseWorkerRunner.h
+  CaseWorkerRunner.cpp
   aplus/APlusContent.h
   aplus/APlusContent.cpp
   aplus/APlusTreeModel.h
@@ -214,6 +227,8 @@ target_compile_definitions(AmazonTemplate3Lib_Tests PUBLIC
     OPENAI2_UNIT_TESTS
     AMAZONCATALOGAPI_UNIT_TESTS
 )
+target_compile_definitions(AmazonTemplate3Lib_Tests PRIVATE
+    CASE_WORKER_DIR="${CMAKE_SOURCE_DIR}/case-worker")
 
 target_include_directories(AmazonTemplate3Lib_Tests PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
     PUBLIC ${CMAKE_SOURCE_DIR}/compat

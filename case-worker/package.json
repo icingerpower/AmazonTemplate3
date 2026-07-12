@@ -1,0 +1,28 @@
+{
+  "name": "amazon-case-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Playwright worker that drives Amazon Seller Central case management (open / scrape thread / fill reply / send). Talks to AmazonTemplate3 over a local TCP JSON-lines socket.",
+  "type": "module",
+  "bin": {
+    "case-worker": "./src/cli.ts"
+  },
+  "scripts": {
+    "login": "tsx src/cli.ts login",
+    "open": "tsx src/cli.ts open",
+    "thread": "tsx src/cli.ts thread",
+    "fill": "tsx src/cli.ts fill",
+    "send": "tsx src/cli.ts send",
+    "oneshot": "tsx src/oneshot.ts",
+    "serve": "tsx src/server.ts",
+    "postinstall": "playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0"
+  }
+}

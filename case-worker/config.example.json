@@ -1,0 +1,41 @@
+{
+  "//": "Copy to config.json and adjust. config.json is gitignored.",
+
+  "//regions": "Seller Central is region-scoped: an EU case only exists on the EU dashboard, NA on .com, JP on .co.jp. Each region has its OWN login session (own profile dir). Log in per region with `npm run login -- <eu|na|jp>`.",
+  "regions": {
+    "eu": { "domain": "sellercentral.amazon.co.uk", "userDataDir": "./user-data/eu", "locale": "en-GB", "accountCountry": "United Kingdom" },
+    "na": { "domain": "sellercentral.amazon.com",   "userDataDir": "./user-data/na", "locale": "en-US", "accountCountry": "United States" },
+    "jp": { "domain": "sellercentral.amazon.co.jp", "userDataDir": "./user-data/jp", "locale": "ja-JP", "accountCountry": "Japan" }
+  },
+  "defaultRegion": "eu",
+
+  "headless": false,
+  "//headless": "Keep false — Seller Central flags headless Chromium. Run headed.",
+
+  "slowMoMs": 120,
+  "//slowMoMs": "Human-like delay between Playwright actions (ms).",
+
+  "screenshotDir": "./screenshots",
+
+  "serverPort": 8787,
+  "//serverPort": "TCP port the JSON-lines server listens on (localhost only).",
+
+  "caseUrlTemplate": "https://{domain}/cu/case-dashboard/view-case?ref=sc_cd_lobby_vc_v3&ie=UTF&caseID={caseId}",
+  "caseListUrl": "https://{domain}/cu/case-lobby",
+
+  "selectors": {
+    "//": "Tuned to the real Seller Central case DOM. Class names are randomized (CSS modules), so anchor on stable data-test-tag / data-testid attributes.",
+    "loggedInMarker": "#sc-content-container",
+    "loginEmail": "input[name='email']",
+    "threadMessage": "[data-test-tag='inline-contact']",
+    "threadMessageAuthor": "[data-testid='sender-label']",
+    "threadMessageBody": "[data-test-tag='contact-full'], [data-test-tag='contact-preview']",
+    "threadMessageTime": "xpath=.//div[@data-testid='sender-label']/../following-sibling::div[1]",
+    "replyButton": "kat-button[label='Reply'], button:has-text('Reply')",
+    "replyTextarea": "[data-test-tag='textarea-describeIssue'] textarea, [data-test-tag='textarea-describeIssue'] [contenteditable='true']",
+    "attachInput": "kat-file-upload input[type='file']",
+    "sendButton": "#reply-email-button, kat-button[label='Send']",
+    "caseSubject": "[data-test-tag='case-title']",
+    "caseStatus": "[data-test-tag='case-status']"
+  }
+}

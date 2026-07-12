@@ -21,6 +21,12 @@ SET(GUI_FILES
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneDiscount.cpp
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneDiscount.h
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneDiscount.ui
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneCases.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneCases.h
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneCases.ui
+    ${CMAKE_CURRENT_LIST_DIR}/panes/CaseDraft.h
+    ${CMAKE_CURRENT_LIST_DIR}/panes/DialogReviewReplies.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/panes/DialogReviewReplies.h
     ${CMAKE_CURRENT_LIST_DIR}/panes/TreeSkuDiscount.cpp
     ${CMAKE_CURRENT_LIST_DIR}/panes/TreeSkuDiscount.h
     ${CMAKE_CURRENT_LIST_DIR}/panes/ProgressDialog.cpp
