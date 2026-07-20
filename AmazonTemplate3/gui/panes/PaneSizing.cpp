@@ -3272,102 +3272,22 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                             appendAplusLog(progressUi.logPtr,
                                 tr("  ℹ FAQ sent for rewrite:\n%1")
                                     .arg(faqText.left(1000)));
-                            // Pass ALL accumulated forbidden words so the model doesn't
-                            // reintroduce words that were banned in earlier rounds.
-                            const QString rewritePrompt =
-                                QStringLiteral("Rewrite the following Amazon A+ Content FAQ.\n"
-                                               "Keep the SAME language as the input (language code: ")
-                                + faqKey
-                                + QStringLiteral(").\n"
-                                               "The words/phrases below are STRICTLY forbidden by Amazon's "
-                                               "community guidelines and MUST NOT appear anywhere in the output "
-                                               "(this list grows with each rejection round — honour all of them): ")
-                                + allBlockedKeywords.join(QStringLiteral(", "))
-                                + QStringLiteral(".\n\n"
-                                               "Rules:\n"
-                                               "- Replace or rephrase every sentence containing a forbidden word\n"
-                                               "- Keep all Q&A pairs\n"
-                                               "- Keep the Q:/A: format exactly\n"
-                                               "- Return ONLY the FAQ, no extra text\n\n")
-                                + faqText;
-                            // Bridge runPromptAsync → QFuture to avoid co_await on a QProcess
-                            // signal: the QCoro::Task<T> temporary from runPrompt() has its
-                            // lifetime managed by GCC's frame analysis, which may prematurely
-                            // call ~Task() → handle.destroy() while QProcess::finished is
-                            // still queued, crashing the QCoroSignal resume lambda.
-                            QPromise<CliRunResult> cliPromise;
-                            cliPromise.start();
-                            QFuture<CliRunResult> cliFuture = cliPromise.future();
-                            {
-                                auto sp = QSharedPointer<QPromise<CliRunResult>>::create(
-                                    std::move(cliPromise));
-                                cli->runPromptAsync(rewritePrompt, faqWorkDir, this,
-                                    [sp](CliRunResult r) mutable {
-                                        sp->addResult(std::move(r));
-                                        sp->finish();
-                                    });
-                            }
-                            const CliRunResult r = co_await qCoro(cliFuture).result();
-                            const QString newFaq = extractFaqContent(r.output.trimmed());
-                            appendAplusLog(progressUi.logPtr,
-                                tr("  ℹ CLI rewrite output:\n%1")
-                                    .arg(r.output.trimmed().left(1000)));
-                            if (!newFaq.isEmpty()) {
-                                faqText = newFaq;
-                                saveFaqRewrite(newFaq);
-                                // Pre-flight: verify no blocked keyword survived (saves an Amazon slot)
-                                bool preflightFailed = false;
-                                QString preflightPrompt;
-                                {
-                                    const QString lowerFaq = faqText.toLower();
-                                    QStringList still;
-                                    for (const QString &kw : std::as_const(allBlockedKeywords))
-                                        if (lowerFaq.contains(kw.toLower()))
-                                            still.append(kw);
-                                    if (!still.isEmpty()) {
-                                        preflightFailed = true;
-                                        appendAplusLog(progressUi.logPtr,
-                                            tr("  ⚠ Rewrite still contains %1 — targeted re-rewrite…")
-                                                .arg(still.join(QStringLiteral(", "))));
-                                        preflightPrompt =
-                                            QStringLiteral("CRITICAL: The FAQ below STILL contains the "
-                                                           "forbidden word(s): ")
-                                            + still.join(QStringLiteral(", "))
-                                            + QStringLiteral(".\nSearch EVERY line for these words and any "
-                                                             "compound forms that include them as a substring. "
-                                                             "Replace EACH occurrence with a different synonym. "
-                                                             "Keep the Q:/A: format and all pairs unchanged.\n"
-                                                             "Return ONLY the corrected FAQ.\n\n")
-                                            + faqText;
-                                    }
-                                } // lowerFaq, still destroyed
-                                if (preflightFailed) {
-                                    QPromise<CliRunResult> fixProm;
-                                    fixProm.start();
-                                    QFuture<CliRunResult> fixFut = fixProm.future();
-                                    {
-                                        auto sp2 = QSharedPointer<QPromise<CliRunResult>>::create(
-                                            std::move(fixProm));
-                                        cli->runPromptAsync(preflightPrompt, faqWorkDir, this,
-                                            [sp2](CliRunResult r2) mutable {
-                                                sp2->addResult(std::move(r2));
-                                                sp2->finish();
-                                            });
-                                    }
-                                    const CliRunResult fixR = co_await qCoro(fixFut).result();
-                                    const QString fixedFaq = extractFaqContent(fixR.output.trimmed());
-                                    appendAplusLog(progressUi.logPtr,
-                                        tr("  ℹ Targeted re-rewrite:\n%1")
-                                            .arg(fixR.output.trimmed().left(800)));
-                                    if (!fixedFaq.isEmpty()) {
-                                        faqText = fixedFaq;
-                                        saveFaqRewrite(fixedFaq);
-                                    }
-                                }
-                                continue; // retry with (possibly re-rewritten) FAQ
+                            // Clean the source description of forbidden claims, then
+                            // regenerate the FAQ from it. Rewriting the FAQ text alone
+                            // kept failing when the whole Q&A was built on a forbidden
+                            // claim (e.g. a refund/"remboursement" guarantee).
+                            QString regenerated;
+                            co_await _regenerateFaqCleaned(
+                                cli, faqWorkDir, faqText, faqKey,
+                                ui->textEditAttributes->toPlainText().trimmed(),
+                                allBlockedKeywords, progressUi.logPtr, &regenerated);
+                            if (!regenerated.isEmpty()) {
+                                faqText = regenerated;
+                                saveFaqRewrite(regenerated);
+                                continue; // retry with the cleaned FAQ
                             }
                             appendAplusLog(progressUi.logPtr,
-                                tr("  ⚠ CLI rewrite returned empty output — keeping original FAQ"));
+                                tr("  ⚠ CLI regeneration returned empty output — keeping original FAQ"));
                         }
 
                         // All retries exhausted (or no CLI / non-keyword failure).
@@ -3411,99 +3331,19 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                                 appendAplusLog(progressUi.logPtr,
                                     tr("  ↩ Manual FAQ regeneration — forbidden: %1…")
                                         .arg(allBlockedKeywords.join(QStringLiteral(", "))));
-                                appendAplusLog(progressUi.logPtr,
-                                    tr("  ℹ FAQ sent for rewrite:\n%1")
-                                        .arg(faqText.left(1000)));
-                                const QString rewritePrompt =
-                                    QStringLiteral("Rewrite the following Amazon A+ Content FAQ.\n"
-                                                   "Keep the SAME language as the input (language code: ")
-                                    + faqKey
-                                    + QStringLiteral(").\n"
-                                                   "The words/phrases below are STRICTLY forbidden by Amazon's "
-                                                   "community guidelines and MUST NOT appear anywhere in the output "
-                                                   "(this list grows with each rejection round — honour all of them): ")
-                                    + allBlockedKeywords.join(QStringLiteral(", "))
-                                    + QStringLiteral(".\n\n"
-                                                   "Rules:\n"
-                                                   "- Replace or rephrase every sentence containing a forbidden word\n"
-                                                   "- Keep all Q&A pairs\n"
-                                                   "- Keep the Q:/A: format exactly\n"
-                                                   "- Return ONLY the FAQ, no extra text\n\n")
-                                    + faqText;
-                                QPromise<CliRunResult> cliPromise2;
-                                cliPromise2.start();
-                                QFuture<CliRunResult> cliFuture2 = cliPromise2.future();
-                                {
-                                    auto sp = QSharedPointer<QPromise<CliRunResult>>::create(
-                                        std::move(cliPromise2));
-                                    cli->runPromptAsync(rewritePrompt, faqWorkDir, this,
-                                        [sp](CliRunResult r) mutable {
-                                            sp->addResult(std::move(r));
-                                            sp->finish();
-                                        });
-                                }
-                                const CliRunResult r2 = co_await qCoro(cliFuture2).result();
-                                const QString newFaq = extractFaqContent(r2.output.trimmed());
-                                appendAplusLog(progressUi.logPtr,
-                                    tr("  ℹ CLI rewrite output:\n%1")
-                                        .arg(r2.output.trimmed().left(1000)));
-                                if (!newFaq.isEmpty()) {
-                                    faqText = newFaq;
-                                    saveFaqRewrite(newFaq);
-                                    // Pre-flight: verify no blocked keyword survived
-                                    bool preflightFailed2 = false;
-                                    QString preflightPrompt2;
-                                    {
-                                        const QString lowerFaq2 = faqText.toLower();
-                                        QStringList still2;
-                                        for (const QString &kw : std::as_const(allBlockedKeywords))
-                                            if (lowerFaq2.contains(kw.toLower()))
-                                                still2.append(kw);
-                                        if (!still2.isEmpty()) {
-                                            preflightFailed2 = true;
-                                            appendAplusLog(progressUi.logPtr,
-                                                tr("  ⚠ Rewrite still contains %1 — targeted re-rewrite…")
-                                                    .arg(still2.join(QStringLiteral(", "))));
-                                            preflightPrompt2 =
-                                                QStringLiteral("CRITICAL: The FAQ below STILL contains the "
-                                                               "forbidden word(s): ")
-                                                + still2.join(QStringLiteral(", "))
-                                                + QStringLiteral(".\nSearch EVERY line for these words and any "
-                                                                 "compound forms that include them as a substring. "
-                                                                 "Replace EACH occurrence with a different synonym. "
-                                                                 "Keep the Q:/A: format and all pairs unchanged.\n"
-                                                                 "Return ONLY the corrected FAQ.\n\n")
-                                                + faqText;
-                                        }
-                                    } // lowerFaq2, still2 destroyed
-                                    if (preflightFailed2) {
-                                        QPromise<CliRunResult> fixProm2;
-                                        fixProm2.start();
-                                        QFuture<CliRunResult> fixFut2 = fixProm2.future();
-                                        {
-                                            auto sp3 = QSharedPointer<QPromise<CliRunResult>>::create(
-                                                std::move(fixProm2));
-                                            cli->runPromptAsync(preflightPrompt2, faqWorkDir, this,
-                                                [sp3](CliRunResult r3) mutable {
-                                                    sp3->addResult(std::move(r3));
-                                                    sp3->finish();
-                                                });
-                                        }
-                                        const CliRunResult fixR2 = co_await qCoro(fixFut2).result();
-                                        const QString fixedFaq2 = extractFaqContent(fixR2.output.trimmed());
-                                        appendAplusLog(progressUi.logPtr,
-                                            tr("  ℹ Targeted re-rewrite:\n%1")
-                                                .arg(fixR2.output.trimmed().left(800)));
-                                        if (!fixedFaq2.isEmpty()) {
-                                            faqText = fixedFaq2;
-                                            saveFaqRewrite(fixedFaq2);
-                                        }
-                                    }
+                                QString regenerated;
+                                co_await _regenerateFaqCleaned(
+                                    cli, faqWorkDir, faqText, faqKey,
+                                    ui->textEditAttributes->toPlainText().trimmed(),
+                                    allBlockedKeywords, progressUi.logPtr, &regenerated);
+                                if (!regenerated.isEmpty()) {
+                                    faqText = regenerated;
+                                    saveFaqRewrite(regenerated);
                                     ++faqAttempt;
-                                    break; // retry upload with regenerated FAQ
+                                    break; // retry upload with the regenerated FAQ
                                 }
                                 appendAplusLog(progressUi.logPtr,
-                                    tr("  ⚠ CLI rewrite returned empty output — try again or skip."));
+                                    tr("  ⚠ CLI regeneration returned empty output — try again or skip."));
                                 // loop back to show dialog again
                             }
                             if (userSkippedFaq) {
@@ -4488,6 +4328,10 @@ void PaneSizing::onAplusGenerateAll()
             tr("Load a product first."));
         return;
     }
+    // Delete leftover/orphan image files from previous runs (keeps the version
+    // history referenced by index.json) so a run starts from a clean state.
+    if (const int n = m_aplusContent->pruneOrphanFiles(); n > 0)
+        qDebug() << "PaneSizing: pruned" << n << "orphan A+ image file(s) before generation.";
     AbstractCli *cli = ui->comboBoxCli->currentData().value<AbstractCli *>();
     if (!cli) {
         QMessageBox::warning(this, tr("Generate All"),
@@ -4689,10 +4533,15 @@ void PaneSizing::onAplusGenerateAll()
                     ? tr("Desktop image — %1 (v%2)").arg(displayName).arg(v + 1)
                     : tr("Desktop image — %1").arg(displayName);
                 desktopTask.prompt  = spec.desktopPrompt
-                    + QStringLiteral("\n\nOUTPUT PATH: Save the final image to this exact absolute path: ")
+                    + QStringLiteral("\n\nOUTPUT: Save the final image to this EXACT absolute path and create NOTHING else. Do NOT read, create, or modify any other file \u2014 in particular do NOT touch index.json or any .json file, and do NOT generate a mobile or alternative version. After saving the single file, STOP. Path: ")
                     + elemDir.absoluteFilePath(QStringLiteral("desktop.png"));
                 desktopTask.workDir = elemWorkDir;
                 desktopTask.onBefore = [beforeSnap, elemDir]() {
+                    // Clear stale plain outputs (incl. any stray mobile.png a prior
+                    // over-agentic CLI run left behind) so success detection below
+                    // reflects ONLY this generation.
+                    QFile::remove(elemDir.filePath(QStringLiteral("desktop.png")));
+                    QFile::remove(elemDir.filePath(QStringLiteral("mobile.png")));
                     *beforeSnap = elemDir.entryList({QStringLiteral("*.png"),
                         QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files);
                 };
@@ -4756,10 +4605,14 @@ void PaneSizing::onAplusGenerateAll()
                     ? tr("Mobile image — %1 (v%2)").arg(displayName).arg(v + 1)
                     : tr("Mobile image — %1").arg(displayName);
                 mobileTask.prompt  = spec.mobilePrompt
-                    + QStringLiteral("\n\nOUTPUT PATH: Save the final image to this exact absolute path: ")
+                    + QStringLiteral("\n\nOUTPUT: Save the final image to this EXACT absolute path and create NOTHING else. Do NOT read, create, or modify any other file \u2014 in particular do NOT touch index.json or any .json file, and do NOT generate a mobile or alternative version. After saving the single file, STOP. Path: ")
                     + elemDir.absoluteFilePath(QStringLiteral("mobile.png"));
                 mobileTask.workDir = elemWorkDir;
                 mobileTask.onBefore = [beforeSnap, elemDir]() {
+                    // Remove only the plain mobile.png (a stray the desktop task's
+                    // CLI may have written); keep desktop.png — the combined push
+                    // still references it as filePair->first.
+                    QFile::remove(elemDir.filePath(QStringLiteral("mobile.png")));
                     *beforeSnap = elemDir.entryList({QStringLiteral("*.png"),
                         QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files);
                 };
@@ -6081,7 +5934,7 @@ void PaneSizing::onAplusGenerateImage(const QString &elementId)
         CliTask desktopTask;
         desktopTask.label = (vCount > 1) ? tr("Desktop %1 (v%2)").arg(displayName).arg(v+1) : tr("Desktop %1").arg(displayName);
         desktopTask.prompt = finalDesktop
-            + QStringLiteral("\n\nOUTPUT PATH: Save the final image to this exact absolute path: ")
+            + QStringLiteral("\n\nOUTPUT: Save the final image to this EXACT absolute path and create NOTHING else. Do NOT read, create, or modify any other file \u2014 in particular do NOT touch index.json or any .json file, and do NOT generate a mobile or alternative version. After saving the single file, STOP. Path: ")
             + elementDir.absoluteFilePath(QStringLiteral("desktop.png"));
         desktopTask.workDir = workDir;
         desktopTask.onBefore = [beforeSnap, elementDir]() {
@@ -6100,7 +5953,7 @@ void PaneSizing::onAplusGenerateImage(const QString &elementId)
         CliTask mobileTask;
         mobileTask.label = (vCount > 1) ? tr("Mobile %1 (v%2)").arg(displayName).arg(v+1) : tr("Mobile %1").arg(displayName);
         mobileTask.prompt = finalMobile
-            + QStringLiteral("\n\nOUTPUT PATH: Save the final image to this exact absolute path: ")
+            + QStringLiteral("\n\nOUTPUT: Save the final image to this EXACT absolute path and create NOTHING else. Do NOT read, create, or modify any other file \u2014 in particular do NOT touch index.json or any .json file, and do NOT generate a mobile or alternative version. After saving the single file, STOP. Path: ")
             + elementDir.absoluteFilePath(QStringLiteral("mobile.png"));
         mobileTask.workDir = workDir;
         mobileTask.onBefore = [beforeSnap, elementDir]() {
@@ -6148,6 +6001,9 @@ void PaneSizing::onAplusGenerateSelected()
         QMessageBox::information(this, tr("Generate Selected"), tr("Load a product first."));
         return;
     }
+    // Clean orphan image files from previous runs (version history is preserved).
+    if (const int n = m_aplusContent->pruneOrphanFiles(); n > 0)
+        qDebug() << "PaneSizing: pruned" << n << "orphan A+ image file(s) before regeneration.";
     AbstractCli *cli = ui->comboBoxCli->currentData().value<AbstractCli *>();
     if (!cli) {
         QMessageBox::warning(this, tr("Generate Selected"), tr("No CLI tool selected."));
@@ -6439,7 +6295,7 @@ void PaneSizing::onAplusGenerateSelected()
             dt.prompt  = spec.desktopPrompt;
             if (!sel.extraInstr.isEmpty())
                 dt.prompt += QStringLiteral("\n\nAdditional instruction: ") + sel.extraInstr;
-            dt.prompt += QStringLiteral("\n\nOUTPUT PATH: Save the final image to this exact absolute path: ")
+            dt.prompt += QStringLiteral("\n\nOUTPUT: Save the final image to this EXACT absolute path and create NOTHING else. Do NOT read, create, or modify any other file \u2014 in particular do NOT touch index.json or any .json file, and do NOT generate a mobile or alternative version. After saving the single file, STOP. Path: ")
                 + elemDir.absoluteFilePath(QStringLiteral("desktop.png"));
             dt.workDir = elemWorkDir;
             dt.onBefore = [beforeSnap, elemDir]() {
@@ -6490,7 +6346,7 @@ void PaneSizing::onAplusGenerateSelected()
             mt.prompt  = spec.mobilePrompt;
             if (!sel.extraInstr.isEmpty())
                 mt.prompt += QStringLiteral("\n\nAdditional instruction: ") + sel.extraInstr;
-            mt.prompt += QStringLiteral("\n\nOUTPUT PATH: Save the final image to this exact absolute path: ")
+            mt.prompt += QStringLiteral("\n\nOUTPUT: Save the final image to this EXACT absolute path and create NOTHING else. Do NOT read, create, or modify any other file \u2014 in particular do NOT touch index.json or any .json file, and do NOT generate a mobile or alternative version. After saving the single file, STOP. Path: ")
                 + elemDir.absoluteFilePath(QStringLiteral("mobile.png"));
             mt.workDir = elemWorkDir;
             mt.onBefore = [beforeSnap, elemDir]() {
@@ -10775,4 +10631,148 @@ void PaneSizing::onEditPromptsClicked()
 
     DialogEditPrompts dlg(wf, this);
     dlg.exec();
+}
+
+// ---------------------------------------------------------------------------
+// FAQ forbidden-word regeneration (A+ upload retry)
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> PaneSizing::_runCliText(AbstractCli *cli, QString prompt,
+                                          QString workDir, QString *out)
+{
+    *out = QString();
+    if (!cli)
+        co_return;
+    // async → QFuture bridge: co_await on runPrompt() itself frees the Task
+    // frame while QProcess::finished is queued (SIGSEGV). See project memory.
+    QPromise<CliRunResult> promise;
+    promise.start();
+    QFuture<CliRunResult> future = promise.future();
+    {
+        auto sp = QSharedPointer<QPromise<CliRunResult>>::create(std::move(promise));
+        cli->runPromptAsync(prompt, workDir, this, [sp](CliRunResult r) mutable {
+            sp->addResult(std::move(r));
+            sp->finish();
+        });
+    }
+    const CliRunResult r = co_await qCoro(future).result();
+    *out = r.output.trimmed();
+}
+
+QCoro::Task<void> PaneSizing::_regenerateFaqCleaned(AbstractCli *cli, QString faqWorkDir,
+                                                    QString faqText, QString faqKey,
+                                                    QString description, QStringList blockedWords,
+                                                    QPointer<QTextEdit> logPtr, QString *out)
+{
+    *out = QString();
+    if (!cli || faqText.trimmed().isEmpty())
+        co_return;
+    const QString wordList = blockedWords.join(QStringLiteral(", "));
+
+    // Step 1 — clean the SOURCE description of forbidden claims. Rewriting the
+    // FAQ alone keeps failing because the whole Q&A is built on a forbidden
+    // claim (e.g. a money-back / "remboursement" guarantee); once the claim is
+    // gone from the description the regenerated FAQ has nothing to reintroduce.
+    QString cleanedDesc = description;
+    if (!description.trimmed().isEmpty()) {
+        const QString cleanPrompt =
+            QStringLiteral("You clean an Amazon product description. The words/phrases below are "
+                           "STRICTLY forbidden by Amazon, and any CLAIM built around them must be "
+                           "removed ENTIRELY (delete the whole sentence, not just the word): ")
+            + wordList
+            + QStringLiteral(".\n\nRules:\n"
+                             "- Delete every sentence/claim that mentions or relies on a forbidden "
+                             "word (refunds, money-back, guarantees, etc.).\n"
+                             "- Keep all other product information unchanged.\n"
+                             "- Keep the SAME language.\n"
+                             "- Return ONLY the cleaned description, no extra text.\n\n")
+            + description;
+        QString cleaned;
+        co_await _runCliText(cli, cleanPrompt, faqWorkDir, &cleaned);
+        if (!cleaned.isEmpty())
+            cleanedDesc = cleaned;
+        appendAplusLog(logPtr, QObject::tr("  ℹ Cleaned description (forbidden claims removed):\n%1")
+                       .arg(cleanedDesc.left(600)));
+    }
+
+    // Step 2 — regenerate the FAQ grounded ONLY on the cleaned description.
+    const QString regenPrompt =
+        QStringLiteral("Rewrite the following Amazon A+ Content FAQ so it stays consistent with the "
+                       "CLEANED product description below and contains NONE of the forbidden words.\n"
+                       "Language code: ")
+        + faqKey
+        + QStringLiteral(".\nSTRICTLY forbidden words/phrases — must not appear anywhere, and DROP "
+                         "any Q&A whose topic depends on them (e.g. refund/guarantee questions): ")
+        + wordList
+        + QStringLiteral(".\n\nCLEANED DESCRIPTION (the only allowed source of claims):\n")
+        + cleanedDesc
+        + QStringLiteral("\n\nRules:\n"
+                         "- Remove or replace every Q&A that references a forbidden topic.\n"
+                         "- Keep the Q:/A: format exactly.\n"
+                         "- Return ONLY the FAQ, no extra text.\n\nCURRENT FAQ:\n")
+        + faqText;
+    QString regenRaw;
+    co_await _runCliText(cli, regenPrompt, faqWorkDir, &regenRaw);
+    QString newFaq = extractFaqContent(regenRaw);
+    appendAplusLog(logPtr, QObject::tr("  ℹ Regenerated FAQ (from cleaned description):\n%1")
+                   .arg(regenRaw.left(1000)));
+    if (newFaq.isEmpty()) {
+        // CLI produced nothing usable — fall back to the original FAQ so the
+        // deterministic strip below still removes the forbidden Q&A(s) and we
+        // never loop forever waiting on a flaky backend.
+        appendAplusLog(logPtr, QObject::tr("  ⚠ Regeneration empty — deterministically stripping "
+                                           "the original FAQ instead."));
+        newFaq = faqText;
+    }
+
+    // Step 3 — preflight: targeted fix if any forbidden word survived.
+    QStringList still;
+    const QString lower = newFaq.toLower();
+    for (const QString &kw : blockedWords)
+        if (lower.contains(kw.toLower()))
+            still.append(kw);
+    if (!still.isEmpty()) {
+        appendAplusLog(logPtr, QObject::tr("  ⚠ Regeneration still contains %1 — targeted fix…")
+                       .arg(still.join(QStringLiteral(", "))));
+        const QString fixPrompt =
+            QStringLiteral("CRITICAL: the FAQ below STILL contains forbidden word(s): ")
+            + still.join(QStringLiteral(", "))
+            + QStringLiteral(".\nRemove EVERY occurrence (and any compound form containing them as a "
+                             "substring) and drop any Q&A that needs them. Keep the Q:/A: format and "
+                             "the remaining pairs. Return ONLY the corrected FAQ.\n\n")
+            + newFaq;
+        QString fixedRaw;
+        co_await _runCliText(cli, fixPrompt, faqWorkDir, &fixedRaw);
+        const QString fixed = extractFaqContent(fixedRaw);
+        if (!fixed.isEmpty())
+            newFaq = fixed;
+    }
+
+    // Deterministic backstop: drop any Q&A block that STILL contains a forbidden
+    // word (case-insensitive substring). The CLI cleaning above is best-effort and
+    // — especially with a flaky backend — sometimes keeps re-emitting the banned
+    // claim, causing an endless reject loop. Removing the offending pairs outright
+    // guarantees the word can never reach Amazon (the FAQ is just shorter).
+    {
+        const QStringList blocks =
+            newFaq.split(QRegularExpression(QStringLiteral("\\n\\s*\\n")), Qt::SkipEmptyParts);
+        QStringList kept;
+        int dropped = 0;
+        for (const QString &blk : blocks) {
+            const QString lower = blk.toLower();
+            bool bad = false;
+            for (const QString &kw : blockedWords) {
+                const QString k = kw.trimmed().toLower();
+                if (!k.isEmpty() && lower.contains(k)) { bad = true; break; }
+            }
+            if (bad) ++dropped;
+            else     kept << blk.trimmed();
+        }
+        if (dropped > 0) {
+            appendAplusLog(logPtr, QObject::tr("  ✓ Dropped %1 Q&A block(s) that still contained a "
+                "forbidden word (deterministic strip).").arg(dropped));
+            newFaq = kept.join(QStringLiteral("\n\n"));
+        }
+    }
+    *out = newFaq;
 }

@@ -1,6 +1,9 @@
 #include "APlusContent.h"
 
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QSet>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -55,6 +58,31 @@ void APlusContent::setDir(const QDir &aplusDir)
 QDir APlusContent::dir() const
 {
     return m_dir;
+}
+
+int APlusContent::pruneOrphanFiles() const
+{
+    static const QStringList kImgGlobs{QStringLiteral("*.png"), QStringLiteral("*.jpg"),
+                                       QStringLiteral("*.jpeg")};
+    int removed = 0;
+    for (const APlusElement &el : m_elements) {
+        if (el.id.isEmpty())
+            continue;
+        QDir elemDir(m_dir.filePath(el.id));
+        if (!elemDir.exists())
+            continue;
+        // Files this element's version history still needs (by basename).
+        QSet<QString> keep;
+        for (const APlusVersion &v : el.versions) {
+            if (!v.desktopFile.isEmpty()) keep.insert(QFileInfo(v.desktopFile).fileName());
+            if (!v.mobileFile.isEmpty())  keep.insert(QFileInfo(v.mobileFile).fileName());
+        }
+        for (const QString &f : elemDir.entryList(kImgGlobs, QDir::Files)) {
+            if (!keep.contains(f) && QFile::remove(elemDir.filePath(f)))
+                ++removed;
+        }
+    }
+    return removed;
 }
 
 const QList<APlusElement> &APlusContent::elements() const

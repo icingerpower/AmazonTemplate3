@@ -58,6 +58,12 @@ public:
     void promoteVersion(const QString &id, int versionIndex);
     void ensureImageElement(int index);
 
+    // Deletes image files left in each element's directory that are NOT part of
+    // that element's version history (orphans from failed/over-agentic CLI runs,
+    // e.g. the plain desktop.png/mobile.png or superseded v_* files). The version
+    // history referenced by index.json is preserved. Returns the count removed.
+    int pruneOrphanFiles() const;
+
 signals:
     void elementChanged(const QString &id);
     void layoutChanged();

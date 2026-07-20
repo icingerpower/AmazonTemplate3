@@ -33,6 +33,7 @@ class TreeSizingAsins;
 class QStandardItemModel;
 class QDoubleSpinBox;
 class QTableWidget;
+class QTextEdit;
 class AbstractSizeCategory;
 class QNetworkAccessManager;
 
@@ -229,6 +230,19 @@ private:
     QCoro::Task<void> _saveToSizeTableFolder();
     QCoro::Task<void> _addSkusFromTemplate();
     QCoro::Task<void> _uploadAplusContent();
+    // Runs one CLI prompt via the async→QFuture bridge (co_await on runPrompt()
+    // itself crashes). Trims stdout into *out.
+    QCoro::Task<void> _runCliText(AbstractCli *cli, QString prompt,
+                                  QString workDir, QString *out);
+    // Regenerates a FAQ free of Amazon-forbidden words by FIRST cleaning the
+    // source description (dropping claims built on forbidden words), then
+    // rewriting the FAQ grounded on the cleaned description, then a targeted
+    // pass if any word survived. *out is empty on failure. Used by the A+ upload
+    // FAQ-rejection retry (both automatic and the user's "Regenerate" choice).
+    QCoro::Task<void> _regenerateFaqCleaned(AbstractCli *cli, QString faqWorkDir,
+                                            QString faqText, QString faqKey,
+                                            QString description, QStringList blockedWords,
+                                            QPointer<QTextEdit> logPtr, QString *out);
     // Fills missing SKUs: settings.ini → Reports API → manual dialog.
     // Sets *cancelled = true if the user dismissed the manual entry dialog.
     QCoro::Task<void> _resolveSkus(QList<AsinSku> &items,
