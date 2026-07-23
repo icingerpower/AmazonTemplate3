@@ -9,7 +9,9 @@
 #include "SettingsTable.h"
 #include "apis/AmazonCatalogApi.h"
 #include "apis/AmazonAplusApi.h"
+#include "apis/AmazonWarningsApi.h"
 #include "apis/TreeSizingAsins.h"
+#include "BulletFixPrompt.h"
 #include "aplus/APlusUploadDialog.h"
 #include "sizecategories/AbstractSizeCategory.h"
 #include "sizecategories/SizingTableTemplateModel.h"
@@ -211,6 +213,8 @@ PaneSizing::PaneSizing(QWidget *parent)
             this, &PaneSizing::onAplusDeleteVersion);
     connect(ui->buttonAplusUpload, &QPushButton::clicked,
             this, &PaneSizing::onAplusUploadClicked);
+    connect(ui->buttonFixBullets, &QPushButton::clicked,
+            this, &PaneSizing::onFixBulletPointsClicked);
 
     // Desktop/Mobile toggle — mutually exclusive
     auto *viewGroup = new QButtonGroup(this);
@@ -1082,6 +1086,7 @@ void PaneSizing::updateButtonStates()
     const bool hasProduct = m_productWorkingDir.exists();
     ui->buttonAplusGenerate->setEnabled(hasProduct);
     ui->buttonAplusUpload->setEnabled(hasProduct && m_aplusContent != nullptr);
+    ui->buttonFixBullets->setEnabled(hasProduct);
     ui->buttonOpenSizeTableFolder->setEnabled(hasProduct);
     ui->buttonAddSkusFromTemplate->setEnabled(hasProduct);
     ui->buttonFactorize->setEnabled(m_workingDir.exists());
@@ -2879,6 +2884,192 @@ void setAplusStatus(const AplusProgressUi &ui, const QString &msg, int step)
 void PaneSizing::onAplusUploadClicked()
 {
     m_uploadTask = _uploadAplusContent();
+}
+
+AmazonWarningsApi *PaneSizing::_warningsApi()
+{
+    if (!m_warningsApi) {
+        auto *st = SettingsTable::instance();
+        m_warningsApi = new AmazonWarningsApi(
+            st->value(SettingsTable::KEY_LWA_CLIENT_ID),
+            st->value(SettingsTable::KEY_LWA_CLIENT_SECRET),
+            st->value(SettingsTable::KEY_EU_LWA_REFRESH_TOKEN),
+            st->value(SettingsTable::KEY_NA_LWA_REFRESH_TOKEN),
+            st->value(SettingsTable::KEY_JP_LWA_REFRESH_TOKEN),
+            st->value(SettingsTable::KEY_EU_SELLER_ID),
+            st->value(SettingsTable::KEY_NA_SELLER_ID),
+            st->value(SettingsTable::KEY_JP_SELLER_ID),
+            this);
+    }
+    return m_warningsApi;
+}
+
+void PaneSizing::onFixBulletPointsClicked()
+{
+    // Fire-and-forget MUST be stored in a member — a QCoro Task frame freed
+    // mid-flight crashes (see project memory).
+    m_fixBulletsTask = _fixBulletPoints();
+}
+
+QCoro::Task<void> PaneSizing::_fixBulletPoints()
+{
+    // --- Guards -----------------------------------------------------------
+    if (!m_treeModel || m_treeModel->rowCount() == 0) {
+        QMessageBox::information(this, tr("Fix bullet points"),
+                                 tr("No product is loaded."));
+        co_return;
+    }
+    AbstractCli *cli = ui->comboBoxCli->currentData().value<AbstractCli *>();
+    if (!cli) {
+        QMessageBox::warning(this, tr("Fix bullet points"),
+                             tr("No AI CLI is selected."));
+        co_return;
+    }
+
+    // --- Target marketplaces (one per language) ---------------------------
+    // buildAplusMarketplaceList already skips "(missing)" and dedupes.
+    const QList<QPair<QString, QString>> marketplaces =
+        buildAplusMarketplaceList(ui->listWidgetCountries);
+
+    // --- Group child variations by color (skip excluded colors) -----------
+    struct ChildVar { QString size; QString sku; QString asin; };
+    struct ColorGroup { QString colorDisplay; QList<ChildVar> children; };
+    QList<ColorGroup> colorGroups;
+    QHash<QString, int> colorIndex; // color.toLower() → index into colorGroups
+
+    for (int fi = 0; fi < m_treeModel->rowCount(); ++fi) {
+        const QModelIndex pi = m_treeModel->index(fi, 0);
+        for (int ci = 0; ci < m_treeModel->rowCount(pi); ++ci) {
+            const QString asin = m_treeModel->data(
+                m_treeModel->index(ci, TreeSizingAsins::ASIN, pi)).toString().trimmed();
+            const QString sku = m_treeModel->data(
+                m_treeModel->index(ci, TreeSizingAsins::SKU, pi)).toString().trimmed();
+            const QString color = m_treeModel->data(
+                m_treeModel->index(ci, TreeSizingAsins::Color, pi)).toString().trimmed();
+            const QString size = m_treeModel->data(
+                m_treeModel->index(ci, TreeSizingAsins::Size, pi)).toString().trimmed();
+
+            if (sku.isEmpty() || asin.isEmpty())
+                continue; // nothing to fetch/patch for this child
+            // Skip colors the user excluded (case-insensitive).
+            if (!color.isEmpty()
+                && m_aplusExcludedColors.contains(color, Qt::CaseInsensitive))
+                continue;
+
+            const QString key = color.toLower();
+            int idx = colorIndex.value(key, -1);
+            if (idx < 0) {
+                idx = colorGroups.size();
+                colorIndex.insert(key, idx);
+                colorGroups.append(ColorGroup{color, {}});
+            }
+            colorGroups[idx].children.append(ChildVar{size, sku, asin});
+        }
+    }
+
+    if (colorGroups.isEmpty()) {
+        QMessageBox::information(this, tr("Fix bullet points"),
+            tr("No sellable child variations found (all colors excluded or "
+               "missing SKUs/ASINs)."));
+        co_return;
+    }
+
+    // --- Progress dialog --------------------------------------------------
+    const int totalSteps = marketplaces.size() * colorGroups.size();
+    AplusProgressUi pui = createAplusProgressDialog(this, totalSteps);
+    if (pui.statusPtr && pui.statusPtr->window())
+        pui.statusPtr->window()->setWindowTitle(tr("Fix bullet points"));
+    int step = 0;
+
+    // Product working dir drives the CLI's scratch/reference folder.
+    const QString workDir =
+        m_productWorkingDir.exists() ? m_productWorkingDir.path() : QString{};
+
+    AmazonWarningsApi *warnApi = _warningsApi();
+
+    // --- One AI rewrite per (marketplace, color); upload to every size ----
+    for (const auto &mp : marketplaces) {
+        const QString mpCode = mp.first;
+        const QString mpId   = mp.second;
+
+        for (const ColorGroup &group : colorGroups) {
+            ++step;
+            const QString colorLabel =
+                group.colorDisplay.isEmpty() ? tr("(no color)") : group.colorDisplay;
+            setAplusStatus(pui, tr("%1 — %2: rewriting bullet points…")
+                           .arg(mpCode, colorLabel), step);
+
+            if (group.children.isEmpty())
+                continue;
+
+            // Representative child: fetch current bullets once. Walk the group
+            // until we find a listing that actually returns bullets.
+            QString title;
+            QStringList currentBullets;
+            QString repAsin = group.children.first().asin;
+            for (const ChildVar &c : group.children) {
+                QString t;
+                QStringList b;
+                co_await m_api->fetchListingText(mpId, c.asin, &t, &b);
+                if (title.isEmpty() && !t.isEmpty()) title = t;
+                if (!b.isEmpty()) {
+                    currentBullets = b;
+                    repAsin = c.asin;
+                    break;
+                }
+            }
+            if (title.isEmpty())
+                title = m_productTitle;
+
+            // Number the current bullets for the prompt (may be empty →
+            // buildBulletFixPrompt phrases it as a proactive compliance pass).
+            QString currentBulletsNumbered;
+            for (int b = 0; b < currentBullets.size(); ++b)
+                currentBulletsNumbered +=
+                    QStringLiteral("%1. %2\n").arg(b + 1).arg(currentBullets[b]);
+
+            const QString prompt =
+                buildBulletFixPrompt(title, repAsin, QString{}, currentBulletsNumbered);
+
+            appendAplusLog(pui.logPtr, tr("[%1/%2] %3 / %4 — asking AI (ref ASIN %5)…")
+                           .arg(step).arg(totalSteps).arg(mpCode, colorLabel, repAsin));
+
+            QString aiOut;
+            co_await _runCliText(cli, prompt, workDir, &aiOut);
+            const QStringList newBullets = extractBullets(aiOut);
+
+            if (newBullets.size() < 3) {
+                appendAplusLog(pui.logPtr,
+                    tr("  ⚠ Only %1 bullet(s) returned — skipping %2 / %3.")
+                        .arg(newBullets.size()).arg(mpCode, colorLabel));
+                continue;
+            }
+
+            // Upload the SAME rewritten bullets to every size's child SKU.
+            const QString joined = newBullets.join(QLatin1Char('\n'));
+            for (const ChildVar &c : group.children) {
+                QString pt;
+                co_await m_api->fetchListingProductType(mpId, c.sku, &pt);
+                if (pt.isEmpty()) pt = m_productType;
+
+                bool ok = false;
+                co_await warnApi->patchListingAttribute(
+                    mpId, c.sku, pt, QStringLiteral("bullet_point"), joined, &ok);
+
+                if (ok)
+                    appendAplusLog(pui.logPtr, tr("  ✓ %1 (size %2) updated")
+                                   .arg(c.sku, c.size.isEmpty() ? tr("—") : c.size));
+                else
+                    appendAplusLog(pui.logPtr, tr("  ✗ %1 (size %2) FAILED: %3")
+                                   .arg(c.sku, c.size.isEmpty() ? tr("—") : c.size,
+                                        warnApi->lastError()));
+            }
+        }
+    }
+
+    setAplusStatus(pui, tr("Done."), totalSteps);
+    appendAplusLog(pui.logPtr, tr("Fix bullet points finished."));
+    co_return;
 }
 
 // Helper: find element from flat list by type + exact id, with fallback to base id.
@@ -10748,29 +10939,44 @@ QCoro::Task<void> PaneSizing::_regenerateFaqCleaned(AbstractCli *cli, QString fa
             newFaq = fixed;
     }
 
-    // Deterministic backstop: drop any Q&A block that STILL contains a forbidden
-    // word (case-insensitive substring). The CLI cleaning above is best-effort and
-    // — especially with a flaky backend — sometimes keeps re-emitting the banned
-    // claim, causing an endless reject loop. Removing the offending pairs outright
-    // guarantees the word can never reach Amazon (the FAQ is just shorter).
+    // Deterministic backstop: drop any Q&A PAIR that still contains a forbidden
+    // word. We split by the "Q:" marker (NOT blank lines) because the CLI output
+    // is frequently not blank-line separated — splitting on blank lines then
+    // collapsed the whole FAQ into one block, which got dropped entirely and made
+    // the code fall back to the original (still-forbidden) FAQ → endless reject
+    // loop. Marker-based splitting isolates each pair so only offenders are
+    // removed. This guarantees the word can never reach Amazon.
     {
-        const QStringList blocks =
-            newFaq.split(QRegularExpression(QStringLiteral("\\n\\s*\\n")), Qt::SkipEmptyParts);
+        const QStringList lines = newFaq.split(QLatin1Char('\n'));
+        QList<QStringList> pairs;
+        for (const QString &ln : lines) {
+            const QString t = ln.trimmed();
+            const bool startsQ = t.size() >= 2
+                && (t.at(0) == QLatin1Char('Q') || t.at(0) == QLatin1Char('q'))
+                && (t.at(1) == QLatin1Char(':') || t.at(1) == QLatin1Char(' '));
+            if (startsQ || pairs.isEmpty())
+                pairs.append(QStringList{});
+            if (!t.isEmpty())
+                pairs.last().append(ln);
+        }
         QStringList kept;
         int dropped = 0;
-        for (const QString &blk : blocks) {
-            const QString lower = blk.toLower();
+        for (const QStringList &p : pairs) {
+            const QString block = p.join(QLatin1Char('\n')).trimmed();
+            if (block.isEmpty())
+                continue;
+            const QString low = block.toLower();
             bool bad = false;
             for (const QString &kw : blockedWords) {
                 const QString k = kw.trimmed().toLower();
-                if (!k.isEmpty() && lower.contains(k)) { bad = true; break; }
+                if (!k.isEmpty() && low.contains(k)) { bad = true; break; }
             }
             if (bad) ++dropped;
-            else     kept << blk.trimmed();
+            else     kept << block;
         }
         if (dropped > 0) {
-            appendAplusLog(logPtr, QObject::tr("  ✓ Dropped %1 Q&A block(s) that still contained a "
-                "forbidden word (deterministic strip).").arg(dropped));
+            appendAplusLog(logPtr, QObject::tr("  ✓ Dropped %1 Q&A pair(s) containing a forbidden "
+                "word (deterministic strip).").arg(dropped));
             newFaq = kept.join(QStringLiteral("\n\n"));
         }
     }

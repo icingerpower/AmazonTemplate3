@@ -29,6 +29,7 @@ namespace Ui { class PaneSizing; }
 QT_END_NAMESPACE
 
 class AmazonCatalogApi;
+class AmazonWarningsApi;
 class TreeSizingAsins;
 class QStandardItemModel;
 class QDoubleSpinBox;
@@ -89,6 +90,7 @@ private slots:
     void onAplusTreeClicked(const QModelIndex &idx);
     void onAplusSelectionChanged(const QModelIndex &current, const QModelIndex &previous);
     void onAplusUploadClicked();
+    void onFixBulletPointsClicked();
     void onAplusExcludedColors();
     void onEditPromptsClicked();
 
@@ -128,6 +130,12 @@ private:
     Ui::PaneSizing   *ui;
     std::unique_ptr<AmazonCatalogApi> m_api;
     std::unique_ptr<AmazonAplusApi>   m_aplusApi;
+    // Lazily created by _warningsApi(); parented to this. Used to PATCH the
+    // rewritten bullet_point attribute back to each SKU during "Fix bullet points".
+    AmazonWarningsApi                *m_warningsApi = nullptr;
+    // Pinned coroutine frame for the fire-and-forget "Fix bullet points" run
+    // (a QCoro Task freed mid-flight crashes — see project memory).
+    QCoro::Task<void>                 m_fixBulletsTask;
     QString                           m_currentAsin;
     // The exact ASIN string passed to m_treeModel->load() for the in-flight
     // request (set right before calling load()). Used by _findExistingProductDir
@@ -230,6 +238,14 @@ private:
     QCoro::Task<void> _saveToSizeTableFolder();
     QCoro::Task<void> _addSkusFromTemplate();
     QCoro::Task<void> _uploadAplusContent();
+    // Lazy getter for the Warnings API (bullet_point PATCH). Creds from SettingsTable.
+    AmazonWarningsApi *_warningsApi();
+    // Rewrites each listing's bullet points to be Amazon-compliant via the AI CLI,
+    // then PATCHes them back for every language (marketplace) × size × non-excluded
+    // color. Bullets differ by color+language but are identical across sizes, so
+    // the AI runs once per (marketplace, color) and the result is uploaded to every
+    // size's child SKU. Resilient: a failed SKU/marketplace is logged, never aborts.
+    QCoro::Task<void> _fixBulletPoints();
     // Runs one CLI prompt via the async→QFuture bridge (co_await on runPrompt()
     // itself crashes). Trims stdout into *out.
     QCoro::Task<void> _runCliText(AbstractCli *cli, QString prompt,

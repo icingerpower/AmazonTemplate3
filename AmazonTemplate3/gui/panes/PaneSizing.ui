@@ -914,6 +914,16 @@
                   </widget>
                  </item>
                  <item>
+                  <widget class="QPushButton" name="buttonFixBullets">
+                   <property name="enabled">
+                    <bool>false</bool>
+                   </property>
+                   <property name="text">
+                    <string>Fix bullet points</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
                   <spacer name="horizontalSpacerAplusToolbar">
                    <property name="orientation">
                     <enum>Qt::Orientation::Horizontal</enum>
