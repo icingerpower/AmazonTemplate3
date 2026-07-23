@@ -7,14 +7,16 @@ include(../common.cmake)
 #include(../../common/workingdirectory/workingdirectory.cmake)
 include(../../common/openai/openai2.cmake)
 include(../../common/utils/utils.cmake)
+include(../../common/secrets/secrets.cmake)
 
 include(fillers/fillers.cmake)
 include(sizecategories/sizecategories.cmake)
 include(marketplaces/marketplaces.cmake)
 
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core Widgets Network)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Widgets Network)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core Widgets Network DBus)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Widgets Network DBus)
 find_package(ZLIB REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 # Compile and install QXlsx
 #sudo apt-get install libxkbcommon-dev
@@ -105,17 +107,22 @@ add_library(AmazonTemplate3Lib STATIC
   AttributeEquivalentTable.cpp
   AiFailureTable.h
   AiFailureTable.cpp
+  BulletFixPrompt.h
+  BulletFixPrompt.cpp
   ${FILLER_FILES}
   ${SIZECATEGORY_FILES}
   ${MARKETPLACE_FILES}
+  ${SECRETS_FILES}
 )
 
 target_link_libraries(AmazonTemplate3Lib PRIVATE
     Qt${QT_VERSION_MAJOR}::Widgets
-    Qt${QT_VERSION_MAJOR}::Network
     Qt${QT_VERSION_MAJOR}::Core
     ZLIB::ZLIB
     PUBLIC
+    Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::DBus
+    OpenSSL::Crypto
     QXlsx::QXlsx
     QCoro::Network
 )
@@ -138,6 +145,7 @@ target_include_directories(AmazonTemplate3Lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
     PUBLIC ${CMAKE_SOURCE_DIR}/compat
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/apis
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/marketplaces
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../../common
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../AmazonTemplate3)
 
 # Library variant for unit tests (exposes protected hooks)
@@ -207,9 +215,12 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   AttributeValueReplacedTable.cpp
   AiFailureTable.h
   AiFailureTable.cpp
+  BulletFixPrompt.h
+  BulletFixPrompt.cpp
   ${FILLER_FILES}
   ${SIZECATEGORY_FILES}
   ${MARKETPLACE_FILES}
+  ${SECRETS_FILES}
 )
 
 target_link_libraries(AmazonTemplate3Lib_Tests PUBLIC
@@ -217,7 +228,9 @@ target_link_libraries(AmazonTemplate3Lib_Tests PUBLIC
     Qt${QT_VERSION_MAJOR}::Widgets
     Qt${QT_VERSION_MAJOR}::Network
     Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::DBus
     ZLIB::ZLIB
+    OpenSSL::Crypto
     QXlsx::QXlsx
     QCoro::Network
 )
@@ -234,4 +247,5 @@ target_include_directories(AmazonTemplate3Lib_Tests PUBLIC ${CMAKE_CURRENT_SOURC
     PUBLIC ${CMAKE_SOURCE_DIR}/compat
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/apis
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/marketplaces
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../../common
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../AmazonTemplate3)

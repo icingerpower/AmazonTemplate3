@@ -31,6 +31,9 @@ public:
     QString value(const QString &key, const QString &defaultValue = {}) const;
     void setValue(const QString &key, const QString &value);
 
+    // True if `key` is one of the credential entries (stored in the OS keychain).
+    static bool isSensitiveKey(const QString &key);
+
     // QAbstractTableModel — 2 columns: Label | Value
     int rowCount(const QModelIndex &parent = {}) const override;
     int columnCount(const QModelIndex &parent = {}) const override;

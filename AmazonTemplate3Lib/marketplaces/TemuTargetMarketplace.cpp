@@ -6,6 +6,7 @@
 
 #include "../apis/TemuInventoryApi.h"
 #include "AbstractTargetMarketplaceFactory.h"
+#include "secrets/CredentialManager.h"
 
 TemuTargetMarketplace::TemuTargetMarketplace(const QString &appKey, const QString &appSecret,
                                              const QString &country, const QString &label,
@@ -115,7 +116,10 @@ QList<AbstractTargetMarketplace *> TemuTargetMarketplaceFactory::createInstances
 {
         QList<AbstractTargetMarketplace *> out;
         const QString appKey    = settings->value(QStringLiteral("TemuApi/appKey")).toString();
-        const QString appSecret = settings->value(QStringLiteral("TemuApi/appSecret")).toString();
+        // Secret from the keychain; ini value is only a legacy fallback.
+        const QString appSecret = CredentialManager::lookup(QStringLiteral("AmazonTemplate3"),
+            QStringLiteral("TemuApi/appSecret"),
+            settings->value(QStringLiteral("TemuApi/appSecret")).toString());
         if (appKey.isEmpty() || appSecret.isEmpty()) {
             qDebug() << "TemuTargetMarketplaceFactory: no app key/secret configured — 0 stores";
             return out;
@@ -124,7 +128,10 @@ QList<AbstractTargetMarketplace *> TemuTargetMarketplaceFactory::createInstances
         const int size = settings->beginReadArray(QStringLiteral("TemuApi/stores"));
         for (int i = 0; i < size; ++i) {
             settings->setArrayIndex(i);
-            const QString token = settings->value(QStringLiteral("token")).toString();
+            // Per-store token keyed by 1-based index, matching the migration.
+            const QString token = CredentialManager::lookup(QStringLiteral("AmazonTemplate3"),
+                QStringLiteral("TemuApi/stores/%1/token").arg(i + 1),
+                settings->value(QStringLiteral("token")).toString());
             if (token.isEmpty()) {
                 qDebug() << "TemuTargetMarketplaceFactory: store" << i << "has no token — skipped";
                 continue;

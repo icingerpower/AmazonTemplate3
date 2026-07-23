@@ -8,6 +8,7 @@
 
 #include "../apis/AmazonInventoryApi.h"
 #include "AbstractInventorySourceFactory.h"
+#include "secrets/CredentialManager.h"
 
 namespace {
 
@@ -174,8 +175,13 @@ QList<AbstractInventorySource *> AmazonFbaInventorySourceFactory::createInstance
 {
     QList<AbstractInventorySource *> out;
     const QString clientId     = settings->value(QStringLiteral("AmazonApi/lwaClientId")).toString();
-    const QString clientSecret = settings->value(QStringLiteral("AmazonApi/lwaClientSecret")).toString();
-    const QString refreshToken = settings->value(QStringLiteral("AmazonApi/eu/lwaRefreshToken")).toString();
+    // Secrets come from the OS keychain (ini value passed only as legacy fallback).
+    const QString clientSecret = CredentialManager::lookup(QStringLiteral("AmazonTemplate3"),
+        QStringLiteral("AmazonApi/lwaClientSecret"),
+        settings->value(QStringLiteral("AmazonApi/lwaClientSecret")).toString());
+    const QString refreshToken = CredentialManager::lookup(QStringLiteral("AmazonTemplate3"),
+        QStringLiteral("AmazonApi/eu/lwaRefreshToken"),
+        settings->value(QStringLiteral("AmazonApi/eu/lwaRefreshToken")).toString());
     const QString sellerId     = settings->value(QStringLiteral("AmazonApi/eu/sellerId")).toString();
     if (clientId.isEmpty() || clientSecret.isEmpty() || refreshToken.isEmpty()) {
         qDebug() << "AmazonFbaInventorySourceFactory: EU LWA credentials incomplete — 0 sources";

@@ -1,5 +1,10 @@
 #include "SettingsTable.h"
 #include "../../common/workingdirectory/WorkingDirectoryManager.h"   // (found via include-path, same trick as the rest of the project)
+#include "secrets/CredentialManager.h"
+
+namespace {
+const QString kSecretApp = QStringLiteral("AmazonTemplate3");
+}
 
 SettingsTable *SettingsTable::s_instance = nullptr;
 
@@ -44,18 +49,52 @@ SettingsTable *SettingsTable::instance()
     return s_instance;
 }
 
+bool SettingsTable::isSensitiveKey(const QString &key)
+{
+    for (const Entry &e : ENTRIES) {
+        if (e.key == key) {
+            return e.sensitive;
+        }
+    }
+    return false;
+}
+
 QString SettingsTable::value(const QString &key, const QString &defaultValue) const
 {
-    return WorkingDirectoryManager::instance()->settings()->value(key, defaultValue).toString();
+    const QString ini = WorkingDirectoryManager::instance()->settings()->value(key, defaultValue).toString();
+    if (isSensitiveKey(key)) {
+        // Prefer the keychain; fall back to any legacy plaintext ini value.
+        return CredentialManager::lookup(kSecretApp, key, ini);
+    }
+    return ini;
 }
 
 void SettingsTable::setValue(const QString &key, const QString &value)
 {
     auto s = WorkingDirectoryManager::instance()->settings();
-    if (value.isEmpty())
+    if (isSensitiveKey(key)) {
+        CredentialManager cred(kSecretApp);
+        if (cred.storeAvailable()) {
+            QString err;
+            if (value.isEmpty()) {
+                cred.store().removeSecret(key, &err);
+            } else {
+                cred.set(key, value, &err);
+            }
+            // Never keep a plaintext copy in settings.ini.
+            if (s->contains(key)) {
+                s->remove(key);
+            }
+        } else if (value.isEmpty()) {
+            s->remove(key);
+        } else {
+            s->setValue(key, value);
+        }
+    } else if (value.isEmpty()) {
         s->remove(key);
-    else
+    } else {
         s->setValue(key, value);
+    }
 
     for (int row = 0; row < ENTRIES.size(); ++row) {
         if (ENTRIES[row].key == key) {
