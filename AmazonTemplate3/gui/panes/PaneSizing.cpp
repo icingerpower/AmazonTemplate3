@@ -61,6 +61,7 @@
 #include <QPushButton>
 #include <QProgressBar>
 #include <QTimer>
+#include <QScopeGuard>
 #include <QScrollBar>
 #include <QSplitter>
 #include <QTextEdit>
@@ -325,6 +326,15 @@ PaneSizing::PaneSizing(QWidget *parent)
             });
     connect(ui->buttonTemuCreateOrUpdate, &QPushButton::clicked,
             this, [this]() { m_temuDialogTask = onTemuCreateOrUpdate(); });
+    // "All country": when checked, (un)selecting a store also (un)selects every
+    // store of the same brand. Checked by default; persisted in QSettings.
+    ui->checkBoxTemuAllCountry->setChecked(
+        WorkingDirectoryManager::instance()->settings()
+            ->value(QStringLiteral("TemuSelectAllCountry"), true).toBool());
+    connect(ui->checkBoxTemuAllCountry, &QCheckBox::toggled, this, [](bool on) {
+        WorkingDirectoryManager::instance()->settings()
+            ->setValue(QStringLiteral("TemuSelectAllCountry"), on);
+    });
 
     connect(ui->buttonExcludedColors, &QPushButton::clicked,
             this, &PaneSizing::onAplusExcludedColors);
@@ -1550,6 +1560,7 @@ void PaneSizing::onLoadSubFolderClicked()
         bool       sizeImageGenerated = false;  // aplus/size_chart/size_chart.png exists
         bool       sizeImageUploaded  = false;  // sizing/sizeImageUploaded set in settings.ini
         QDateTime  aplusUploadedAt;             // aplus/uploadedAt set in settings.ini
+        QString    temuCountries;               // "DE FR IT" — where Temu pages exist
     };
     QList<SubFolderEntry> entries;
 
@@ -1631,6 +1642,14 @@ void PaneSizing::onLoadSubFolderClicked()
             e.aplusUploadedAt = QDateTime::fromString(
                 aplusUploadedVar.toString(), Qt::ISODate);
 
+        // Temu published countries (recorded by the create/update flow), shown
+        // alphabetically as e.g. "DE FR IT".
+        QStringList temu = ini.value(QStringLiteral("temu/publishedCountries")).toStringList();
+        for (QString &c : temu) c = c.toUpper();
+        temu.removeDuplicates();
+        temu.sort();
+        e.temuCountries = temu.join(QLatin1Char(' '));
+
         entries.append(e);
     }
 
@@ -1662,10 +1681,10 @@ void PaneSizing::onLoadSubFolderClicked()
     topRow->addStretch();
     layout->addLayout(topRow);
 
-    auto *table = new QTableWidget(entries.size(), 8, &dlg);
+    auto *table = new QTableWidget(entries.size(), 9, &dlg);
     table->setHorizontalHeaderLabels(
         {tr("Date"), tr("Category"), tr("Brand"), tr("EU Parent"), tr("America"),
-         tr("Size Image"), tr("A+ Upload"), tr("Folder")});
+         tr("Size Image"), tr("A+ Upload"), tr("Temu"), tr("Folder")});
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setSelectionMode(QAbstractItemView::ExtendedSelection);
     table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -1724,9 +1743,18 @@ void PaneSizing::onLoadSubFolderClicked()
             }
             table->setItem(i, 6, it);
         }
-        table->setItem(i, 7, new QTableWidgetItem(e.folderName));
+        // Temu published-countries column
+        {
+            auto *it = new QTableWidgetItem(
+                e.temuCountries.isEmpty() ? QStringLiteral("—") : e.temuCountries);
+            it->setTextAlignment(Qt::AlignCenter);
+            if (!e.temuCountries.isEmpty())
+                it->setForeground(QColor(46, 125, 50)); // dark green
+            table->setItem(i, 7, it);
+        }
+        table->setItem(i, 8, new QTableWidgetItem(e.folderName));
     }
-    for (int c = 0; c <= 6; ++c)
+    for (int c = 0; c <= 7; ++c)
         table->resizeColumnToContents(c);
     table->selectRow(0);
     layout->addWidget(table);
@@ -3645,18 +3673,45 @@ void PaneSizing::_initTemuStoreTable()
         ui->tableViewTemuStores->setEditTriggers(QAbstractItemView::NoEditTriggers);
         connect(m_temuStoreSelectModel, &QStandardItemModel::itemChanged,
                 this, [this](QStandardItem *item) {
-                    if (m_temuStoreSelectGuard || item->column() != 0
-                        || item->checkState() != Qt::Checked)
+                    if (m_temuStoreSelectGuard || item->column() != 0)
                         return;
-                    // Enforce one selected store per country.
                     m_temuStoreSelectGuard = true;
+                    const Qt::CheckState state = item->checkState();
                     const QString country = item->data(Qt::UserRole + 1).toString();
-                    for (int r = 0; r < m_temuStoreSelectModel->rowCount(); ++r) {
-                        QStandardItem *other = m_temuStoreSelectModel->item(r, 0);
-                        if (other && other != item
-                            && other->data(Qt::UserRole + 1).toString() == country
-                            && other->checkState() == Qt::Checked)
-                            other->setCheckState(Qt::Unchecked);
+                    const QString brand   = item->data(Qt::UserRole + 2).toString();
+                    const bool allCountry = ui->checkBoxTemuAllCountry->isChecked();
+
+                    // Enforces "one selected store per country" for a store row.
+                    auto enforceOnePerCountry = [this](QStandardItem *checked) {
+                        const QString cc = checked->data(Qt::UserRole + 1).toString();
+                        for (int r = 0; r < m_temuStoreSelectModel->rowCount(); ++r) {
+                            QStandardItem *o = m_temuStoreSelectModel->item(r, 0);
+                            if (o && o != checked
+                                && o->data(Qt::UserRole + 1).toString() == cc
+                                && o->checkState() == Qt::Checked)
+                                o->setCheckState(Qt::Unchecked);
+                        }
+                    };
+
+                    if (allCountry) {
+                        // Mirror this (un)check onto every store of the same brand.
+                        for (int r = 0; r < m_temuStoreSelectModel->rowCount(); ++r) {
+                            QStandardItem *o = m_temuStoreSelectModel->item(r, 0);
+                            if (o && o->data(Qt::UserRole + 2).toString() == brand)
+                                o->setCheckState(state);
+                        }
+                        // Keep one store per country when selecting a brand.
+                        if (state == Qt::Checked) {
+                            for (int r = 0; r < m_temuStoreSelectModel->rowCount(); ++r) {
+                                QStandardItem *o = m_temuStoreSelectModel->item(r, 0);
+                                if (o && o->data(Qt::UserRole + 2).toString() == brand
+                                    && o->checkState() == Qt::Checked)
+                                    enforceOnePerCountry(o);
+                            }
+                        }
+                    } else if (state == Qt::Checked) {
+                        Q_UNUSED(country);
+                        enforceOnePerCountry(item);
                     }
                     m_temuStoreSelectGuard = false;
                 });
@@ -3735,6 +3790,14 @@ QCoro::Task<void> PaneSizing::_ensureProductType()
 
 QCoro::Task<void> PaneSizing::onTemuCreateOrUpdate()
 {
+    // Guard against re-entrancy: the draft build awaits several network calls
+    // before the dialog appears, so a second click in that window would open a
+    // second dialog. Ignore clicks until the current one finishes.
+    if (m_temuDialogOpen)
+        co_return;
+    m_temuDialogOpen = true;
+    auto reentryGuard = qScopeGuard([this] { m_temuDialogOpen = false; });
+
     const QList<QPair<QString, QString>> stores = _selectedTemuStores();
     if (stores.isEmpty()) {
         QMessageBox::information(this, tr("Create or update"),
@@ -3842,6 +3905,28 @@ QCoro::Task<void> PaneSizing::onTemuCreateOrUpdate()
         }
     }
 
+    // Group gallery images by base colour so the Temu dialog can offer per-colour
+    // image selection. A file "royal-blue-image-01.jpg" belongs to the colour
+    // whose slug prefixes it; the main image and anything unmatched go under ""
+    // (shared). Longest slug first so "royal-blue-navy" wins over "royal-blue".
+    {
+        QList<QPair<QString, QString>> slugColor; // (slug, base colour)
+        for (const auto &s : draft.skus)
+            if (!s.color.isEmpty())
+                slugColor.append({colorToFileSegment(s.color), s.color});
+        std::sort(slugColor.begin(), slugColor.end(),
+                  [](const auto &a, const auto &b) { return a.first.size() > b.first.size(); });
+        for (const QString &path : draft.imagePaths) {
+            const QString fn = QFileInfo(path).fileName().toLower();
+            QString matched; // "" = shared/common
+            if (!fn.endsWith(QStringLiteral("_main.jpg"))) {
+                for (const auto &sc : slugColor)
+                    if (fn.startsWith(sc.first + QLatin1Char('-'))) { matched = sc.second; break; }
+            }
+            draft.galleryByColor[matched].append(path);
+        }
+    }
+
     // --- Build the store picks with per-store manufacturer/GSPR mapping ---
     auto settings = WorkingDirectoryManager::instance()->settings();
     const QString appKey    = settings->value(SettingsTable::KEY_TEMU_APP_KEY).toString();
@@ -3886,10 +3971,19 @@ QCoro::Task<void> PaneSizing::onTemuCreateOrUpdate()
             if (!title.isEmpty() || !bullets.isEmpty())
                 draft.textByCountry.insert(cc, {title, bullets});
 
-            // Localized colour/size names: one variation-family fetch per country
-            // (child ASINs are the same across EU marketplaces), mapped by ASIN.
+            // Localized colour/size names: one variation-family fetch per country,
+            // mapped by ASIN. Anchor on a CHILD ASIN (shared across EU
+            // marketplaces), NOT the parent ASIN — parent ASINs are
+            // marketplace-specific, so m_currentAsin (the load marketplace's
+            // parent) doesn't exist on IT/DE/ES and the fetch would return
+            // nothing, leaving every country showing the source (FR) size.
+            QString anchorAsin = m_currentAsin;
+            for (const auto &s : draft.skus)
+                if (!s.asin.isEmpty()) { anchorAsin = s.asin; break; }
             AmazonCatalogApi::VariationFamily fam;
-            co_await m_api->fetchVariationFamily(m_currentAsin, mpId, &fam);
+            // preserveMarketplaceColour=true → each country's OWN localized colour
+            // (e.g. "Bleu Roi" on FR), not the UK-normalized English name.
+            co_await m_api->fetchVariationFamily(anchorAsin, mpId, &fam, /*preserveMarketplaceColour=*/true);
             QHash<QString, QPair<QString, QString>> byAsin; // asin → (color,size)
             for (const AmazonCatalogApi::AsinItem &ch : fam.children)
                 byAsin.insert(ch.asin, {ch.color, ch.size});

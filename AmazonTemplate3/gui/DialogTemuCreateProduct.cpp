@@ -27,7 +27,9 @@
 #include <QPointer>
 #include <QProgressDialog>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QScrollArea>
+#include <QSet>
 #include <QSettings>
 #include <QSplitter>
 #include <QUrlQuery>
@@ -43,6 +45,7 @@
 
 #include "AbstractCli.h"
 #include "DialogKeywordTemplates.h"
+#include "../TemuStoreModel.h"
 #include "apis/AmazonPricingApi.h"
 #include "AbstractInventorySource.h"
 #include "AbstractInventorySourceFactory.h"
@@ -130,39 +133,83 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     catRow->addWidget(m_browseBtn);
     catRow->addWidget(m_loadCatBtn);
 
-    // --- Left: images (check to upload, click to preview) ---
-    m_imageList = new QListWidget(this);
-    m_imageList->setSelectionMode(QAbstractItemView::SingleSelection);
-    auto addImage = [this](const QString &path, bool checked, const QString &tag) {
+    // --- Left: images grouped by colour (check to upload, click to preview) ---
+    m_imageTree = new QTreeWidget(this);
+    m_imageTree->setHeaderHidden(true);
+    m_imageTree->setSelectionMode(QAbstractItemView::SingleSelection);
+    // Adds a checkable image leaf under `parent`. Roles: UserRole=local path.
+    auto addImageLeaf = [](QTreeWidgetItem *parent, const QString &path,
+                           bool checked, const QString &tag) {
         if (path.isEmpty() || !QFileInfo::exists(path)) return;
-        auto *it = new QListWidgetItem(
-            tag.isEmpty() ? QFileInfo(path).fileName()
-                          : QStringLiteral("%1  [%2]").arg(QFileInfo(path).fileName(), tag),
-            m_imageList);
-        it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
-        it->setCheckState(checked ? Qt::Checked : Qt::Unchecked);
-        it->setData(Qt::UserRole, path);
+        auto *it = new QTreeWidgetItem(parent);
+        it->setText(0, tag.isEmpty() ? QFileInfo(path).fileName()
+                                     : QStringLiteral("%1  [%2]").arg(QFileInfo(path).fileName(), tag));
+        it->setFlags((it->flags() | Qt::ItemIsUserCheckable) & ~Qt::ItemIsDropEnabled);
+        it->setCheckState(0, checked ? Qt::Checked : Qt::Unchecked);
+        it->setData(0, Qt::UserRole, path);
     };
-    for (const QString &p : m_draft.imagePaths)
-        addImage(p, true, {});
-    addImage(m_draft.sizeChartImagePath, true, tr("size chart"));
-    for (const QString &p : m_draft.extraImagePaths)
-        addImage(p, false, tr("A+"));
+    // node UserRole encodes what the node's images are for: a base colour name,
+    // "" for the single "All images" node (applies to every SKU), or "##product"
+    // for product-level images (the size chart → goods detailImage).
+    auto addColorNode = [this](const QString &label, const QString &role) {
+        auto *node = new QTreeWidgetItem(m_imageTree);
+        node->setText(0, label);
+        node->setData(0, Qt::UserRole, role);
+        node->setFlags(node->flags() & ~Qt::ItemIsUserCheckable & ~Qt::ItemIsDragEnabled);
+        node->setExpanded(true);
+        return node;
+    };
+    // Common (shared) images — the main image and anything not tied to a colour.
+    // They're duplicated into every colour node so their order relative to the
+    // colour images can be chosen per colour (and unchecked per colour).
+    const QStringList commonImgs = m_draft.galleryByColor.value(QString{});
+    QStringList colors;
+    for (auto it = m_draft.galleryByColor.constBegin(); it != m_draft.galleryByColor.constEnd(); ++it)
+        if (!it.key().isEmpty())
+            colors << it.key();
 
-    // Drag to reorder; the upload order follows the list order.
-    m_imageList->setDragDropMode(QAbstractItemView::InternalMove);
-    m_imageList->setDefaultDropAction(Qt::MoveAction);
+    if (colors.isEmpty()) {
+        // Single-/no-colour product: one node with everything, applies to all.
+        auto *node = addColorNode(tr("All images"), QString{});
+        for (const QString &p : commonImgs)
+            addImageLeaf(node, p, true, {});
+        for (const QString &p : m_draft.extraImagePaths)
+            addImageLeaf(node, p, false, tr("A+"));
+    } else {
+        for (const QString &color : colors) {
+            auto *node = addColorNode(color, color);
+            for (const QString &p : commonImgs)
+                addImageLeaf(node, p, true, tr("common"));
+            for (const QString &p : m_draft.galleryByColor.value(color))
+                addImageLeaf(node, p, true, {});
+            for (const QString &p : m_draft.extraImagePaths)
+                addImageLeaf(node, p, false, tr("A+"));
+        }
+    }
+    // Size chart is a product-level image (goods detailImage), not a per-SKU
+    // gallery image, so it lives in its own node.
+    if (!m_draft.sizeChartImagePath.isEmpty() && QFileInfo::exists(m_draft.sizeChartImagePath)) {
+        auto *scNode = addColorNode(tr("Product-level"), QStringLiteral("##product"));
+        addImageLeaf(scNode, m_draft.sizeChartImagePath, true, tr("size chart"));
+    }
+    // Restore any previously-saved image selection/order for this product.
+    _restoreImageState();
 
+    // Reorder a leaf within its own colour group (Temu upload order = tree order).
     auto *upBtn   = new QPushButton(tr("↑ Up"), this);
     auto *downBtn = new QPushButton(tr("↓ Down"), this);
     auto moveRow = [this](int delta) {
-        const int row = m_imageList->currentRow();
-        const int dst = row + delta;
-        if (row < 0 || dst < 0 || dst >= m_imageList->count())
-            return;
-        QListWidgetItem *it = m_imageList->takeItem(row);
-        m_imageList->insertItem(dst, it);
-        m_imageList->setCurrentRow(dst);
+        QTreeWidgetItem *cur = m_imageTree->currentItem();
+        if (!cur || !cur->parent()) return; // only image leaves move
+        QTreeWidgetItem *parent = cur->parent();
+        const int idx = parent->indexOfChild(cur);
+        const int dst = idx + delta;
+        if (dst < 0 || dst >= parent->childCount()) return;
+        const bool checked = cur->checkState(0) == Qt::Checked;
+        parent->takeChild(idx);
+        parent->insertChild(dst, cur);
+        cur->setCheckState(0, checked ? Qt::Checked : Qt::Unchecked); // keep state
+        m_imageTree->setCurrentItem(cur);
     };
     connect(upBtn,   &QPushButton::clicked, this, [moveRow]() { moveRow(-1); });
     connect(downBtn, &QPushButton::clicked, this, [moveRow]() { moveRow(1); });
@@ -171,9 +218,9 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     reorderRow->addWidget(downBtn);
     reorderRow->addStretch();
 
-    auto *imagesBox = new QGroupBox(tr("Images (check to upload · drag or ↑↓ to reorder)"), this);
+    auto *imagesBox = new QGroupBox(tr("Images (per colour · check to upload · ↑↓ to reorder)"), this);
     auto *imagesLay = new QVBoxLayout(imagesBox);
-    imagesLay->addWidget(m_imageList);
+    imagesLay->addWidget(m_imageTree);
     imagesLay->addLayout(reorderRow);
 
     // --- Middle: preview of the selected image ---
@@ -193,6 +240,13 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     attrScroll->setWidget(m_attrContainer);
     auto *attrBox = new QGroupBox(tr("Attributes (missing required ones in red)"), this);
     auto *attrBoxLay = new QVBoxLayout(attrBox);
+    auto *aiPickAttrsBtn = new QPushButton(tr("Pick by AI (from images)"), this);
+    aiPickAttrsBtn->setToolTip(tr("Looks at the product images (and text) and fills the "
+                                  "attributes it can confidently determine, choosing only "
+                                  "from each attribute's allowed values. Skips the rest."));
+    connect(aiPickAttrsBtn, &QPushButton::clicked, this,
+            [this]() { m_attrAiTask = _aiPickAttributes(); });
+    attrBoxLay->addWidget(aiPickAttrsBtn);
     attrBoxLay->addWidget(attrScroll);
 
     auto *topSplit = new QSplitter(Qt::Horizontal, this);
@@ -208,15 +262,40 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     m_descEdit = new QPlainTextEdit(m_draft.description, this);
     m_descEdit->setMaximumHeight(70);
     auto *genBtn = new QPushButton(tr("Generate all text"), this);
+    auto *regenAllBtn = new QPushButton(tr("Regenerate all (every language)"), this);
+    auto *resetTextBtn = new QPushButton(tr("Reset"), this);
+    resetTextBtn->setToolTip(tr("Discard the AI-generated text and restore the original "
+                                "(source / Amazon) title and bullets for every language."));
     auto *regenTitleBtn   = new QPushButton(tr("Regenerate"), this);
     auto *regenBulletsBtn = new QPushButton(tr("Regenerate"), this);
     auto *regenDescBtn    = new QPushButton(tr("Regenerate"), this);
+    // Per-field "regenerate this one field in every language" buttons.
+    auto *allTitleBtn   = new QPushButton(tr("Reg. all langs."), this);
+    auto *allBulletsBtn = new QPushButton(tr("Reg. all langs."), this);
+    auto *allDescBtn    = new QPushButton(tr("Reg. all langs."), this);
 
-    auto fieldRow = [](QWidget *editor, QPushButton *btn) {
+    // Left-hand picker of the selected stores' country codes: click one to view
+    // and edit that country's language in the fields on the right. Deduped &
+    // ordered by the store list so it mirrors the publish targets.
+    m_textCountryList = new QListWidget(this);
+    m_textCountryList->setMaximumWidth(70);
+    {
+        QStringList seen;
+        for (const StorePick &s : m_stores) {
+            const QString cc = s.country.toUpper();
+            if (!cc.isEmpty() && !seen.contains(cc)) {
+                seen << cc;
+                new QListWidgetItem(cc, m_textCountryList);
+            }
+        }
+    }
+
+    auto fieldRow = [](QWidget *editor, QPushButton *btn, QPushButton *allBtn) {
         auto *row = new QHBoxLayout;
         row->addWidget(editor, 1);
         auto *col = new QVBoxLayout;
         col->addWidget(btn);
+        col->addWidget(allBtn);
         col->addStretch();
         row->addLayout(col);
         return row;
@@ -232,10 +311,17 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     kwRow->addWidget(editKwBtn);
 
     auto *textForm = new QFormLayout;
+    {
+        auto *allRow = new QHBoxLayout;
+        allRow->addWidget(regenAllBtn);
+        allRow->addWidget(resetTextBtn);
+        allRow->addStretch();
+        textForm->addRow(QString{}, allRow);
+    }
     textForm->addRow(QString{}, kwRow);
-    textForm->addRow(tr("Title:"), fieldRow(m_titleEdit, regenTitleBtn));
-    textForm->addRow(tr("Bullets:"), fieldRow(m_bulletsEdit, regenBulletsBtn));
-    textForm->addRow(tr("Description:"), fieldRow(m_descEdit, regenDescBtn));
+    textForm->addRow(tr("Title:"), fieldRow(m_titleEdit, regenTitleBtn, allTitleBtn));
+    textForm->addRow(tr("Bullets:"), fieldRow(m_bulletsEdit, regenBulletsBtn, allBulletsBtn));
+    textForm->addRow(tr("Description:"), fieldRow(m_descEdit, regenDescBtn, allDescBtn));
 
     // --- Per-variation table: price + packaging, one row per SKU ---
     m_skuTable = new QTableWidget(m_draft.skus.size(), kSkuColCount, this);
@@ -246,7 +332,10 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     m_skuTable->verticalHeader()->setVisible(false);
     for (int r = 0; r < m_draft.skus.size(); ++r) {
         auto *skuItem = new QTableWidgetItem(m_draft.skus[r].outSkuSn);
-        skuItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable); // read-only
+        // Editable so the SKU can be double-clicked, selected and copied; any
+        // actual edit is reverted by the itemChanged guard wired below (the SKU
+        // is an identifier and must not change).
+        skuItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsEditable);
         m_skuTable->setItem(r, kColSku, skuItem);
         auto *amz = new QTableWidgetItem();
         amz->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);     // filled by fetch
@@ -267,6 +356,21 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
         set1(kColH, ds.heightCm);
     }
     m_skuTable->resizeColumnsToContents();
+
+    // Keep the SKU column copyable (editable) but immutable: revert any edit to
+    // the original SKU. Wired after population so the initial setText calls above
+    // don't trip it.
+    connect(m_skuTable, &QTableWidget::itemChanged, this, [this](QTableWidgetItem *it) {
+        if (!it || it->column() != kColSku)
+            return;
+        const int r = it->row();
+        const QString orig = (r >= 0 && r < m_draft.skus.size())
+                                 ? m_draft.skus.at(r).outSkuSn : QString();
+        if (it->text() != orig) {
+            QSignalBlocker block(m_skuTable);
+            it->setText(orig);
+        }
+    });
 
     // --- Per-country variation-names tree: SKU → one child per selected country
     // with that country's localized Colour / Size (editable). ---
@@ -293,7 +397,10 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
             auto *child = new QTreeWidgetItem(top);
             child->setText(0, cc);
             child->setText(1, ds.colorByCountry.value(cc, ds.color));
-            child->setText(2, ds.sizeByCountry.value(cc, ds.size));
+            // NEVER fall back to another country's size — a wrong size must not be
+            // shown or published. If this country's size wasn't retrieved, leave
+            // it blank so it's visibly unset (and editable).
+            child->setText(2, ds.sizeByCountry.value(cc));
             child->setFlags(child->flags() | Qt::ItemIsEditable); // colour/size editable
         }
         top->setExpanded(true);
@@ -334,7 +441,16 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     mainSplit->addWidget(topSplit); // images | preview | attributes
 
     auto *textWidget = new QWidget(mainSplit);
-    textWidget->setLayout(textForm);
+    auto *textRow = new QHBoxLayout(textWidget);
+    textRow->setContentsMargins(0, 0, 0, 0);
+    {
+        auto *listCol = new QVBoxLayout;
+        listCol->setContentsMargins(0, 0, 0, 0);
+        listCol->addWidget(new QLabel(tr("Language:"), textWidget));
+        listCol->addWidget(m_textCountryList, 1);
+        textRow->addLayout(listCol);
+    }
+    textRow->addLayout(textForm, 1);
     mainSplit->addWidget(textWidget);
 
     auto *varWidget = new QWidget(mainSplit);
@@ -386,6 +502,15 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     connect(applyAllBtn, &QPushButton::clicked, this, [this]() { _applyRowToAll(); });
     connect(editKwBtn, &QPushButton::clicked, this, [this]() {
         DialogKeywordTemplates dlg(this);
+        // Offer the country codes of the configured Temu stores as the pick-list.
+        QStringList countries;
+        TemuStoreModel storeModel;
+        for (const TemuStore &st : storeModel.stores()) {
+            const QString cc = st.country.toUpper();
+            if (!cc.isEmpty() && !countries.contains(cc))
+                countries << cc;
+        }
+        dlg.setAvailableCountries(countries);
         dlg.exec();
         _reloadKeywordTemplates();
     });
@@ -398,20 +523,37 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     connect(regenTitleBtn,   &QPushButton::clicked, this, [this]() { m_textTask = _regenerateField(0); });
     connect(regenBulletsBtn, &QPushButton::clicked, this, [this]() { m_textTask = _regenerateField(1); });
     connect(regenDescBtn,    &QPushButton::clicked, this, [this]() { m_textTask = _regenerateField(2); });
+    connect(regenAllBtn,     &QPushButton::clicked, this, [this]() { m_textAllTask = _regenerateAllText(); });
+    connect(resetTextBtn,    &QPushButton::clicked, this, [this]() { _resetText(); });
+    connect(allTitleBtn,     &QPushButton::clicked, this, [this]() { m_textAllTask = _regenerateFieldAllLangs(0); });
+    connect(allBulletsBtn,   &QPushButton::clicked, this, [this]() { m_textAllTask = _regenerateFieldAllLangs(1); });
+    connect(allDescBtn,      &QPushButton::clicked, this, [this]() { m_textAllTask = _regenerateFieldAllLangs(2); });
+    // Picking a language in the list swaps the editors to that country's text.
+    // Independent of the top Store dropdown (which stays the publish target).
+    connect(m_textCountryList, &QListWidget::currentTextChanged, this,
+            [this](const QString &cc) { if (!cc.isEmpty()) _loadCountryText(cc); });
+    // Controls locked out while a text (re)generation runs, so the shown language
+    // can't change mid-flight and misfile the result.
+    m_textControls = { m_textCountryList, m_storeCombo, genBtn, regenAllBtn, resetTextBtn,
+                       regenTitleBtn, regenBulletsBtn, regenDescBtn,
+                       allTitleBtn, allBulletsBtn, allDescBtn };
     connect(m_publishBtn, &QPushButton::clicked, this, [this]() { m_publishTask = _publish(); });
-    connect(m_imageList, &QListWidget::currentItemChanged, this,
-            [this](QListWidgetItem *cur, QListWidgetItem *) {
-                if (!cur) { m_imagePreview->setText(tr("(select an image)")); return; }
-                const QPixmap pm(cur->data(Qt::UserRole).toString());
+    connect(m_imageTree, &QTreeWidget::currentItemChanged, this,
+            [this](QTreeWidgetItem *cur, QTreeWidgetItem *) {
+                const QString path = cur ? cur->data(0, Qt::UserRole).toString() : QString{};
+                if (path.isEmpty()) { m_imagePreview->setText(tr("(select an image)")); return; }
+                const QPixmap pm(path);
                 if (pm.isNull()) { m_imagePreview->setText(tr("(cannot load image)")); return; }
                 m_imagePreview->setPixmap(pm.scaled(m_imagePreview->size(),
                     Qt::KeepAspectRatio, Qt::SmoothTransformation));
             });
 
-    // Seed the per-country text map from the Amazon-fetched localized text.
+    // Seed the per-country text map from the Amazon-fetched localized text, then
+    // let any previously-saved (regenerated) text override it.
     for (auto it = m_draft.textByCountry.cbegin(); it != m_draft.textByCountry.cend(); ++it)
         m_pageText.insert(it.key(), {it.value().title, it.value().bullets.join(QLatin1Char('\n')),
                                      QString{}});
+    _restoreTextState();
 
     _loadCatPathCache();
     _loadImageUrlCache();
@@ -432,6 +574,15 @@ void DialogTemuCreateProduct::_loadCountryText(const QString &country)
         m_pageText[m_curTextCountry] = { m_titleEdit->text(), m_bulletsEdit->toPlainText(),
                                          m_descEdit->toPlainText() };
     m_curTextCountry = country;
+    // Keep the side list highlight in sync (e.g. when the store dropdown drives
+    // the change) without re-entering this slot.
+    if (m_textCountryList) {
+        const QList<QListWidgetItem*> hits = m_textCountryList->findItems(country, Qt::MatchExactly);
+        if (!hits.isEmpty() && m_textCountryList->currentItem() != hits.first()) {
+            QSignalBlocker b(m_textCountryList);
+            m_textCountryList->setCurrentItem(hits.first());
+        }
+    }
     if (!m_pageText.contains(country)) {
         // No localized text for this country — fall back to the source draft text.
         m_pageText.insert(country, { m_draft.title,
@@ -448,6 +599,29 @@ void DialogTemuCreateProduct::_loadCountryText(const QString &country)
         m_logEdit->appendPlainText(tr("No %1 text found on Amazon — showing source text; "
             "click Regenerate/Generate to write it in %2.")
             .arg(country, _storeLanguage().isEmpty() ? country : _storeLanguage()));
+}
+
+// Writes a regenerated field into the given country's stored text and reflects
+// it in the editors only when that country is still on screen (see header).
+void DialogTemuCreateProduct::_applyTextResult(const QString &country, int which,
+                                               const QString &value)
+{
+    TemuPageText &pt = m_pageText[country];
+    const bool live = (m_curTextCountry == country);
+    switch (which) {
+    case 0:  pt.title = value;       if (live) m_titleEdit->setText(value);      break;
+    case 1:  pt.bullets = value;     if (live) m_bulletsEdit->setPlainText(value); break;
+    default: pt.description = value; if (live) m_descEdit->setPlainText(value);  break;
+    }
+    m_textRegenerated = true; // any AI write counts as "regenerated"
+}
+
+void DialogTemuCreateProduct::_setTextBusy(bool busy)
+{
+    m_textBusy = qMax(0, m_textBusy + (busy ? 1 : -1));
+    const bool locked = m_textBusy > 0;
+    for (QWidget *w : m_textControls)
+        if (w) w->setEnabled(!locked);
 }
 
 void DialogTemuCreateProduct::_loadCatPathCache()
@@ -686,6 +860,8 @@ void DialogTemuCreateProduct::_rebuildAttributeForm()
             m_attrForm->addRow(label, edit);
         }
     }
+    // Re-apply attribute values the user filled on a previous (failed) attempt.
+    _applySavedAttributes();
 }
 
 bool DialogTemuCreateProduct::_validateRequired(QStringList *missing) const
@@ -704,6 +880,378 @@ bool DialogTemuCreateProduct::_validateRequired(QStringList *missing) const
             *missing << attr.name;
     }
     return missing->isEmpty();
+}
+
+// --- Persist the manual setup so a failed upload doesn't cost it again -------
+
+void DialogTemuCreateProduct::_saveWorkState()
+{
+    if (m_draft.productDir.isEmpty())
+        return;
+    QSettings ps(QDir(m_draft.productDir).filePath(QStringLiteral("settings.ini")),
+                 QSettings::IniFormat);
+
+    // Image tree: per node role → ordered list of {path, checked}.
+    if (m_imageTree && m_imageTree->topLevelItemCount() > 0) {
+        QJsonObject imgObj;
+        for (int t = 0; t < m_imageTree->topLevelItemCount(); ++t) {
+            QTreeWidgetItem *node = m_imageTree->topLevelItem(t);
+            QJsonArray arr;
+            for (int c = 0; c < node->childCount(); ++c) {
+                QTreeWidgetItem *it = node->child(c);
+                QJsonObject o;
+                o.insert(QStringLiteral("p"), it->data(0, Qt::UserRole).toString());
+                o.insert(QStringLiteral("c"), it->checkState(0) == Qt::Checked);
+                arr.append(o);
+            }
+            imgObj.insert(node->data(0, Qt::UserRole).toString(), arr);
+        }
+        ps.setValue(QStringLiteral("temu/imageState"),
+                    QString::fromUtf8(QJsonDocument(imgObj).toJson(QJsonDocument::Compact)));
+    }
+
+    // Attributes: name → value. Only when the template is loaded, so we never
+    // wipe a good saved set with an empty one (e.g. template failed to load).
+    if (!m_attrs.isEmpty()) {
+        QJsonObject attrObj;
+        for (int i = 0; i < m_attrs.size(); ++i) {
+            QString val;
+            if (auto *c = m_attrCombos.value(i)) {
+                if (c->currentIndex() <= 0) continue;
+                val = c->currentText();
+            } else if (auto *e = m_attrInputs.value(i)) {
+                val = e->text().trimmed();
+                if (val.isEmpty()) continue;
+            } else {
+                continue;
+            }
+            attrObj.insert(m_attrs[i].name, val);
+        }
+        ps.setValue(QStringLiteral("temu/attributes"),
+                    QString::fromUtf8(QJsonDocument(attrObj).toJson(QJsonDocument::Compact)));
+    }
+
+    // Per-country listing text (regenerated content). Flush the live editors into
+    // the current country first so the latest edits are captured.
+    if (!m_curTextCountry.isEmpty())
+        m_pageText[m_curTextCountry] = { m_titleEdit->text(), m_bulletsEdit->toPlainText(),
+                                         m_descEdit->toPlainText() };
+    if (!m_pageText.isEmpty()) {
+        QJsonObject txtObj;
+        for (auto it = m_pageText.cbegin(); it != m_pageText.cend(); ++it) {
+            QJsonObject t;
+            t.insert(QStringLiteral("title"), it.value().title);
+            t.insert(QStringLiteral("bullets"), it.value().bullets);
+            t.insert(QStringLiteral("desc"), it.value().description);
+            txtObj.insert(it.key(), t);
+        }
+        ps.setValue(QStringLiteral("temu/pageText"),
+                    QString::fromUtf8(QJsonDocument(txtObj).toJson(QJsonDocument::Compact)));
+    }
+    ps.setValue(QStringLiteral("temu/textRegenerated"), m_textRegenerated);
+}
+
+void DialogTemuCreateProduct::_restoreImageState()
+{
+    if (m_draft.productDir.isEmpty() || !m_imageTree)
+        return;
+    QSettings ps(QDir(m_draft.productDir).filePath(QStringLiteral("settings.ini")),
+                 QSettings::IniFormat);
+    const QJsonObject imgObj = QJsonDocument::fromJson(
+        ps.value(QStringLiteral("temu/imageState")).toString().toUtf8()).object();
+    if (imgObj.isEmpty())
+        return;
+
+    for (int t = 0; t < m_imageTree->topLevelItemCount(); ++t) {
+        QTreeWidgetItem *node = m_imageTree->topLevelItem(t);
+        const QString role = node->data(0, Qt::UserRole).toString();
+        if (!imgObj.contains(role))
+            continue;
+        // Detach all children, then re-add them in the saved order (matched by
+        // path), setting each saved check state; children not in the saved list
+        // (new images) keep their default state and go last.
+        QHash<QString, QTreeWidgetItem*> byPath;
+        QList<QTreeWidgetItem*> remaining;
+        while (node->childCount() > 0) {
+            QTreeWidgetItem *ch = node->takeChild(0);
+            byPath.insert(ch->data(0, Qt::UserRole).toString(), ch);
+            remaining.append(ch);
+        }
+        for (const QJsonValue &v : imgObj.value(role).toArray()) {
+            const QJsonObject o = v.toObject();
+            auto it = byPath.find(o.value(QStringLiteral("p")).toString());
+            if (it == byPath.end())
+                continue;
+            QTreeWidgetItem *ch = it.value();
+            ch->setCheckState(0, o.value(QStringLiteral("c")).toBool() ? Qt::Checked : Qt::Unchecked);
+            node->addChild(ch);
+            remaining.removeOne(ch);
+            byPath.erase(it);
+        }
+        for (QTreeWidgetItem *ch : remaining)
+            node->addChild(ch);
+        node->setExpanded(true);
+    }
+}
+
+void DialogTemuCreateProduct::_applySavedAttributes()
+{
+    if (m_draft.productDir.isEmpty() || m_attrs.isEmpty())
+        return;
+    QSettings ps(QDir(m_draft.productDir).filePath(QStringLiteral("settings.ini")),
+                 QSettings::IniFormat);
+    const QJsonObject o = QJsonDocument::fromJson(
+        ps.value(QStringLiteral("temu/attributes")).toString().toUtf8()).object();
+    if (o.isEmpty())
+        return;
+
+    for (int i = 0; i < m_attrs.size(); ++i) {
+        if (!o.contains(m_attrs[i].name))
+            continue;
+        const QString val = o.value(m_attrs[i].name).toString();
+        if (val.isEmpty())
+            continue;
+        QWidget *field = nullptr;
+        if (auto *c = m_attrCombos.value(i)) {
+            const int idx = c->findText(val);
+            if (idx >= 0) c->setCurrentIndex(idx);
+            field = c;
+        } else if (auto *e = m_attrInputs.value(i)) {
+            e->setText(val);
+            field = e;
+        }
+        // Clear the red "required" hint now that the field is filled.
+        if (field)
+            if (auto *lbl = qobject_cast<QLabel*>(m_attrForm->labelForField(field)))
+                lbl->setStyleSheet(m_attrs[i].required ? QStringLiteral("font-weight: bold;")
+                                                       : QString{});
+    }
+}
+
+void DialogTemuCreateProduct::done(int r)
+{
+    _saveWorkState(); // preserve the manual setup on Cancel / window close too
+    QDialog::done(r);
+}
+
+// Original (pre-regeneration) text for a country: the Amazon-localized title +
+// bullets when we have them, else the source draft. Description starts empty.
+TemuPageText DialogTemuCreateProduct::_originalCountryText(const QString &country) const
+{
+    if (m_draft.textByCountry.contains(country)) {
+        const auto &lt = m_draft.textByCountry.value(country);
+        return { lt.title, lt.bullets.join(QLatin1Char('\n')), QString{} };
+    }
+    return { m_draft.title, m_draft.bulletPoints.join(QLatin1Char('\n')), QString{} };
+}
+
+void DialogTemuCreateProduct::_restoreTextState()
+{
+    if (m_draft.productDir.isEmpty())
+        return;
+    QSettings ps(QDir(m_draft.productDir).filePath(QStringLiteral("settings.ini")),
+                 QSettings::IniFormat);
+    m_textRegenerated = ps.value(QStringLiteral("temu/textRegenerated"), false).toBool();
+    const QJsonObject txtObj = QJsonDocument::fromJson(
+        ps.value(QStringLiteral("temu/pageText")).toString().toUtf8()).object();
+    for (const QString &key : txtObj.keys()) {
+        const QJsonObject t = txtObj.value(key).toObject();
+        m_pageText.insert(key, { t.value(QStringLiteral("title")).toString(),
+                                 t.value(QStringLiteral("bullets")).toString(),
+                                 t.value(QStringLiteral("desc")).toString() });
+    }
+}
+
+void DialogTemuCreateProduct::_resetText()
+{
+    if (QMessageBox::question(this, tr("Reset text"),
+            tr("Discard the generated title/bullets/description and restore the "
+               "original text for every language?"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+        return;
+
+    // Rebuild the map from the originals for every known country.
+    QStringList countries = m_pageText.keys();
+    if (m_textCountryList)
+        for (int i = 0; i < m_textCountryList->count(); ++i)
+            countries << m_textCountryList->item(i)->text();
+    countries.removeDuplicates();
+
+    m_pageText.clear();
+    for (const QString &cc : countries)
+        m_pageText.insert(cc, _originalCountryText(cc));
+    m_textRegenerated = false;
+
+    // Reload the currently-viewed country into the editors (clearing the
+    // "current" first so _loadCountryText actually re-applies it).
+    const QString cur = m_curTextCountry;
+    m_curTextCountry.clear();
+    if (!cur.isEmpty())
+        _loadCountryText(cur);
+    else if (!m_stores.isEmpty())
+        _loadCountryText(_currentStore().country.toUpper());
+
+    _saveWorkState(); // persist the cleared/original state
+    m_logEdit->appendPlainText(tr("Text reset to the original (source / Amazon)."));
+}
+
+QCoro::Task<void> DialogTemuCreateProduct::_aiPickAttributes()
+{
+    if (m_attrAiBusy)
+        co_return;
+    if (!m_cli) {
+        QMessageBox::warning(this, tr("Pick by AI"), tr("No CLI selected."));
+        co_return;
+    }
+    if (m_attrs.isEmpty()) {
+        QMessageBox::information(this, tr("Pick by AI"),
+            tr("Load the category attributes first."));
+        co_return;
+    }
+    if (m_draft.productDir.isEmpty()) {
+        QMessageBox::warning(this, tr("Pick by AI"), tr("No product folder."));
+        co_return;
+    }
+
+    // Real product photos (main + per-colour), excluding A+ and the size chart.
+    QStringList imgFiles;
+    QSet<QString> seenImg;
+    for (auto it = m_draft.galleryByColor.constBegin(); it != m_draft.galleryByColor.constEnd(); ++it)
+        for (const QString &p : it.value()) {
+            const QString fn = QFileInfo(p).fileName();
+            if (!seenImg.contains(fn) && QFileInfo::exists(p)) { seenImg.insert(fn); imgFiles << fn; }
+        }
+    if (imgFiles.isEmpty()) {
+        QMessageBox::information(this, tr("Pick by AI"), tr("No product images to analyse."));
+        co_return;
+    }
+
+    // Attribute list with allowed values (only the top-level, editable ones).
+    QStringList attrLines;
+    for (int i = 0; i < m_attrs.size(); ++i) {
+        const auto &attr = m_attrs[i];
+        if (attr.parentTemplatePid != 0)
+            continue;
+        if (attr.controlType == 1 && !attr.values.isEmpty()) {
+            QStringList allowed;
+            for (const auto &v : attr.values) allowed << v.first;
+            attrLines << tr("- \"%1\" — allowed: [%2]").arg(attr.name,
+                            QStringLiteral("\"") + allowed.join(QStringLiteral("\", \"")) + QStringLiteral("\""));
+        } else {
+            attrLines << tr("- \"%1\" — free text").arg(attr.name);
+        }
+    }
+
+    const QString prompt = tr(
+        "You are an e-commerce cataloguer. FIRST open and visually inspect EVERY "
+        "product image file listed below (they are in the current folder), then "
+        "decide the product's attribute values.\n\n"
+        "Product images (open each one): %1\n\n"
+        "Product text (also use it — fabric/material is often stated here):\n"
+        "Title: %2\nBrand: %3\nBullets:\n%4\n\n"
+        "Fill AS MANY attributes as you reasonably can. Most clothing attributes "
+        "are visible in the photos — pattern, sheerness, sleeve length, neckline, "
+        "silhouette/fit, length, closure, decoration, style, occasion, season, "
+        "collar, etc. — infer those from the images. For material/fabric "
+        "composition, use the TEXT only (do not guess fibre content from a photo). "
+        "Only OMIT an attribute when neither the images nor the text give any "
+        "reasonable basis. Prefer a well-justified choice over omitting.\n\n"
+        "For an attribute that has an allowed list, you MUST return one of the "
+        "listed values EXACTLY (same spelling). Use the attribute names EXACTLY as "
+        "written below as the JSON keys.\n\n"
+        "Attributes:\n%5\n\n"
+        "Return ONLY strict JSON mapping each attribute name to its chosen value, "
+        "e.g. {\"Material\":\"Polyester\",\"Occasion\":\"Beach\"}. No markdown, no comments.")
+        .arg(imgFiles.join(QStringLiteral(", ")), m_draft.title, m_draft.brand,
+             m_draft.bulletPoints.join(QLatin1Char('\n')), attrLines.join(QLatin1Char('\n')));
+
+    m_attrAiBusy = true;
+    auto busyGuard = qScopeGuard([this] { m_attrAiBusy = false; });
+    m_logEdit->appendPlainText(tr("Asking %1 to pick attributes from the images…")
+                                   .arg(m_cli->getName()));
+
+    const CliRunResult r = co_await _runCli(prompt, m_draft.productDir);
+    QString out = r.output.trimmed();
+    const int a = out.indexOf(QLatin1Char('{'));
+    const int b = out.lastIndexOf(QLatin1Char('}'));
+    if (a >= 0 && b > a)
+        out = out.mid(a, b - a + 1);
+    const QJsonObject o = QJsonDocument::fromJson(out.toUtf8()).object();
+    if (o.isEmpty()) {
+        m_logEdit->appendPlainText(tr("  AI returned no usable attributes."));
+        co_return;
+    }
+
+    // Map the AI's JSON keys to attributes case-insensitively (the model often
+    // varies casing/spacing), so a near-match name still applies instead of
+    // being silently dropped.
+    QHash<QString, int> byName;
+    for (int i = 0; i < m_attrs.size(); ++i)
+        if (m_attrs[i].parentTemplatePid == 0)
+            byName.insert(m_attrs[i].name.trimmed().toLower(), i);
+
+    QSet<int> filledIdx;      // top-level attrs the AI successfully filled
+    QStringList badValues;    // "attr=value" the AI returned but not in allowed list
+    QStringList unmatchedKeys; // JSON keys that map to no attribute in this category
+    for (const QString &key : o.keys()) {
+        const int i = byName.value(key.trimmed().toLower(), -1);
+        if (i < 0) { unmatchedKeys << key; continue; }
+        const auto &attr = m_attrs[i];
+        const QString val = o.value(key).toString().trimmed();
+        if (val.isEmpty()) continue;
+        QWidget *field = nullptr;
+        if (auto *c = m_attrCombos.value(i)) {
+            int idx = c->findText(val, Qt::MatchFixedString); // case-insensitive exact
+            if (idx < 0) idx = c->findText(val);
+            if (idx < 0) {
+                badValues << QStringLiteral("%1=\"%2\"").arg(attr.name, val);
+                continue;
+            }
+            c->setCurrentIndex(idx);
+            field = c;
+        } else if (auto *e = m_attrInputs.value(i)) {
+            e->setText(val);
+            field = e;
+        }
+        if (field) {
+            if (auto *lbl = qobject_cast<QLabel*>(m_attrForm->labelForField(field)))
+                lbl->setStyleSheet(attr.required ? QStringLiteral("font-weight: bold;") : QString{});
+            filledIdx.insert(i);
+        }
+    }
+
+    // Everything the AI did NOT fill (the whole point of the summary the user
+    // wants): list them by name so it's clear what still needs attention.
+    QStringList skippedNames, skippedRequired;
+    int total = 0;
+    for (int i = 0; i < m_attrs.size(); ++i) {
+        if (m_attrs[i].parentTemplatePid != 0)
+            continue;
+        ++total;
+        if (filledIdx.contains(i))
+            continue;
+        skippedNames << m_attrs[i].name;
+        if (m_attrs[i].required)
+            skippedRequired << m_attrs[i].name;
+    }
+
+    if (!unmatchedKeys.isEmpty())
+        m_logEdit->appendPlainText(tr("  AI returned %1 name(s) not in this category: %2")
+                                       .arg(QString::number(unmatchedKeys.size()),
+                                            unmatchedKeys.join(QStringLiteral(", "))));
+    if (!badValues.isEmpty())
+        m_logEdit->appendPlainText(tr("  Not an allowed value (kept empty): %1")
+                                       .arg(badValues.join(QStringLiteral(", "))));
+    m_logEdit->appendPlainText(tr("AI filled %1 of %2 attribute(s).")
+                                   .arg(filledIdx.size()).arg(total));
+    if (!skippedNames.isEmpty())
+        m_logEdit->appendPlainText(tr("  Skipped %1 (not determined): %2")
+                                       .arg(QString::number(skippedNames.size()),
+                                            skippedNames.join(QStringLiteral(", "))));
+    if (!skippedRequired.isEmpty())
+        m_logEdit->appendPlainText(tr("  ⚠ Required still empty: %1")
+                                       .arg(skippedRequired.join(QStringLiteral(", "))));
+    _saveWorkState(); // persist the AI picks immediately
 }
 
 QCoro::Task<QString> DialogTemuCreateProduct::_hostLocalImage(QString path)
@@ -763,13 +1311,21 @@ void DialogTemuCreateProduct::_reloadKeywordTemplates()
     m_keywordTemplateCombo->setCurrentIndex(selectIdx);
 }
 
-// Keyword clause for the CURRENT store's country from the selected template.
+// Country whose language is currently shown in the text editors (independent of
+// the publish-target store dropdown), for per-language title/keyword generation.
+QString DialogTemuCreateProduct::_textCountry() const
+{
+    return !m_curTextCountry.isEmpty() ? m_curTextCountry.toUpper()
+         : (m_stores.isEmpty() ? QString{} : _currentStore().country.toUpper());
+}
+
+// Keyword clause for the currently-viewed country from the selected template.
 QString DialogTemuCreateProduct::_titleKeywordInstruction() const
 {
     const QString id = m_keywordTemplateCombo->currentData().toString();
-    if (id.isEmpty() || m_stores.isEmpty())
+    if (id.isEmpty() || _textCountry().isEmpty())
         return {};
-    const QStringList kws = DialogKeywordTemplates::keywordsFor(id, _currentStore().country);
+    const QStringList kws = DialogKeywordTemplates::keywordsFor(id, _textCountry());
     if (kws.isEmpty())
         return {};
     return tr("\n\nThe title MUST naturally include ALL of these keywords "
@@ -783,27 +1339,149 @@ QString DialogTemuCreateProduct::_storeLanguage() const
         {"FR","French"},{"DE","German"},{"IT","Italian"},{"ES","Spanish"},
         {"NL","Dutch"},{"SE","Swedish"},{"PL","Polish"},{"BE","French"},
         {"IE","English"},{"UK","English"},{"TR","Turkish"},{"PT","Portuguese"}};
-    if (m_stores.isEmpty())
+    // Key off the country currently shown in the text editors (the language the
+    // user is viewing/regenerating), not the publish-target store dropdown — the
+    // two are independent now that a language can be picked in the side list.
+    const QString cc = _textCountry();
+    if (cc.isEmpty())
         return {};
-    return kLang.value(_currentStore().country.toUpper());
+    return kLang.value(cc);
 }
 
 // Asks the CLI to weave the product's variation values (colour/size) into the
-// title, so a single-variation product's title names its colour/size.
+// title. Uses the LOCALIZED colour/size names of the country whose language is
+// being generated (so the DE title says "Königs Blau", the FR one "Bleu Royal"),
+// taken from the same source the publish uses: the per-country tree first (which
+// holds any hand-edited names), then the fetched per-country maps, then the base.
 QString DialogTemuCreateProduct::_variationInstruction() const
 {
+    const QString cc = _textCountry();
     QStringList colors, sizes;
-    for (const auto &s : m_draft.skus) {
-        if (!s.color.isEmpty() && !colors.contains(s.color)) colors << s.color;
-        if (!s.size.isEmpty()  && !sizes.contains(s.size))   sizes  << s.size;
+    for (int r = 0; r < m_draft.skus.size(); ++r) {
+        const auto &s = m_draft.skus.at(r);
+        QString color = s.colorByCountry.value(cc, s.color);
+        QString size  = s.sizeByCountry.value(cc, s.size);
+        if (m_variantTree && r < m_variantTree->topLevelItemCount()) {
+            QTreeWidgetItem *top = m_variantTree->topLevelItem(r);
+            for (int k = 0; k < top->childCount(); ++k) {
+                if (top->child(k)->text(0).compare(cc, Qt::CaseInsensitive) == 0) {
+                    const QString tc  = top->child(k)->text(1).trimmed();
+                    const QString tsz = top->child(k)->text(2).trimmed();
+                    if (!tc.isEmpty())  color = tc;
+                    if (!tsz.isEmpty()) size  = tsz;
+                    break;
+                }
+            }
+        }
+        if (!color.isEmpty() && !colors.contains(color)) colors << color;
+        if (!size.isEmpty()  && !sizes.contains(size))   sizes  << size;
     }
-    QStringList parts;
-    if (!colors.isEmpty()) parts << tr("colour(s): %1").arg(colors.join(QStringLiteral(", ")));
-    if (!sizes.isEmpty())  parts << tr("size(s): %1").arg(sizes.join(QStringLiteral(", ")));
-    if (parts.isEmpty())
+    // The Temu title is SHARED across every variation, so we never put the size
+    // in it (size is a per-variation dimension), and we only name the colour when
+    // the product has a SINGLE colour — otherwise the title would wrongly name
+    // just one variation's colour.
+    Q_UNUSED(sizes);
+    if (colors.size() != 1)
         return {};
-    return tr("\n\nThe title should mention the product's %1 (when a single value, "
-              "include it naturally in the title).").arg(parts.join(QStringLiteral("; ")));
+    return tr("\n\nThe title should naturally include the product's colour %1 — "
+              "keep this exact word (it is already in the title's language; do "
+              "not translate it). Do NOT put any size in the title.")
+        .arg(colors.first());
+}
+
+// Strong single-language rule: the whole field must be in the target language,
+// with every foreign source word translated — copying e.g. a French phrase into
+// a German listing is the exact bug this forbids.
+QString DialogTemuCreateProduct::_languageInstruction(const QString &what) const
+{
+    const QString lang = _storeLanguage();
+    if (lang.isEmpty())
+        return {};
+    return tr("\n\nCRITICAL LANGUAGE RULE: Write %1 ENTIRELY in %2. The source "
+              "text above may be in French or another language — TRANSLATE every "
+              "word into %2; do NOT copy any foreign word or phrase verbatim. The "
+              "result must contain ZERO words from any language other than %2 "
+              "(the product's own colour/size names, already given in %2, are the "
+              "only exception).").arg(what, lang);
+}
+
+// Title-only guidance shared by generate + title-regenerate.
+QString DialogTemuCreateProduct::_titleGuidance() const
+{
+    return tr("\n\nTITLE RULES:\n"
+              "- Make the title polished, fluent and complete (aim for 80-100 "
+              "characters, never exceed 100).\n"
+              "- Enrich it with relevant SEO search keywords a shopper would type "
+              "(product type, style, occasion, material, target audience) in "
+              "addition to any keywords listed above, while keeping it natural and "
+              "readable.");
+}
+
+// Forbids the brand name in every generated field. Naming the brand explicitly
+// is far more reliable than merely omitting it from the prompt.
+QString DialogTemuCreateProduct::_noBrandInstruction() const
+{
+    const QString brand = m_draft.brand.trimmed();
+    if (brand.isEmpty())
+        return {};
+    return tr("\n\nDo NOT mention the brand name \"%1\" anywhere — not in the "
+              "title, bullets or description.").arg(brand);
+}
+
+// Strips a trailing size from a generated title and Title-Cases every word.
+QString DialogTemuCreateProduct::_finalizeTitle(QString title) const
+{
+    title = title.trimmed();
+
+    // Every known size value across all variations/countries — so localized and
+    // source sizes ("38-42", "42-46", letter sizes) are all removable.
+    QStringList knownSizes;
+    for (const auto &s : m_draft.skus) {
+        if (!s.size.isEmpty()) knownSizes << s.size.trimmed();
+        for (const QString &v : s.sizeByCountry.values())
+            if (!v.trimmed().isEmpty()) knownSizes << v.trimmed();
+    }
+    knownSizes.removeDuplicates();
+
+    // A trailing numeric range ("38-42"), and a dangling size keyword in any of
+    // the marketplace languages ("taglia unica", "Gr.", "Taille", "Talla", …).
+    static const QRegularExpression numTail(
+        QStringLiteral("[\\s,;:.·–-]*\\d{1,3}\\s*[-–/]\\s*\\d{1,3}\\s*$"));
+    static const QRegularExpression kwTail(
+        QStringLiteral("[\\s,;:.·–-]*(?:taille|talla|taglia(?:\\s+unica)?|gr\\.?|"
+                       "gr(?:ö|oe)sse|gr(?:ö|oe)ße|einheitsgr(?:ö|oe)sse|"
+                       "einheitsgr(?:ö|oe)ße|size|one[\\s-]?size|unica|unique|"
+                       "einheitsgr(?:ö|oe)ße|tg\\.?|maat)\\s*$"),
+        QRegularExpression::CaseInsensitiveOption);
+
+    // Peel trailing size tokens repeatedly ("… taglia unica 38-42" → "…").
+    for (int i = 0; i < 4; ++i) {
+        const QString before = title;
+        for (const QString &sz : knownSizes) {
+            const QRegularExpression szTail(
+                QStringLiteral("[\\s,;:.·–-]*%1\\s*$").arg(QRegularExpression::escape(sz)),
+                QRegularExpression::CaseInsensitiveOption);
+            title.remove(szTail);
+        }
+        title.remove(numTail);
+        title.remove(kwTail);
+        title = title.trimmed();
+        while (!title.isEmpty() && QStringLiteral(",;:.-–·").contains(title.back()))
+            title.chop(1);
+        title = title.trimmed();
+        if (title == before)
+            break;
+    }
+
+    // Title-case: capitalize the first letter of every whitespace-separated word.
+    bool atStart = true;
+    for (int i = 0; i < title.size(); ++i) {
+        if (title[i].isSpace()) { atStart = true; continue; }
+        if (atStart && title[i].isLetter())
+            title[i] = title[i].toUpper();
+        atStart = false;
+    }
+    return title.trimmed();
 }
 
 // Base (selling) price = the Amazon price.
@@ -916,17 +1594,22 @@ void DialogTemuCreateProduct::_applyRowToAll()
     m_logEdit->appendPlainText(tr("Applied row %1's price + packaging to all variations.").arg(src + 1));
 }
 
-QCoro::Task<CliRunResult> DialogTemuCreateProduct::_runCli(const QString &prompt)
+QCoro::Task<CliRunResult> DialogTemuCreateProduct::_runCli(const QString &prompt,
+                                                           const QString &workingDir)
 {
     QPromise<CliRunResult> promise;
     promise.start();
     QFuture<CliRunResult> future = promise.future();
     {
         auto sp = QSharedPointer<QPromise<CliRunResult>>::create(std::move(promise));
-        m_cli->runPromptAsync(prompt, this, [sp](CliRunResult r) mutable {
+        auto cb = [sp](CliRunResult r) mutable {
             sp->addResult(std::move(r));
             sp->finish();
-        });
+        };
+        if (workingDir.isEmpty())
+            m_cli->runPromptAsync(prompt, this, cb);
+        else
+            m_cli->runPromptAsync(prompt, workingDir, this, cb);
     }
     co_return co_await qCoro(future).result();
 }
@@ -937,16 +1620,20 @@ QCoro::Task<void> DialogTemuCreateProduct::_generateText()
         QMessageBox::warning(this, tr("Generate text"), tr("No CLI selected."));
         co_return;
     }
+    // Capture the country now; the result is filed against it even if the user
+    // switches language while the CLI runs.
+    const QString target = _textCountry();
+    _setTextBusy(true);
+    auto busyGuard = qScopeGuard([this] { _setTextBusy(false); });
     const QString prompt = tr(
         "You write Temu product listings. From the data below, produce STRICT JSON "
         "{\"title\":\"…\",\"bullets\":[\"…\"],\"description\":\"…\"} — a concise selling "
         "title (max 100 chars), 3-5 bullet points, and a short description. No markdown.\n\n"
         "Product: %1\nBrand: %2\nExisting bullets:\n%3")
         .arg(m_draft.title, m_draft.brand, m_draft.bulletPoints.join(QLatin1Char('\n')))
-        + _titleKeywordInstruction() + _variationInstruction()
-        + (_storeLanguage().isEmpty() ? QString{}
-           : tr("\n\nCRITICAL: Write the title, bullets and description in %1 ONLY, even if the "
-                "source text above is in another language — translate as needed.").arg(_storeLanguage()));
+        + _titleKeywordInstruction() + _variationInstruction() + _titleGuidance()
+        + _noBrandInstruction()
+        + _languageInstruction(tr("the title, bullets and description"));
 
     m_logEdit->appendPlainText(_storeLanguage().isEmpty()
         ? tr("Generating text with %1…").arg(m_cli->getName())
@@ -963,15 +1650,15 @@ QCoro::Task<void> DialogTemuCreateProduct::_generateText()
         co_return;
     }
     if (o.contains(QStringLiteral("title")))
-        m_titleEdit->setText(o.value(QStringLiteral("title")).toString());
+        _applyTextResult(target, 0, _finalizeTitle(o.value(QStringLiteral("title")).toString()));
     if (o.contains(QStringLiteral("bullets"))) {
         QStringList bl;
         for (const QJsonValue &v : o.value(QStringLiteral("bullets")).toArray())
             bl << v.toString();
-        m_bulletsEdit->setPlainText(bl.join(QLatin1Char('\n')));
+        _applyTextResult(target, 1, bl.join(QLatin1Char('\n')));
     }
     if (o.contains(QStringLiteral("description")))
-        m_descEdit->setPlainText(o.value(QStringLiteral("description")).toString());
+        _applyTextResult(target, 2, o.value(QStringLiteral("description")).toString());
     m_logEdit->appendPlainText(tr("Text generated."));
 }
 
@@ -981,6 +1668,11 @@ QCoro::Task<void> DialogTemuCreateProduct::_regenerateField(int which)
         QMessageBox::warning(this, tr("Regenerate"), tr("No CLI selected."));
         co_return;
     }
+    // File the result against the country shown now, even if the language is
+    // switched while the CLI runs.
+    const QString target = _textCountry();
+    _setTextBusy(true);
+    auto busyGuard = qScopeGuard([this] { _setTextBusy(false); });
     const QString field = which == 0 ? QStringLiteral("title")
                         : which == 1 ? QStringLiteral("bullets")
                                      : QStringLiteral("description");
@@ -1001,10 +1693,10 @@ QCoro::Task<void> DialogTemuCreateProduct::_regenerateField(int which)
         "Product: %3\nBrand: %4\nSource bullets:\n%5\n\nCurrent %1 (improve on it):\n%6")
         .arg(field, shape, m_draft.title, m_draft.brand,
              m_draft.bulletPoints.join(QLatin1Char('\n')), current)
-        + (which == 0 ? _titleKeywordInstruction() + _variationInstruction() : QString{})
-        + (_storeLanguage().isEmpty() ? QString{}
-           : tr("\n\nCRITICAL: Write the %1 in %2 ONLY, even if the source text above is in "
-                "another language — translate as needed.").arg(field, _storeLanguage()));
+        + (which == 0 ? _titleKeywordInstruction() + _variationInstruction() + _titleGuidance()
+                      : QString{})
+        + _noBrandInstruction()
+        + _languageInstruction(field);
 
     m_logEdit->appendPlainText(_storeLanguage().isEmpty()
         ? tr("Regenerating %1…").arg(field)
@@ -1055,7 +1747,7 @@ QCoro::Task<void> DialogTemuCreateProduct::_regenerateField(int which)
             m_logEdit->appendPlainText(tr("  no usable output; unchanged."));
             co_return;
         }
-        m_bulletsEdit->setPlainText(bl.join(QLatin1Char('\n')));
+        _applyTextResult(target, 1, bl.join(QLatin1Char('\n')));
     } else {
         // Title / description: prefer the JSON field if present, else the raw text.
         const QString key = which == 0 ? QStringLiteral("title") : QStringLiteral("description");
@@ -1067,10 +1759,79 @@ QCoro::Task<void> DialogTemuCreateProduct::_regenerateField(int which)
             m_logEdit->appendPlainText(tr("  empty output; unchanged."));
             co_return;
         }
-        if (which == 0) m_titleEdit->setText(text);
-        else            m_descEdit->setPlainText(text);
+        _applyTextResult(target, which, which == 0 ? _finalizeTitle(text) : text);
     }
     m_logEdit->appendPlainText(tr("  %1 updated.").arg(field));
+}
+
+// Regenerates the title, bullets and description for every selected country,
+// each in its own language. Loading a country swaps the editors (and updates
+// _storeLanguage()), so each field is regenerated in the right language; the
+// freshly-written editors are persisted back into m_pageText per country.
+QCoro::Task<void> DialogTemuCreateProduct::_regenerateAllText()
+{
+    if (!m_cli) {
+        QMessageBox::warning(this, tr("Regenerate all"), tr("No CLI selected."));
+        co_return;
+    }
+    QStringList countries;
+    for (int i = 0; i < m_textCountryList->count(); ++i)
+        countries << m_textCountryList->item(i)->text();
+    if (countries.isEmpty() && !m_curTextCountry.isEmpty())
+        countries << m_curTextCountry;
+    if (countries.isEmpty()) {
+        m_logEdit->appendPlainText(tr("No countries to regenerate."));
+        co_return;
+    }
+
+    _setTextBusy(true);
+    auto busyGuard = qScopeGuard([this] { _setTextBusy(false); });
+
+    m_logEdit->appendPlainText(tr("Regenerating all text for %1 language(s)…")
+                                   .arg(countries.size()));
+    for (const QString &cc : countries) {
+        // Show this country (persists the previous one's editors and switches
+        // the language used by _storeLanguage()). Each _regenerateField files
+        // its result into m_pageText[cc] via the captured country, so no manual
+        // persist is needed here.
+        _loadCountryText(cc);
+        co_await _regenerateField(0);
+        co_await _regenerateField(1);
+        co_await _regenerateField(2);
+    }
+    m_logEdit->appendPlainText(tr("All text regenerated."));
+}
+
+// Regenerates a single field for every selected country, each in its language.
+QCoro::Task<void> DialogTemuCreateProduct::_regenerateFieldAllLangs(int which)
+{
+    if (!m_cli) {
+        QMessageBox::warning(this, tr("Regenerate all languages"), tr("No CLI selected."));
+        co_return;
+    }
+    QStringList countries;
+    for (int i = 0; i < m_textCountryList->count(); ++i)
+        countries << m_textCountryList->item(i)->text();
+    if (countries.isEmpty() && !m_curTextCountry.isEmpty())
+        countries << m_curTextCountry;
+    if (countries.isEmpty()) {
+        m_logEdit->appendPlainText(tr("No countries to regenerate."));
+        co_return;
+    }
+
+    _setTextBusy(true);
+    auto busyGuard = qScopeGuard([this] { _setTextBusy(false); });
+
+    const QString fieldName = which == 0 ? tr("title")
+                            : which == 1 ? tr("bullets")
+                                         : tr("description");
+    m_logEdit->appendPlainText(tr("Regenerating %1 for %2 language(s)…")
+                                   .arg(fieldName).arg(countries.size()));
+    for (const QString &cc : countries) {
+        _loadCountryText(cc);
+        co_await _regenerateField(which);
+    }
+    m_logEdit->appendPlainText(tr("%1 regenerated for all languages.").arg(fieldName));
 }
 
 QCoro::Task<void> DialogTemuCreateProduct::_suggestCategory()
@@ -1485,43 +2246,91 @@ QCoro::Task<void> DialogTemuCreateProduct::_publish()
         }
     }
 
+    // Warn if the listing text was never (re)generated with AI — the original
+    // Amazon/source wording would be uploaded as-is.
+    if (!m_textRegenerated) {
+        if (QMessageBox::question(this, tr("Content not regenerated"),
+                tr("You haven't regenerated the listing content (title / bullets / "
+                   "description) with AI.\n\nUpload the current (original) content anyway?"),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+            co_return;
+    }
+
+    // Persist the manual setup (images + attributes + text) up front, so if the
+    // upload fails the work is preserved when the dialog is re-opened.
+    _saveWorkState();
+
+    // When several stores are selected, ask whether stores that already have the
+    // product should be updated or skipped (create-only where missing). With a
+    // single store we always update — no need to ask.
+    bool skipExisting = false;
+    if (m_stores.size() > 1) {
+        QMessageBox box(this);
+        box.setWindowTitle(tr("Existing products"));
+        box.setText(tr("Publishing to %1 stores.\n\nFor stores that already have "
+                       "this product, update the existing page or skip it "
+                       "(only create where missing)?").arg(m_stores.size()));
+        QPushButton *updateBtn = box.addButton(tr("Update existing"), QMessageBox::AcceptRole);
+        QPushButton *skipBtn   = box.addButton(tr("Skip existing"), QMessageBox::ActionRole);
+        QPushButton *cancelBtn = box.addButton(QMessageBox::Cancel);
+        box.setDefaultButton(updateBtn);
+        box.exec();
+        if (box.clickedButton() == cancelBtn)
+            co_return;
+        skipExisting = (box.clickedButton() == skipBtn);
+    }
+
     m_publishBtn->setEnabled(false);
+    auto pubGuard = qScopeGuard([this] { m_publishBtn->setEnabled(true); });
 
     // --- Host checked images to public URLs (Temu V3 fetches them itself;
-    //     no CDN upload needed). Cache the public URL per image. ---
+    //     no CDN upload needed). Cache the public URL per image. Each colour
+    //     node carries its own ordered image list (common images duplicated in);
+    //     the "" node applies to every SKU; the "##product" node is the size
+    //     chart (goods detailImage). ---
     m_logEdit->appendPlainText(tr("Preparing images…"));
-    QStringList temuImages;      // gallery image URLs
+    QHash<QString, QStringList> colorNodeUrls; // node role (colour / "") → URLs
     QString sizeChartTemuUrl;
-    for (int i = 0; i < m_imageList->count(); ++i) {
-        QListWidgetItem *it = m_imageList->item(i);
-        if (it->checkState() != Qt::Checked)
-            continue;
-        const QString local = it->data(Qt::UserRole).toString();
-        const QString fname = QFileInfo(local).fileName();
+    int galleryCount = 0;
+    for (int t = 0; t < m_imageTree->topLevelItemCount(); ++t) {
+        QTreeWidgetItem *node = m_imageTree->topLevelItem(t);
+        const QString role = node->data(0, Qt::UserRole).toString();
+        for (int c = 0; c < node->childCount(); ++c) {
+            QTreeWidgetItem *it = node->child(c);
+            if (it->checkState(0) != Qt::Checked)
+                continue;
+            const QString local = it->data(0, Qt::UserRole).toString();
+            const QString fname = QFileInfo(local).fileName();
 
-        QString url = m_imageUrlCache.value(_imageCacheKey(local));
-        if (!url.isEmpty()) {
-            m_logEdit->appendPlainText(tr("  reused hosted image: %1").arg(fname));
-        } else {
-            url = co_await _hostLocalImage(local);
-            if (url.isEmpty()) {
-                m_logEdit->appendPlainText(tr("  ! could not host %1").arg(fname));
+            QString url = m_imageUrlCache.value(_imageCacheKey(local));
+            if (!url.isEmpty()) {
+                m_logEdit->appendPlainText(tr("  reused hosted image: %1").arg(fname));
+            } else {
+                url = co_await _hostLocalImage(local);
+                if (url.isEmpty()) {
+                    m_logEdit->appendPlainText(tr("  ! could not host %1").arg(fname));
+                    continue;
+                }
+                m_imageUrlCache.insert(_imageCacheKey(local), url);
+                _saveImageUrlCache();
+            }
+
+            if (role == QStringLiteral("##product") || local == m_draft.sizeChartImagePath) {
+                sizeChartTemuUrl = url;
                 continue;
             }
-            m_imageUrlCache.insert(_imageCacheKey(local), url);
-            _saveImageUrlCache();
+            colorNodeUrls[role] << url;
+            ++galleryCount;
         }
-
-        if (local == m_draft.sizeChartImagePath)
-            sizeChartTemuUrl = url;
-        else
-            temuImages << url;
     }
-    if (temuImages.isEmpty()) {
+    if (galleryCount == 0) {
         m_logEdit->appendPlainText(tr("No images available — aborting."));
-        m_publishBtn->setEnabled(true);
         co_return;
     }
+    // First non-empty gallery list, used as a fallback / for the carousel.
+    QStringList anyGalleryUrls;
+    for (auto it = colorNodeUrls.constBegin(); it != colorNodeUrls.constEnd(); ++it)
+        if (!it.value().isEmpty()) { anyGalleryUrls = it.value(); break; }
 
     // --- Attributes as free name/value pairs (V3 maps them to Temu itself) ---
     QJsonArray attrsArr;
@@ -1573,7 +2382,38 @@ QCoro::Task<void> DialogTemuCreateProduct::_publish()
     auto pkgVal = [](double v) {
         return v > 0 ? QString::number(v, 'f', 1) : QStringLiteral("0"); // 0 → Temu default
     };
+
+    // --- Publish to EVERY selected store, each in its own language / localized
+    //     colours / compliance mapping. The images, attributes, prices and
+    //     category above are store-independent and reused; only the text
+    //     (per country) and the create-vs-update decision differ per store. ---
+    QStringList summary;
+    QSet<QString> publishedCountries; // countries that end up with a Temu page
+    const int originalStoreIndex = m_storeCombo->currentIndex();
+    for (int si = 0; si < m_stores.size(); ++si) {
+        const StorePick &store = m_stores.at(si);
+        { QSignalBlocker b(m_storeCombo); m_storeCombo->setCurrentIndex(si); }
+        // Switch context WITHOUT rebuilding the attribute form (that would wipe
+        // the values just filled): load this country's text, rebuild the API for
+        // this store, and look up whether the product already exists here.
+        _loadCountryText(store.country.toUpper());
+        delete m_api;
+        m_api = new TemuInventoryApi(m_appKey, m_appSecret, store.token,
+                                     store.proxyHost, store.proxyPort,
+                                     store.proxyUser, store.proxyPassword, this);
+        m_logEdit->appendPlainText(tr("── %1 · %2 ──").arg(store.country, store.label));
+        QStringList sns;
+        for (const auto &sku : m_draft.skus)
+            if (!sku.outSkuSn.isEmpty()) sns << sku.outSkuSn;
+        co_await m_api->lookupGoods(sns, &m_existing);
+        if (!m_api->lastError().isEmpty()) {
+            m_logEdit->appendPlainText(tr("  lookup failed: %1").arg(m_api->lastError()));
+            summary << tr("%1: lookup FAILED (%2)").arg(store.label, m_api->lastError());
+            continue;
+        }
+
     QJsonArray skuArr;
+    QStringList carouselUrls;
     for (int r = 0; r < m_skuTable->rowCount(); ++r) {
         const double base = m_skuTable->item(r, kColBase)->text().trimmed().toDouble();
         double ref = m_skuTable->item(r, kColRef)->text().trimmed().toDouble();
@@ -1581,10 +2421,12 @@ QCoro::Task<void> DialogTemuCreateProduct::_publish()
 
         const DialogTemuCreateProduct::Draft::Sku &ds = m_draft.skus.value(r);
         // Colour/size for THIS store's country, from the per-country tree (which
-        // holds the localized, possibly hand-edited names); fall back to source.
+        // holds the localized, possibly hand-edited names). Colour falls back to
+        // the source, but SIZE must NOT: publishing another country's size is
+        // wrong, so an unretrieved size stays empty and no Size variation is sent.
         const QString cc = _currentStore().country.toUpper();
         QString varColor = ds.colorByCountry.value(cc, ds.color);
-        QString varSize  = ds.sizeByCountry.value(cc, ds.size);
+        QString varSize  = ds.sizeByCountry.value(cc);
         if (m_variantTree && r < m_variantTree->topLevelItemCount()) {
             QTreeWidgetItem *top = m_variantTree->topLevelItem(r);
             for (int k = 0; k < top->childCount(); ++k) {
@@ -1628,8 +2470,18 @@ QCoro::Task<void> DialogTemuCreateProduct::_publish()
             variations.append(v);
         }
 
+        // This SKU's images = its colour node's checked images (which already
+        // include the common images in the order the user chose). Falls back to
+        // the "" all-node, then to any gallery, so a SKU never ships empty.
+        QStringList skuUrls = colorNodeUrls.contains(ds.color)
+                                  ? colorNodeUrls.value(ds.color)
+                                  : colorNodeUrls.value(QString{});
+        if (skuUrls.isEmpty())
+            skuUrls = anyGalleryUrls;
+        if (r == 0)
+            carouselUrls = skuUrls; // the first variation represents the goods gallery
         QJsonArray imgs;
-        for (const QString &u : temuImages) imgs.append(u);
+        for (const QString &u : skuUrls) imgs.append(u);
 
         QJsonObject s;
         s.insert(QStringLiteral("externalSkuId"), m_skuTable->item(r, kColSku)->text());
@@ -1649,101 +2501,117 @@ QCoro::Task<void> DialogTemuCreateProduct::_publish()
         skuArr.append(s);
     }
 
-    // --- goodsBasic ---
-    QJsonObject goodsBasic;
-    goodsBasic.insert(QStringLiteral("goodsName"), m_titleEdit->text().trimmed());
-    const QString extGoodsId = !m_draft.parentSku.isEmpty()
-        ? m_draft.parentSku
-        : (m_draft.skus.isEmpty() ? m_titleEdit->text().trimmed() : m_draft.skus.first().outSkuSn);
-    goodsBasic.insert(QStringLiteral("externalGoodsId"), extGoodsId);
-    if (!m_descEdit->toPlainText().trimmed().isEmpty())
-        goodsBasic.insert(QStringLiteral("goodsDesc"), m_descEdit->toPlainText().trimmed());
-    if (!extCatName.isEmpty())
-        goodsBasic.insert(QStringLiteral("extCatName"), extCatName);
-    QJsonArray carousel;
-    for (const QString &u : temuImages) carousel.append(u);
-    goodsBasic.insert(QStringLiteral("goodsCarouselImage"), carousel);
-    if (!sizeChartTemuUrl.isEmpty())
-        goodsBasic.insert(QStringLiteral("detailImage"), QJsonArray{sizeChartTemuUrl});
-
-    // --- UPDATE path: the product already exists on this store ---
-    if (m_existing.found && m_existing.goodsId != 0) {
-        // partial.update edits text + images (prices/stock have dedicated flows;
-        // it also refuses edits until Temu finishes processing the product).
-        QJsonObject upBasic;
-        upBasic.insert(QStringLiteral("goodsName"), m_titleEdit->text().trimmed());
+        // --- goodsBasic (this store's language) ---
+        QJsonObject goodsBasic;
+        goodsBasic.insert(QStringLiteral("goodsName"), m_titleEdit->text().trimmed());
+        const QString extGoodsId = !m_draft.parentSku.isEmpty()
+            ? m_draft.parentSku
+            : (m_draft.skus.isEmpty() ? m_titleEdit->text().trimmed() : m_draft.skus.first().outSkuSn);
+        goodsBasic.insert(QStringLiteral("externalGoodsId"), extGoodsId);
         if (!m_descEdit->toPlainText().trimmed().isEmpty())
-            upBasic.insert(QStringLiteral("goodsDesc"), m_descEdit->toPlainText().trimmed());
-        upBasic.insert(QStringLiteral("goodsCarouselImage"), carousel);
-        QJsonObject upFields;
-        upFields.insert(QStringLiteral("goodsBasic"), upBasic);
-        QJsonArray bulletsUp;
-        for (const QString &b : m_bulletsEdit->toPlainText().split(QLatin1Char('\n'), Qt::SkipEmptyParts))
-            bulletsUp.append(b.trimmed());
-        if (!bulletsUp.isEmpty())
-            upFields.insert(QStringLiteral("bulletPoints"), bulletsUp);
+            goodsBasic.insert(QStringLiteral("goodsDesc"), m_descEdit->toPlainText().trimmed());
+        if (!extCatName.isEmpty())
+            goodsBasic.insert(QStringLiteral("extCatName"), extCatName);
+        QJsonArray carousel;
+        for (const QString &u : (carouselUrls.isEmpty() ? anyGalleryUrls : carouselUrls))
+            carousel.append(u);
+        goodsBasic.insert(QStringLiteral("goodsCarouselImage"), carousel);
+        if (!sizeChartTemuUrl.isEmpty())
+            goodsBasic.insert(QStringLiteral("detailImage"), QJsonArray{sizeChartTemuUrl});
 
-        m_logEdit->appendPlainText(tr("Updating existing product (goodsId %1)…").arg(m_existing.goodsId));
-        const bool ok = co_await m_api->updateGoodsPartial(m_existing.goodsId, upFields);
-        if (!ok) {
-            const QString err = m_api->lastError();
-            m_logEdit->appendPlainText(tr("Update failed: %1").arg(err));
-            if (err.contains(QStringLiteral("150010205")))
-                m_logEdit->appendPlainText(tr("  (Temu is still processing this product — "
-                                              "wait ~10 min after creation before editing.)"));
-            m_publishBtn->setEnabled(true);
-            co_return;
+        // --- UPDATE path: the product already exists on this store ---
+        if (m_existing.found && m_existing.goodsId != 0) {
+            publishedCountries.insert(store.country.toUpper()); // it has a page here
+            if (skipExisting) {
+                m_logEdit->appendPlainText(tr("  already exists — skipped."));
+                summary << tr("%1: skipped (already exists, goodsId %2)")
+                               .arg(store.label).arg(m_existing.goodsId);
+                continue;
+            }
+            // partial.update edits text + images (prices/stock have dedicated
+            // flows; it refuses edits until Temu finishes processing the product).
+            QJsonObject upBasic;
+            upBasic.insert(QStringLiteral("goodsName"), m_titleEdit->text().trimmed());
+            if (!m_descEdit->toPlainText().trimmed().isEmpty())
+                upBasic.insert(QStringLiteral("goodsDesc"), m_descEdit->toPlainText().trimmed());
+            upBasic.insert(QStringLiteral("goodsCarouselImage"), carousel);
+            QJsonObject upFields;
+            upFields.insert(QStringLiteral("goodsBasic"), upBasic);
+            QJsonArray bulletsUp;
+            for (const QString &b : m_bulletsEdit->toPlainText().split(QLatin1Char('\n'), Qt::SkipEmptyParts))
+                bulletsUp.append(b.trimmed());
+            if (!bulletsUp.isEmpty())
+                upFields.insert(QStringLiteral("bulletPoints"), bulletsUp);
+
+            m_logEdit->appendPlainText(tr("  updating goodsId %1…").arg(m_existing.goodsId));
+            const bool ok = co_await m_api->updateGoodsPartial(m_existing.goodsId, upFields);
+            if (!ok) {
+                const QString err = m_api->lastError();
+                m_logEdit->appendPlainText(tr("  update failed: %1").arg(err));
+                if (err.contains(QStringLiteral("150010205")))
+                    m_logEdit->appendPlainText(tr("  (Temu still processing — wait ~10 min then retry.)"));
+                summary << tr("%1: update FAILED (%2)").arg(store.label, err);
+                continue;
+            }
+            co_await _submitCompliance(m_existing.goodsId);
+            m_logEdit->appendPlainText(tr("  updated goodsId %1.").arg(m_existing.goodsId));
+            summary << tr("%1: updated (goodsId %2)").arg(store.label).arg(m_existing.goodsId);
+            continue;
         }
-        m_logEdit->appendPlainText(tr("Updated goodsId %1.").arg(m_existing.goodsId));
-        co_await _submitCompliance(m_existing.goodsId);
-        QMessageBox::information(this, tr("Create / Update"),
-            tr("Updated %1 (goodsId %2).").arg(_currentStore().label).arg(m_existing.goodsId));
-        m_publishBtn->setEnabled(true);
-        co_return;
+
+        // --- CREATE path ---
+        QJsonObject payload;
+        payload.insert(QStringLiteral("goodsBasic"), goodsBasic);
+        if (!attrsArr.isEmpty())
+            payload.insert(QStringLiteral("attributes"), attrsArr);
+        payload.insert(QStringLiteral("skuList"), skuArr);
+
+        m_logEdit->appendPlainText(tr("  creating product (V3)…"));
+        qDebug().noquote() << "Temu V3 publish payload (" << store.country << "):"
+                           << QJsonDocument(payload).toJson(QJsonDocument::Compact);
+
+        const qint64 id = co_await m_api->publishGoodsV3(payload);
+        if (id == 0) {
+            const QString err = m_api->lastError();
+            m_logEdit->appendPlainText(tr("  FAILED: %1").arg(err));
+            if (err.contains(QStringLiteral("150010090"))) // SKU duplicated
+                m_logEdit->appendPlainText(tr("  This SKU already exists on Temu — created earlier. "
+                    "Wait ~10 min, then re-open: it will switch to Update mode."));
+            summary << tr("%1: create FAILED (%2)").arg(store.label, err);
+            continue;
+        }
+
+        // Submit GPSR compliance (manufacturer + EU responsible person). Product
+        // Identification / country of origin still need the Seller Center.
+        const bool complianceOk = co_await _submitCompliance(id);
+        publishedCountries.insert(store.country.toUpper());
+        m_logEdit->appendPlainText(tr("  OK — goodsId %1.").arg(id));
+        summary << tr("%1: created (goodsId %2)%3").arg(store.label).arg(id)
+                       .arg(complianceOk ? QString{} : tr(" — compliance needs manual entry"));
+    } // end per-store loop
+
+    // Restore the originally-selected store in the dropdown and its text.
+    { QSignalBlocker b(m_storeCombo); m_storeCombo->setCurrentIndex(qMax(0, originalStoreIndex)); }
+    if (!m_stores.isEmpty())
+        _loadCountryText(m_stores.at(qMax(0, originalStoreIndex)).country.toUpper());
+
+    // Record where this product now has a Temu page (union with any previous
+    // record — pages aren't deleted here), so the "Load Sub Folder" list can show
+    // the published countries. Stored sorted for a stable "DE FR IT" display.
+    if (!m_draft.productDir.isEmpty() && !publishedCountries.isEmpty()) {
+        QSettings ps(QDir(m_draft.productDir).filePath(QStringLiteral("settings.ini")),
+                     QSettings::IniFormat);
+        const QStringList prev = ps.value(QStringLiteral("temu/publishedCountries")).toStringList();
+        for (const QString &cc : prev)
+            publishedCountries.insert(cc.toUpper());
+        QStringList list(publishedCountries.constBegin(), publishedCountries.constEnd());
+        list.sort();
+        ps.setValue(QStringLiteral("temu/publishedCountries"), list);
     }
-
-    QJsonObject payload;
-    payload.insert(QStringLiteral("goodsBasic"), goodsBasic);
-    if (!attrsArr.isEmpty())
-        payload.insert(QStringLiteral("attributes"), attrsArr);
-    payload.insert(QStringLiteral("skuList"), skuArr);
-
-    m_logEdit->appendPlainText(tr("Creating product (V3)…"));
-    qDebug().noquote() << "Temu V3 publish payload:"
-                       << QJsonDocument(payload).toJson(QJsonDocument::Compact);
-
-    const qint64 id = co_await m_api->publishGoodsV3(payload);
-    if (id == 0) {
-        const QString err = m_api->lastError();
-        m_logEdit->appendPlainText(tr("FAILED: %1").arg(err));
-        if (err.contains(QStringLiteral("150010090"))) // SKU duplicated
-            m_logEdit->appendPlainText(tr("  This SKU already exists on Temu — the product was "
-                "created earlier. Wait ~10 min for Temu to finish processing it, then re-open "
-                "this dialog: it will detect the product and switch to Update mode."));
-        m_publishBtn->setEnabled(true);
-        co_return;
-    }
-    _saveCategoryMapping(catId, m_catNameLabel->text());
-    m_logEdit->appendPlainText(tr("OK — goodsId %1 on %2.").arg(id).arg(_currentStore().label));
-
-    // Submit GPSR compliance (manufacturer + EU responsible person) via the
-    // verified gpsrInfo shape. Product Identification (GTIN) and country of
-    // origin are NOT yet settable via the open API (gated value format), so
-    // they still need to be filled in the Seller Center.
-    const bool complianceOk = co_await _submitCompliance(id);
-
-    QString extra;
-    if (complianceOk)
-        extra = tr("\n\nCompliance submitted via the API (manufacturer, EU responsible person, "
-                   "product identification).");
-    else
-        extra = tr("\n\nIMPORTANT: fill the compliance section (manufacturer, EU responsible "
-                   "person, product identification) manually in the Temu Seller Center.");
 
     QMessageBox::information(this, tr("Create / Update"),
-        tr("Published to %1 (goodsId %2).\n\nTemu is enriching it (category, attributes…) — "
-           "check status in ~10 min.").arg(_currentStore().label).arg(id) + extra);
-    m_publishBtn->setEnabled(true);
+        tr("Publish results:\n\n%1\n\nTemu is enriching new products (category, attributes…) — "
+           "check status in ~10 min.").arg(summary.join(QLatin1Char('\n'))));
 }
 
 // Submits manufacturer + EU responsible person for the current store's brand

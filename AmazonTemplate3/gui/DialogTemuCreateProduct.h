@@ -67,6 +67,10 @@ public:
         QStringList imagePaths;       // gallery images, checked by default
         QStringList extraImagePaths;  // A+ (mobile) images, unchecked by default
         QString     sizeChartImagePath; // generated size chart, if any
+        // Gallery images grouped by base colour (Sku.color) so the dialog can
+        // offer per-colour image selection. Key "" = images tied to no colour
+        // (main / shared). Every path here also appears in imagePaths.
+        QMap<QString, QStringList> galleryByColor;
         // One entry per variation child.
         struct Sku {
             QString outSkuSn;
@@ -96,6 +100,11 @@ public:
                             AmazonPricingCtx pricing,
                             QWidget *parent = nullptr);
 
+protected:
+    // Save the manual setup (images + attributes) whenever the dialog closes,
+    // so Cancel / window-close also preserves the work.
+    void done(int r) override;
+
 private:
     QCoro::Task<void> _onStoreChanged();     // lookup create/update + load template
     // Loads the Temu attribute template for the category currently in m_catIdEdit.
@@ -106,13 +115,38 @@ private:
     // Runs the CLI via the async API bridged to a QFuture — co_awaiting
     // cli->runPrompt() directly crashes (GCC frees the Task frame while the
     // QProcess::finished signal is still queued).
-    QCoro::Task<CliRunResult> _runCli(const QString &prompt);
+    // workingDir (optional): run the CLI there so it can read local files (e.g.
+    // the product images) by name — used by the AI attribute picker.
+    QCoro::Task<CliRunResult> _runCli(const QString &prompt, const QString &workingDir = {});
+    // Looks at the product images (+ text) and fills the attributes it can
+    // confidently determine, choosing strictly from each attribute's allowed
+    // values and skipping anything it can't guess.
+    QCoro::Task<void> _aiPickAttributes();
     QCoro::Task<void> _generateText();       // CLI-generate title/bullets/description
     QCoro::Task<void> _regenerateField(int which); // 0=title 1=bullets 2=description
+    // Regenerates title+bullets+description for EVERY selected country, each in
+    // its own language, persisting the result into m_pageText per country.
+    QCoro::Task<void> _regenerateAllText();
+    // Regenerates ONE field (0=title 1=bullets 2=description) for every selected
+    // country, each in its own language.
+    QCoro::Task<void> _regenerateFieldAllLangs(int which);
     void    _reloadKeywordTemplates();       // fill the combo from storage
     QString _titleKeywordInstruction() const; // keyword clause for the current store
     QString _variationInstruction() const;    // colour/size clause for the title
     QString _storeLanguage() const;           // language name for the current store
+    QString _textCountry() const;             // country code whose language is shown
+    // Strong "write ONLY in <lang>, translate every foreign word" clause for the
+    // given field description (e.g. "the title" / "the title, bullets and
+    // description"). Empty when the language is unknown.
+    QString _languageInstruction(const QString &what) const;
+    // Title-only rules: polished + complete, SEO-keyword-rich.
+    QString _titleGuidance() const;
+    // Forbids the brand name in every field (title, bullets, description).
+    QString _noBrandInstruction() const;
+    // Post-processes a generated title: strips any trailing size (which the CLI
+    // tends to copy from the source despite the prompt) and Title-Cases every
+    // word. Applied to every title we accept.
+    QString _finalizeTitle(QString title) const;
     QCoro::Task<void> _suggestCategory();    // category.recommend → set catId
     QCoro::Task<void> _aiPickCategory();     // CLI walks the named tree to a leaf
     QCoro::Task<void> _browseCategory();     // cascading cats.get picker
@@ -120,6 +154,12 @@ private:
     QCoro::Task<void> _fetchAmazonStock();   // per-SKU Amazon qty → Amz Qty col + stock
     QCoro::Task<void> _fetchAmazonData();     // prices then stock, in sequence
     void _applyRowToAll();                   // copy current row's price+packaging to all
+    // Persist / restore the image selection+order and the filled attributes to
+    // the product's settings.ini, so a failed upload doesn't cost the ~3 min of
+    // manual setup when re-opening the dialog.
+    void _saveWorkState();
+    void _restoreImageState();               // after the image tree is built
+    void _applySavedAttributes();            // after the attribute form is built
     QCoro::Task<void> _publish();            // assemble payload + create/update
     QCoro::Task<bool> _submitCompliance(qint64 goodsId); // GPSR manufacturer + EU rep
 
@@ -167,7 +207,10 @@ private:
     QPushButton    *m_aiPickBtn = nullptr;
     QPushButton    *m_browseBtn = nullptr;
     void _setCatBusy(bool busy); // disable category buttons while one runs
-    QListWidget    *m_imageList = nullptr;
+    // Gallery images grouped in a tree: one top-level node per colour (plus a
+    // "Common" node for shared images), each with checkable, reorderable image
+    // children. Publish gives each variation its colour's checked images.
+    QTreeWidget    *m_imageTree = nullptr;
     QLabel         *m_imagePreview = nullptr;
     QFormLayout    *m_attrForm = nullptr;
     QWidget        *m_attrContainer = nullptr;
@@ -176,6 +219,28 @@ private:
     QMap<QString, TemuPageText> m_pageText;
     QString                     m_curTextCountry;
     void _loadCountryText(const QString &country);
+    // True once the listing text has been (re)generated with AI this product's
+    // lifetime (set on any successful field write, persisted). Publish warns when
+    // false; Reset clears it back to false.
+    bool m_textRegenerated = false;
+    void _restoreTextState(); // load saved per-country text + the regen flag
+    void _resetText();        // restore the original text, drop regenerated content
+    // Original (source / Amazon-localized) text for a country, used by Reset.
+    TemuPageText _originalCountryText(const QString &country) const;
+    // Writes a regenerated field (0=title 1=bullets 2=description) into the
+    // GIVEN country's stored text, and mirrors it into the live editors only if
+    // that country is still the one on screen — so switching language while a
+    // CLI regeneration is in flight can never land text in the wrong country.
+    void _applyTextResult(const QString &country, int which, const QString &value);
+    // Disables/enables language switching + text buttons while a text task runs
+    // (ref-counted, so nested regenerate-all → regenerate-field stays disabled).
+    void _setTextBusy(bool busy);
+    int  m_textBusy = 0;
+    QList<QWidget*> m_textControls; // language list + store combo + text buttons
+    // Left-hand list of the selected stores' country codes; picking one shows
+    // that country's language in the title/bullets/description editors. The
+    // top Store dropdown stays the publish target and is independent of this.
+    QListWidget                *m_textCountryList = nullptr;
 
     QComboBox      *m_keywordTemplateCombo = nullptr;
     QLineEdit      *m_originEdit = nullptr; // country of origin
@@ -194,7 +259,10 @@ private:
     // mid-flight (→ crash when a slow await resumes). One member per entry point.
     QCoro::Task<void> m_storeTask;
     QCoro::Task<void> m_catTask;    // suggest / ai-pick / browse
+    QCoro::Task<void> m_attrAiTask; // AI attribute picker
+    bool m_attrAiBusy = false;      // re-entrancy guard for the AI picker
     QCoro::Task<void> m_textTask;   // generate / regenerate
+    QCoro::Task<void> m_textAllTask; // regenerate-all (every language)
     QCoro::Task<void> m_priceTask;  // fetch Amazon prices
     QCoro::Task<void> m_publishTask;
 };

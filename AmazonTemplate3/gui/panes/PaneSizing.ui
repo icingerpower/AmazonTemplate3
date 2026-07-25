@@ -1079,6 +1079,16 @@
               </widget>
              </item>
              <item>
+              <widget class="QCheckBox" name="checkBoxTemuAllCountry">
+               <property name="toolTip">
+                <string>When checked, selecting a store also selects every store of the same brand (all countries).</string>
+               </property>
+               <property name="text">
+                <string>All country</string>
+               </property>
+              </widget>
+             </item>
+             <item>
               <spacer name="horizontalSpacer_7">
                <property name="orientation">
                 <enum>Qt::Orientation::Horizontal</enum>

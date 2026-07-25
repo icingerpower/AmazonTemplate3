@@ -355,6 +355,9 @@ private:
     // lookup, so the Temu category can be remembered per Amazon category.
     QCoro::Task<void> _ensureProductType();
     QCoro::Task<void> m_temuDialogTask;
+    // True while onTemuCreateOrUpdate() is assembling the draft or showing the
+    // dialog, so a second click during the (async) build can't open it twice.
+    bool m_temuDialogOpen = false;
     QCoro::Task<void> m_parentCheckTask; // Re-run parent check (Load Sub Folder)
     // Rebuilds textEditAttributes from m_attributesBaseText + m_colorLogs,
     // stripping excluded colors.
