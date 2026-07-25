@@ -613,6 +613,31 @@ static AmazonCatalogApi::AsinItem parseAsinItem(const QString& asin, const QByte
         item.brand = summaries.first().toObject().value("brand").toString();
     item.color = firstAttrValue(attrs, "color");
     item.size  = firstAttrValue(attrs, "size");
+    // Many apparel listings (DRESS etc.) leave the flat "size" attribute empty and
+    // store the size only in the composite "apparel_size" (value + optional
+    // to-value, e.g. numeric_36 → numeric_40). Derive "36-40" from it so the size
+    // is this-marketplace-accurate; NEVER leave it to a cross-country fallback.
+    if (item.size.isEmpty()) {
+        const QJsonArray asz = attrs.value("apparel_size").toArray();
+        if (!asz.isEmpty()) {
+            const QJsonObject o = asz.first().toObject();
+            // Values arrive prefixed by their class ("numeric_36", "alpha_l") —
+            // keep the token after the last underscore.
+            auto strip = [](QString s) {
+                const int u = s.lastIndexOf(QLatin1Char('_'));
+                return (u >= 0) ? s.mid(u + 1) : s;
+            };
+            const QString from = strip(o.value(QStringLiteral("value")).toString());
+            QString to;
+            for (const QString &k : {QStringLiteral("size_to"), QStringLiteral("to_value"),
+                                     QStringLiteral("to_size"), QStringLiteral("value_to")}) {
+                const QString t = o.value(k).toString();
+                if (!t.isEmpty()) { to = strip(t); break; }
+            }
+            if (!from.isEmpty())
+                item.size = to.isEmpty() ? from : (from + QLatin1Char('-') + to);
+        }
+    }
     item.hasSizeTable = !attrs.value("size_chart_node_id").toArray().isEmpty();
 
     // Bullet points — try attributes.bullet_point first, fall back to summaries
@@ -3015,7 +3040,8 @@ AmazonCatalogApi::patchListingImageUrls(QString marketplaceId, QString sku,
 QCoro::Task<void>
 AmazonCatalogApi::fetchVariationFamily(const QString& asin,
                                        const QString& marketplaceId,
-                                       VariationFamily* out)
+                                       VariationFamily* out,
+                                       bool preserveMarketplaceColour)
 {
     // Declare all non-trivially-destructible locals up front so none of them
     // become temporaries spanning a suspension point (GCC 13 ICE workaround).
@@ -3161,15 +3187,25 @@ AmazonCatalogApi::fetchVariationFamily(const QString& asin,
         family.children.append(std::move(item));
     }
 
-    // Step 3b: for children still missing color or size, retry from FR then DE.
+    // Step 3b: for children still missing COLOUR (or images), retry from FR then DE.
     // Amazon sometimes omits attributes on non-primary marketplaces; FR and DE
     // tend to have the most complete catalogue data for EU products.
+    // IMPORTANT: never cross-fill SIZE from another marketplace — size is
+    // marketplace-specific (DE 36-40, FR 38-42, IT 42-46), so taking it from a
+    // fallback market produces a wrong size on the queried marketplace. Size must
+    // come only from THIS marketplace (flat "size" or its own apparel_size, both
+    // handled in parseAsinItem). Colour is normalised to UK in step 3c anyway.
     static const QStringList kAttrFallbacks = {
         QStringLiteral("A13V1IB3VIYZZH"), // FR
         QStringLiteral("A1PA6795UKMFR9"), // DE
     };
     for (auto& child : family.children) {
-        if (!child.color.isEmpty() && !child.size.isEmpty())
+        // When preserving the marketplace colour, never cross-fill colour from
+        // another market (it would be the wrong language); still allow image
+        // fallback for children that have a colour but few images.
+        if (!child.color.isEmpty())
+            continue;
+        if (preserveMarketplaceColour)
             continue;
         for (const QString& fbMp : kAttrFallbacks) {
             if (fbMp == marketplaceId)
@@ -3178,12 +3214,10 @@ AmazonCatalogApi::fetchVariationFamily(const QString& asin,
             co_await _fetchAsinItem(child.asin, fbMp, &fallback);
             if (child.color.isEmpty() && !fallback.color.isEmpty())
                 child.color = fallback.color;
-            if (child.size.isEmpty() && !fallback.size.isEmpty())
-                child.size = fallback.size;
-            // Also take more images from this marketplace if the primary gave fewer
+            // Also take more images from this marketplace if the primary gave fewer.
             if (fallback.allImageUrls.size() > child.allImageUrls.size())
                 child.allImageUrls = std::move(fallback.allImageUrls);
-            if (!child.color.isEmpty() && !child.size.isEmpty())
+            if (!child.color.isEmpty())
                 break;
         }
     }
@@ -3195,7 +3229,7 @@ AmazonCatalogApi::fetchVariationFamily(const QString& asin,
     // names are stable across sessions. If the product doesn't exist on UK or the EU
     // token is absent the original name is silently kept.
     static const QString kUkMarket = QStringLiteral("A1F83G8C2ARO7P");
-    if (marketplaceId != kUkMarket) {
+    if (!preserveMarketplaceColour && marketplaceId != kUkMarket) {
         for (auto& child : family.children) {
             if (child.color.isEmpty()) continue;
             AsinItem ukItem;

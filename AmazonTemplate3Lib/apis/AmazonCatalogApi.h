@@ -82,9 +82,15 @@ public:
     // coroutine ICE (build_special_member_call, cp/call.cc:11096) that is
     // triggered when co_awaiting a Task<T> whose T is non-trivially
     // destructible (here, VariationFamily contains QString/QList).
+    // preserveMarketplaceColour: when true, each child's colour is left exactly
+    // as the queried marketplace reports it (localized, e.g. "Bleu Roi" on FR)
+    // and is NOT cross-filled from other markets nor normalized to UK English.
+    // Use for per-country variation names. Default (false) normalizes colour to
+    // UK English so A+ element IDs stay stable across sessions.
     QCoro::Task<void> fetchVariationFamily(const QString& asin,
                                            const QString& marketplaceId,
-                                           VariationFamily* out);
+                                           VariationFamily* out,
+                                           bool preserveMarketplaceColour = false);
 
     QString lastError() const { return m_lastError; }
     void    clearLastError()  { m_lastError.clear(); }
