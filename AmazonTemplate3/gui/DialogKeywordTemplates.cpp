@@ -218,10 +218,33 @@ void DialogKeywordTemplates::_addCountry()
         QMessageBox::information(this, tr("Add country"), tr("Select a template first."));
         return;
     }
+    // Countries already present in the tree — offer only the ones not yet added.
+    QStringList existing;
+    for (int i = 0; i < m_tree->topLevelItemCount(); ++i)
+        existing << m_tree->topLevelItem(i)->text(0);
+
     bool ok = false;
-    const QString code = QInputDialog::getText(this, tr("Add country"),
-        tr("Country code (e.g. FR, DE, IT):"), QLineEdit::Normal, QString{}, &ok)
-        .trimmed().toUpper();
+    QString code;
+    if (!m_availableCountries.isEmpty()) {
+        // Pick from the countries selected for this product's Temu stores.
+        QStringList choices = m_availableCountries;
+        choices.removeIf([&](const QString &c) {
+            return existing.contains(c, Qt::CaseInsensitive);
+        });
+        if (choices.isEmpty()) {
+            QMessageBox::information(this, tr("Add country"),
+                tr("All selected countries are already added."));
+            return;
+        }
+        code = QInputDialog::getItem(this, tr("Add country"),
+            tr("Country (from the stores selected for this product):"),
+            choices, 0, false, &ok).trimmed().toUpper();
+    } else {
+        // Standalone use (no store context): fall back to free-text entry.
+        code = QInputDialog::getText(this, tr("Add country"),
+            tr("Country code (e.g. FR, DE, IT):"), QLineEdit::Normal, QString{}, &ok)
+            .trimmed().toUpper();
+    }
     if (!ok || code.isEmpty())
         return;
     for (int i = 0; i < m_tree->topLevelItemCount(); ++i)

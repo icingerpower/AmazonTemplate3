@@ -27,6 +27,10 @@ class DialogKeywordTemplates : public QDialog
 public:
     explicit DialogKeywordTemplates(QWidget *parent = nullptr);
 
+    // Countries (codes like "FR","DE") selected for this product's Temu stores.
+    // When set, "Add country" offers these as a pick-list instead of free text.
+    void setAvailableCountries(const QStringList &codes) { m_availableCountries = codes; }
+
     // Persistence (working-directory settings). Shared with the create dialog.
     static QList<KeywordTemplate> load();
     static void save(const QList<KeywordTemplate> &templates);
@@ -47,6 +51,7 @@ private:
 
     QList<KeywordTemplate> m_templates;
     int                    m_current = -1;
+    QStringList            m_availableCountries; // from the product's Temu stores
 
     QListWidget *m_list = nullptr;
     QTreeWidget *m_tree = nullptr;
