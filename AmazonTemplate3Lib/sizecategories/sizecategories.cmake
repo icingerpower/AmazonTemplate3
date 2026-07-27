@@ -17,6 +17,8 @@ SET(SIZECATEGORY_FILES
     ${CMAKE_CURRENT_LIST_DIR}/TopWomenCategory.cpp
     ${CMAKE_CURRENT_LIST_DIR}/RectangleCategory.h
     ${CMAKE_CURRENT_LIST_DIR}/RectangleCategory.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/HeadCategory.h
+    ${CMAKE_CURRENT_LIST_DIR}/HeadCategory.cpp
     ${CMAKE_CURRENT_LIST_DIR}/SizingTableTemplateModel.h
     ${CMAKE_CURRENT_LIST_DIR}/SizingTableTemplateModel.cpp
 )

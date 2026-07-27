@@ -96,7 +96,7 @@
          <item>
           <widget class="QComboBox" name="comboBoxCli">
            <property name="toolTip">
-            <string>Number of warning asked to be solved by AI. 0 means all rows.</string>
+            <string>AI CLI used to solve the warnings (Antigravity = agy)</string>
            </property>
           </widget>
          </item>

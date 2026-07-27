@@ -11,10 +11,18 @@
 
 #include "DialogAddPossibleValues.h"
 #include "DialogAddValueToReplace.h"
+#include "DialogSuggestEquivalent.h"
 #include "ComboBoxColumnDelegate.h"
 
 #include "DialogAttributes.h"
 #include "ui_DialogAttributes.h"
+
+AbstractCli *DialogAttributes::SUGGESTION_CLI = nullptr;
+
+void DialogAttributes::setSuggestionCli(AbstractCli *cli)
+{
+    SUGGESTION_CLI = cli;
+}
 
 DialogAttributes::DialogAttributes(TemplateFiller *templateFiller, QWidget *parent) :
     QDialog(parent),
@@ -39,12 +47,40 @@ DialogAttributes::~DialogAttributes()
 }
 
 QCoro::Task<bool> DialogAttributes::editAttributes(
-        TemplateFiller *templateFiller, const QString &title, const QString &message)
+        TemplateFiller *templateFiller, const QString &title, const QString &message,
+        const FillerSelectable::MissingValueInfo &info)
 {
-    QMessageBox::information(
-                nullptr,
-                title,
-                tr("You will be asked to fix the following error") + ". " + message);
+    bool showIntroMessage = true;
+    if (SUGGESTION_CLI != nullptr
+            && !info.fieldIdAmzV02.isEmpty()
+            && !info.fromValue.isEmpty()
+            && !info.possibleValues.isEmpty())
+    {
+        DialogSuggestEquivalent dialogSuggest(SUGGESTION_CLI, title, message, info);
+        const int ret = dialogSuggest.exec();
+        if (ret == QDialog::Accepted)
+        {
+            const QString &chosenValue = dialogSuggest.selectedValue();
+            if (!chosenValue.isEmpty())
+            {
+                templateFiller->attributeEquivalentTable()->recordAttribute(
+                            info.fieldIdAmzV02, {info.fromValue, chosenValue});
+                co_return true;
+            }
+        }
+        else if (!dialogSuggest.editManuallyRequested())
+        {
+            co_return false;
+        }
+        showIntroMessage = false; // The suggestion dialog already displayed the error
+    }
+    if (showIntroMessage)
+    {
+        QMessageBox::information(
+                    nullptr,
+                    title,
+                    tr("You will be asked to fix the following error") + ". " + message);
+    }
     DialogAttributes dialog(templateFiller);
     auto ret = dialog.exec();
     co_return ret == QDialog::Accepted;

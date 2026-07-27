@@ -41,7 +41,14 @@ public:
             , QHash<QString, QString> &sku_parentSku
             , QHash<QString, QString> &sku_variation
             );
-    using EditCallback = std::function<QCoro::Task<bool>(TemplateFiller*, const QString &error, const QString &message)>;
+    // Structured context of a "no equivalent value" error, so the callback can
+    // offer the choices directly and record the fix in the equivalence table.
+    struct MissingValueInfo {
+        QString fieldIdAmzV02;      // Key used by AttributeEquivalentTable
+        QString fromValue;          // Value that has no known equivalent
+        QSet<QString> possibleValues; // Allowed values on the target marketplace
+    };
+    using EditCallback = std::function<QCoro::Task<bool>(TemplateFiller*, const QString &error, const QString &message, const MissingValueInfo &info)>;
     static void recordEditCallback(EditCallback callback);
 
     using SelectValueCallback = std::function<QCoro::Task<QString>(

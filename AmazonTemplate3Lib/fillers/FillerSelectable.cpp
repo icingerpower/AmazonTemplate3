@@ -792,8 +792,9 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
                 }
                 else if (EDIT_MISSING_CALLBACK)
                 {
+                    MissingValueInfo info{fieldIdToV02, lastAiValue, possibleValues};
                     rejectedIfHelpAsked = ! co_await EDIT_MISSING_CALLBACK(
-                                templateFiller, title, description);
+                                templateFiller, title, description, info);
                     // Safety net: if AI gave no specific suggestion there is nothing
                     // for the equivalence table to resolve on the next iteration.
                     if (lastAiValue.isEmpty())
@@ -925,7 +926,8 @@ QCoro::Task<void> FillerSelectable::_fillDifferentLangCountry(
                                                       ).arg(fieldIdFrom, sku, fromValue, fieldIdTo, countryCodeTo, langCodeTo, possibleValuesList.join(", "));
                     if (!rejectedIfHelpAsked && EDIT_MISSING_CALLBACK)
                     {
-                        rejectedIfHelpAsked = ! co_await EDIT_MISSING_CALLBACK(templateFiller, title, description);
+                        MissingValueInfo info{fieldIdToV02, fromValue, possibleValues};
+                        rejectedIfHelpAsked = ! co_await EDIT_MISSING_CALLBACK(templateFiller, title, description, info);
                     }
                     else
                     {

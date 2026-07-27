@@ -8,6 +8,7 @@
 #include <QCoro/QCoroCore>
 
 class TemplateFiller;
+class AbstractCli;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class PaneGenTemplate; }
@@ -21,6 +22,7 @@ public:
     explicit PaneGenTemplate(QWidget *parent = nullptr);
     ~PaneGenTemplate();
 
+    void setAvailableClis(const QList<AbstractCli *> &clis);
     QSharedPointer<QSettings> settingsFolder() const;
     QMap<QString, QString> get_skuPattern_customInstructions() const;
 
@@ -45,6 +47,7 @@ private:
     void _clearTemplateFiller();
     void _setControlButtonsEnabled(bool enable);
     void _setGenerateButtonsEnabled(bool enable);
+    void _onCliChanged();
     void _enableGenerateButtonIfValid();
     QCoro::Task<void> m_taskGenerate;
 };

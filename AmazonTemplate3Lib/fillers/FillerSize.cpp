@@ -355,13 +355,12 @@ static QSharedPointer<OpenAi2::StepMultipleAskAi> createClassificationStep(
     };
     stepClassification->onLastError = [](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
     {
-        ExceptionTemplate exception;
-        QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
-                .arg(QString::number(networkError)
-                     , reply
-                     , lastWhy);
-        exception.setInfos(QObject::tr("AI Product Type Classification Failed"), errorMsg);
-        exception.raise();
+        // Never throw here: this runs inside a QNetworkReply slot, so an exception
+        // cannot reach any catch handler and would std::terminate the app.
+        // The failure is reported to the caller as ExceptionOpenAiError by
+        // askGptMultipleTimeAiCoro through its awaited future.
+        qWarning() << "FillerSize classification failed. NetworkError:" << networkError
+                   << "| Reply:" << reply << "| Error:" << lastWhy;
         return true;
     };
     return stepClassification;

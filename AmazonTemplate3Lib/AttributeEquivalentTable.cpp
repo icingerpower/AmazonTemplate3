@@ -159,18 +159,19 @@ void AttributeEquivalentTable::recordAttribute(
     else
     {
         const auto &currentEquivalent = m_listOfStringList[posAttr].last().split(CELL_SEP);
-        QSet<QString> equivalentValues{currentEquivalent.begin(), currentEquivalent.end()};
-        int sizeBefore = equivalentValues.size();
+        QSet<QString> mergedValues{currentEquivalent.begin(), currentEquivalent.end()};
+        int sizeBefore = mergedValues.size();
         for (const auto &newVal : equivalentValues)
         {
-            equivalentValues.insert(newVal);
+            mergedValues.insert(newVal);
         }
-        if (sizeBefore != equivalentValues.size())
+        if (sizeBefore != mergedValues.size())
         {
-            QStringList listEquivalentValues{equivalentValues.begin(), equivalentValues.end()};
+            QStringList listEquivalentValues{mergedValues.begin(), mergedValues.end()};
             std::sort(listEquivalentValues.begin(), listEquivalentValues.end());
             int indColLast = m_listOfStringList[posAttr].size() - 1;
             m_listOfStringList[posAttr][indColLast] = listEquivalentValues.join(CELL_SEP);
+            _saveInFile();
             _buildHash();
             emit dataChanged(index(posAttr, indColLast)
                              , index(posAttr, indColLast));

@@ -14,6 +14,13 @@
    <item>
     <layout class="QHBoxLayout" name="horizontalLayout">
      <item>
+      <widget class="QComboBox" name="comboBoxCli">
+       <property name="toolTip">
+        <string>AI CLI used to diagnose and suggest fixes (e.g. missing equivalent values)</string>
+       </property>
+      </widget>
+     </item>
+     <item>
       <widget class="QLabel" name="label">
        <property name="text">
         <string>Source template</string>

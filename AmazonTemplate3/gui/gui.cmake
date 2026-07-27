@@ -65,6 +65,8 @@ SET(GUI_FILES
     ${CMAKE_CURRENT_LIST_DIR}/ComboBoxColumnDelegate.h
     ${CMAKE_CURRENT_LIST_DIR}/DialogSelectValue.cpp
     ${CMAKE_CURRENT_LIST_DIR}/DialogSelectValue.h
+    ${CMAKE_CURRENT_LIST_DIR}/DialogSuggestEquivalent.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/DialogSuggestEquivalent.h
     ${CMAKE_CURRENT_LIST_DIR}/DialogEditPrompts.cpp
     ${CMAKE_CURRENT_LIST_DIR}/DialogEditPrompts.h
     ${CMAKE_CURRENT_LIST_DIR}/DialogClassificationTypes.h

@@ -18,6 +18,8 @@
 #include "../../common/workingdirectory/WorkingDirectoryManager.h"
 #include "SettingsTable.h"
 
+#include "AbstractCli.h"
+
 #include "../DialogExtractInfos.h"
 #include "../DialogAttributes.h"
 #include "../DialogValidateMandatory.h"
@@ -46,8 +48,41 @@ PaneGenTemplate::~PaneGenTemplate()
     _clearTemplateFiller();
 }
 
+void PaneGenTemplate::setAvailableClis(const QList<AbstractCli *> &clis)
+{
+    QSignalBlocker blocker(ui->comboBoxCli);
+    ui->comboBoxCli->clear();
+    for (AbstractCli *cli : clis)
+        ui->comboBoxCli->addItem(cli->getName(), QVariant::fromValue(cli));
+
+    const QString saved = QSettings().value(QStringLiteral("genTemplate/selectedCli")).toString();
+    int restored = -1;
+    for (int i = 0; i < clis.size(); ++i)
+        if (clis[i]->getName() == saved) { restored = i; break; }
+
+    // Default to a text-oriented CLI: image/agentic CLIs are a poor fit for
+    // diagnosing equivalence errors and can be very slow.
+    int fallback = 0;
+    for (int i = 0; i < clis.size(); ++i)
+        if (!clis[i]->canGenImages()) { fallback = i; break; }
+
+    ui->comboBoxCli->setCurrentIndex(restored >= 0 ? restored : fallback);
+    DialogAttributes::setSuggestionCli(
+                ui->comboBoxCli->currentData().value<AbstractCli *>());
+}
+
+void PaneGenTemplate::_onCliChanged()
+{
+    AbstractCli *cli = ui->comboBoxCli->currentData().value<AbstractCli *>();
+    if (cli != nullptr)
+        QSettings().setValue(QStringLiteral("genTemplate/selectedCli"), cli->getName());
+    DialogAttributes::setSuggestionCli(cli);
+}
+
 void PaneGenTemplate::_connectSlots()
 {
+    connect(ui->comboBoxCli, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &PaneGenTemplate::_onCliChanged);
     connect(ui->buttonBrowseSource,
             &QPushButton::clicked,
             this,
@@ -127,6 +162,20 @@ QCoro::Task<void> PaneGenTemplate::generate()
         }
     }
     catch (const ExceptionTemplate &exception)
+    {
+        QMessageBox::critical(
+                    this,
+                    exception.title(),
+                    exception.error());
+    }
+    catch (const ExceptionOpenAiNotInitialized &exception)
+    {
+        QMessageBox::critical(
+                    this,
+                    exception.title(),
+                    exception.error());
+    }
+    catch (const ExceptionOpenAiError &exception)
     {
         QMessageBox::critical(
                     this,

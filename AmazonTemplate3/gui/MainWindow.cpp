@@ -40,7 +40,9 @@ MainWindow::MainWindow(QWidget *parent)
             m_availableClis.append(cli);
     }
 
-    ui->tabWidget->addTab(new PaneGenTemplate(this), tr("Gen Template"));
+    auto *paneGenTemplate = new PaneGenTemplate(this);
+    paneGenTemplate->setAvailableClis(m_availableClis);
+    ui->tabWidget->addTab(paneGenTemplate, tr("Gen Template"));
 
     auto *paneSizing = new PaneSizing(this);
     paneSizing->setWorkingDir(WorkingDirectoryManager::instance()->workingDir());
