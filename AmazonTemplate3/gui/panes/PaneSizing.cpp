@@ -3481,13 +3481,33 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                             if (!allBlockedKeywords.contains(kw))
                                 allBlockedKeywords.append(kw);
 
+                        // Which of the just-flagged words are ACTUALLY in the FAQ we
+                        // submitted? Amazon sometimes rejects for a word that lives in
+                        // another listing field, not the FAQ — regenerating the FAQ
+                        // then loops forever on the same keyword (the "szmat" bug).
+                        QStringList blockedInFaq;
+                        if (!faqText.isEmpty()) {
+                            const QString fl = faqText.toLower();
+                            for (const QString &kw : std::as_const(blocked)) {
+                                const QString k = kw.trimmed().toLower();
+                                if (!k.isEmpty() && fl.contains(k))
+                                    blockedInFaq << kw;
+                            }
+                        }
+                        if (!blocked.isEmpty() && !faqText.isEmpty() && blockedInFaq.isEmpty())
+                            appendAplusLog(progressUi.logPtr,
+                                tr("  ⚠ Amazon flagged \"%1\", but it is NOT in the FAQ text — "
+                                   "regenerating the FAQ cannot fix this (the word is in another "
+                                   "listing field). Skipping FAQ auto-retry.")
+                                    .arg(blocked.join(QStringLiteral(", "))));
+
                         if (!blocked.isEmpty() && cli && !faqText.isEmpty()
-                                && faqAttempt < kMaxFaqRetries) {
+                                && faqAttempt < kMaxFaqRetries && !blockedInFaq.isEmpty()) {
                             ++faqAttempt;
                             appendAplusLog(progressUi.logPtr,
                                 tr("  ↩ FAQ rejected (attempt %1/%2) — forbidden: %3 — regenerating…")
                                     .arg(faqAttempt).arg(kMaxFaqRetries)
-                                    .arg(blocked.join(QStringLiteral(", "))));
+                                    .arg(blockedInFaq.join(QStringLiteral(", "))));
                             appendAplusLog(progressUi.logPtr,
                                 tr("  ℹ FAQ sent for rewrite:\n%1")
                                     .arg(faqText.left(1000)));
@@ -3503,10 +3523,24 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                             if (!regenerated.isEmpty()) {
                                 faqText = regenerated;
                                 saveFaqRewrite(regenerated);
-                                continue; // retry with the cleaned FAQ
+                                // Only resubmit if the regeneration actually removed the
+                                // flagged word(s); otherwise resubmitting is pointless.
+                                const QString rl = regenerated.toLower();
+                                QStringList stillIn;
+                                for (const QString &kw : std::as_const(blocked)) {
+                                    const QString k = kw.trimmed().toLower();
+                                    if (!k.isEmpty() && rl.contains(k))
+                                        stillIn << kw;
+                                }
+                                if (stillIn.isEmpty())
+                                    continue; // clean → retry with the regenerated FAQ
+                                appendAplusLog(progressUi.logPtr,
+                                    tr("  ⚠ Regenerated FAQ STILL contains %1 — not resubmitting "
+                                       "automatically; asking you.").arg(stillIn.join(QStringLiteral(", "))));
+                            } else {
+                                appendAplusLog(progressUi.logPtr,
+                                    tr("  ⚠ CLI regeneration returned empty output — keeping original FAQ"));
                             }
-                            appendAplusLog(progressUi.logPtr,
-                                tr("  ⚠ CLI regeneration returned empty output — keeping original FAQ"));
                         }
 
                         // All retries exhausted (or no CLI / non-keyword failure).
@@ -3514,13 +3548,29 @@ QCoro::Task<void> PaneSizing::_uploadAplusContent()
                         if (!allBlockedKeywords.isEmpty() && !faqText.isEmpty()) {
                             bool userSkippedFaq = false;
                             while (true) {
+                                // Note whether the flagged words are even in the FAQ — if
+                                // not, regenerating won't help and the user should skip.
+                                QStringList notInFaq;
+                                {
+                                    const QString fl = faqText.toLower();
+                                    for (const QString &kw : std::as_const(allBlockedKeywords)) {
+                                        const QString k = kw.trimmed().toLower();
+                                        if (!k.isEmpty() && !fl.contains(k))
+                                            notInFaq << kw;
+                                    }
+                                }
+                                const QString faqNote = (notInFaq.size() == allBlockedKeywords.size())
+                                    ? tr("\n\nNONE of these words are in the FAQ text — the FAQ is "
+                                         "probably not the cause; \"Skip FAQ\" is unlikely to help "
+                                         "either. Check the product's title/bullets for these words.")
+                                    : QString{};
                                 const QString detail = tr(
                                     "The FAQ was rejected by Amazon %1 time(s).\n\n"
-                                    "All forbidden words found: %2\n\n"
+                                    "All forbidden words found: %2%3\n\n"
                                     "Skip FAQ and upload without it, regenerate and retry, "
                                     "or interrupt the entire upload?")
                                         .arg(faqAttempt)
-                                        .arg(allBlockedKeywords.join(QStringLiteral(", ")));
+                                        .arg(allBlockedKeywords.join(QStringLiteral(", ")), faqNote);
                                 bool doAbort = false, doSkip = false;
                                 {
                                     // Scoped so QMessageBox is destroyed before co_await.
@@ -10993,6 +11043,9 @@ QCoro::Task<void> PaneSizing::_regenerateFaqCleaned(AbstractCli *cli, QString fa
         + cleanedDesc
         + QStringLiteral("\n\nRules:\n"
                          "- Remove or replace every Q&A that references a forbidden topic.\n"
+                         "- Do NOT introduce a synonym or alternative wording for a forbidden "
+                         "term (e.g. replacing one banned material/claim word with another word "
+                         "for the same thing) — describe it generically or drop it.\n"
                          "- Keep the Q:/A: format exactly.\n"
                          "- Return ONLY the FAQ, no extra text.\n\nCURRENT FAQ:\n")
         + faqText;

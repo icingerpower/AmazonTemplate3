@@ -30,7 +30,7 @@ DialogReviewReplies::DialogReviewReplies(const QList<CaseDraft> &drafts, QWidget
 
     m_letUserSend = new QCheckBox(
         tr("Let me click Send myself in the browser (fill + attach only, don't auto-send)"), this);
-    m_letUserSend->setChecked(false); // auto-send by default
+    m_letUserSend->setChecked(true); // manual send by default — user confirms in the browser
     outer->addWidget(m_letUserSend);
 
     auto *scroll = new QScrollArea(this);
