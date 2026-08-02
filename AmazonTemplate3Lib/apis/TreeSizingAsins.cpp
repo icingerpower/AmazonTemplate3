@@ -662,23 +662,23 @@ QCoro::Task<void> TreeSizingAsins::recordAPlusUploaded(
 
 void TreeSizingAsins::setSku(const QString& asin, const QString& sku)
 {
+    // Update EVERY row matching the ASIN, not just the first one: a standalone
+    // product is its own single child (same ASIN on the parent and child rows),
+    // so returning after the parent match would leave the child row without a
+    // SKU — and downstream consumers (e.g. the Temu draft) read child rows.
     for (int fi = 0; fi < m_families.size(); ++fi) {
         ParentItem& p = m_families[fi];
-        if (p.asin == asin) {
-            if (p.sku == sku) return;
+        if (p.asin == asin && p.sku != sku) {
             p.sku = sku;
             const QModelIndex idx = _makeTopIndex(fi, SKU);
             emit dataChanged(idx, idx, {Qt::DisplayRole});
-            return;
         }
         for (int ci = 0; ci < p.children.size(); ++ci) {
             ChildItem& c = p.children[ci];
-            if (c.asin == asin) {
-                if (c.sku == sku) return;
+            if (c.asin == asin && c.sku != sku) {
                 c.sku = sku;
                 const QModelIndex idx = _makeChildIndex(fi, ci, SKU);
                 emit dataChanged(idx, idx, {Qt::DisplayRole});
-                return;
             }
         }
     }

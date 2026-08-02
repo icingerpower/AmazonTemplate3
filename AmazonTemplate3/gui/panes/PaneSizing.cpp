@@ -613,12 +613,18 @@ QString PaneSizing::_findExistingProductDir(const QString &asin, const QString &
     // region will get a DIFFERENT parent ASIN depending on which marketplace
     // happened to respond. The SKU is assigned once by the seller and is the
     // same everywhere, so folders are named "{sku}-{title}" — check that first
-    // (cheap, no settings.ini read needed). In practice the Catalog Items API
-    // rarely returns a SKU for a plain ASIN lookup, so this is mostly future-proofing.
-    if (!sku.isEmpty()) {
-        const QString skuPrefix = sku + QLatin1Char('-');
+    // (cheap, no settings.ini read needed). The Catalog Items API rarely
+    // returns a SKU for a plain ASIN lookup, so when the caller passes none,
+    // recover it from the global report cache before giving up on this check.
+    QString effSku = sku;
+    if (effSku.isEmpty())
+        effSku = _skuFromGlobalCache(asin);
+    if (effSku.isEmpty() && !requestedAsin.isEmpty() && requestedAsin != asin)
+        effSku = _skuFromGlobalCache(requestedAsin);
+    if (!effSku.isEmpty()) {
+        const QString skuPrefix = effSku + QLatin1Char('-');
         for (const QString &entry : entries) {
-            if (entry == sku || entry.startsWith(skuPrefix))
+            if (entry == effSku || entry.startsWith(skuPrefix))
                 return sizingRoot.filePath(entry);
         }
     }
@@ -642,7 +648,7 @@ QString PaneSizing::_findExistingProductDir(const QString &asin, const QString &
     // Legacy folders (named "{asin}-{title}" from before the SKU-based naming)
     // won't be found by name above. Fall back to checking every folder's
     // recorded SKUs (sizing/skus/*) for a value match.
-    if (!sku.isEmpty()) {
+    if (!effSku.isEmpty()) {
         QString firstMatch;
         for (const QString &entry : entries) {
             QSettings s(sizingRoot.filePath(entry) + QStringLiteral("/settings.ini"),
@@ -651,7 +657,7 @@ QString PaneSizing::_findExistingProductDir(const QString &asin, const QString &
             const QStringList keys = s.childKeys();
             bool matched = false;
             for (const QString &k : keys) {
-                if (s.value(k).toString().trimmed() == sku) { matched = true; break; }
+                if (s.value(k).toString().trimmed() == effSku) { matched = true; break; }
             }
             s.endGroup();
             if (!matched)
@@ -679,22 +685,50 @@ QString PaneSizing::_findExistingProductDir(const QString &asin, const QString &
     return QString();
 }
 
+QString PaneSizing::_skuFromGlobalCache(const QString &asin) const
+{
+    if (asin.isEmpty() || !m_workingDir.exists())
+        return {};
+    const QDir sizingRoot(m_workingDir.filePath(QStringLiteral("sizing")));
+    const QStringList caches = sizingRoot.entryList(
+        {QStringLiteral("sku_cache_*.json")}, QDir::Files, QDir::Name);
+    for (const QString &c : caches) {
+        QFile f(sizingRoot.filePath(c));
+        if (!f.open(QIODevice::ReadOnly))
+            continue;
+        const QString sku = QJsonDocument::fromJson(f.readAll())
+                                .object().value(asin).toString().trimmed();
+        if (!sku.isEmpty() && sku != asin)
+            return sku;
+    }
+    return {};
+}
+
 QDir PaneSizing::_resolveProductDir(const QString &asin, const QString &title, const QString &sku,
                                      const QString &requestedAsin)
 {
     if (!m_workingDir.exists())
         return m_workingDir;
 
-    const QString existing = _findExistingProductDir(asin, sku, requestedAsin);
+    // The Catalog Items API virtually never returns a seller SKU for a plain
+    // ASIN load, so `sku` is usually empty here. Recover it from the global
+    // report cache (offline) so the folder can still be named "{sku}-{title}".
+    QString effectiveSku = sku;
+    if (effectiveSku.isEmpty())
+        effectiveSku = _skuFromGlobalCache(asin);
+    if (effectiveSku.isEmpty() && !requestedAsin.isEmpty() && requestedAsin != asin)
+        effectiveSku = _skuFromGlobalCache(requestedAsin);
+
+    const QString existing = _findExistingProductDir(asin, effectiveSku, requestedAsin);
     if (!existing.isEmpty())
         return QDir(existing);
 
     const QDir sizingRoot(m_workingDir.filePath(QStringLiteral("sizing")));
     const QString simplified = simplifyForDirName(title);
     // Name by SKU when known — it's stable across marketplaces, unlike the
-    // parent ASIN (see _findExistingProductDir). Fall back to the ASIN when no
-    // SKU was returned (e.g. missing seller SKU in the catalog response).
-    const QString key = sku.isEmpty() ? asin : sku;
+    // parent ASIN (see _findExistingProductDir). Fall back to the ASIN only
+    // when no SKU could be recovered from anywhere.
+    const QString key = effectiveSku.isEmpty() ? asin : effectiveSku;
     const QString dirName = simplified.isEmpty() ? key : key + QLatin1Char('-') + simplified;
     m_workingDir.mkpath(QStringLiteral("sizing/") + dirName);
     return QDir(sizingRoot.filePath(dirName));
@@ -764,6 +798,7 @@ void PaneSizing::_loadProductSettings()
     // even when sizing settings have never been saved for this product.
     _initAplusContent();
     _refreshSizeImageUploadStatus();
+    _updateTemuCreatedLabel();
 
     QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
                  QSettings::IniFormat);
@@ -930,6 +965,7 @@ void PaneSizing::_ensureModel(const QDir &dir)
                 m_shoeWidths.clear();
                 ui->lineEditSubWorkingDir->clear();
                 _refreshSizeImageUploadStatus();
+                _updateTemuCreatedLabel();
                 m_aplusContent.reset();
                 if (m_aplusModel) {
                     ui->aplusTreeView->setModel(nullptr);
@@ -3713,6 +3749,34 @@ void PaneSizing::_rebuildAplusMenu()
 // Builds the store-selection table on the Temu page: one checkable row per
 // configured Temu store (Settings). At most one store may be selected per
 // country — checking a second store of the same country unchecks the first.
+void PaneSizing::_updateTemuCreatedLabel()
+{
+    if (!m_productWorkingDir.exists()) {
+        ui->labelTemuCreated->clear();
+        ui->labelTemuCreated->setToolTip(QString{});
+        return;
+    }
+    QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                QSettings::IniFormat);
+    QStringList countries =
+        s.value(QStringLiteral("temu/publishedCountries")).toStringList();
+    for (QString &c : countries) c = c.toUpper();
+    countries.removeDuplicates();
+    countries.sort();
+    if (countries.isEmpty()) {
+        ui->labelTemuCreated->setText(tr("Not created in temu"));
+        ui->labelTemuCreated->setStyleSheet(
+            QStringLiteral("color: red; font-weight: bold;"));
+        ui->labelTemuCreated->setToolTip(QString{});
+    } else {
+        ui->labelTemuCreated->setText(tr("Created in temu"));
+        ui->labelTemuCreated->setStyleSheet(
+            QStringLiteral("color: green; font-weight: bold;"));
+        ui->labelTemuCreated->setToolTip(
+            tr("Published countries: %1").arg(countries.join(QLatin1Char(' '))));
+    }
+}
+
 void PaneSizing::_initTemuStoreTable()
 {
     if (!m_temuStoreSelectModel) {
@@ -3925,6 +3989,13 @@ QCoro::Task<void> PaneSizing::onTemuCreateOrUpdate()
             if (draft.parentSku.isEmpty()) {
                 draft.parentSku = m_treeModel->data(
                     m_treeModel->index(i, TreeSizingAsins::SKU), Qt::DisplayRole).toString().trimmed();
+                // A SKU cell holding the ASIN is not a seller SKU — leave the
+                // parent SKU empty so the dialog falls back to the first
+                // (resolved) child SKU for externalGoodsId.
+                const QString pAsin = m_treeModel->data(
+                    m_treeModel->index(i, TreeSizingAsins::ASIN), Qt::DisplayRole).toString().trimmed();
+                if (draft.parentSku == pAsin)
+                    draft.parentSku.clear();
             }
             for (int j = 0; j < m_treeModel->rowCount(pi); ++j) {
                 const QString asin = m_treeModel->data(
@@ -3934,7 +4005,10 @@ QCoro::Task<void> PaneSizing::onTemuCreateOrUpdate()
                 if (asin.isEmpty() || _excludedColorAsins().contains(asin))
                     continue;
                 DialogTemuCreateProduct::Draft::Sku s;
-                s.outSkuSn = sku.isEmpty() ? asin : sku;
+                // Never fall back to the ASIN here — a missing SKU is resolved
+                // (or refused) after this loop. A tree SKU equal to the ASIN is
+                // treated as missing too.
+                s.outSkuSn = (sku == asin) ? QString{} : sku;
                 s.asin = asin;
                 s.color = m_treeModel->data(
                     m_treeModel->index(j, TreeSizingAsins::Color, pi), Qt::DisplayRole).toString().trimmed();
@@ -3952,6 +4026,51 @@ QCoro::Task<void> PaneSizing::onTemuCreateOrUpdate()
                     draft.originCountry = dims.originCountry;
                 draft.skus.append(s);
             }
+        }
+    }
+
+    // Resolve any missing seller SKU through the same pipeline as size-image
+    // uploads: settings.ini cache → all-listings report (includes inactive /
+    // zero-inventory listings) → FBA Inventory API → manual entry. A Temu offer
+    // must NEVER be created with the ASIN as SKU, so refuse to open the dialog
+    // if anything remains unresolved.
+    {
+        QList<AsinSku> missing;
+        for (const auto &s : draft.skus)
+            if (s.outSkuSn.isEmpty())
+                missing.append(AsinSku{s.asin, QString{}});
+
+        if (!missing.isEmpty()) {
+            bool cancelled = false;
+            co_await _resolveSkus(missing, QStringLiteral("A13V1IB3VIYZZH"), &cancelled);
+            if (cancelled)
+                co_return;
+
+            QHash<QString, QString> resolved;
+            for (const auto &m : missing)
+                if (!m.sku.isEmpty() && m.sku != m.asin)
+                    resolved.insert(m.asin, m.sku);
+            for (auto &s : draft.skus) {
+                if (!s.outSkuSn.isEmpty())
+                    continue;
+                s.outSkuSn = resolved.value(s.asin);
+                // Reflect the resolved SKU in the tree so the fix is visible.
+                if (!s.outSkuSn.isEmpty() && m_treeModel)
+                    m_treeModel->setSku(s.asin, s.outSkuSn);
+            }
+        }
+
+        QStringList unresolved;
+        for (const auto &s : draft.skus)
+            if (s.outSkuSn.isEmpty() || s.outSkuSn == s.asin)
+                unresolved.append(s.asin);
+        if (!unresolved.isEmpty()) {
+            QMessageBox::critical(this, tr("Create or update"),
+                tr("No seller SKU could be resolved for:\n%1\n\n"
+                   "Refusing to publish to Temu using the ASIN as SKU.\n"
+                   "Enter the SKU manually in the ASIN tree (double-click the "
+                   "SKU cell) and try again.").arg(unresolved.join(QStringLiteral(", "))));
+            co_return;
         }
     }
 
@@ -4065,6 +4184,8 @@ QCoro::Task<void> PaneSizing::onTemuCreateOrUpdate()
     DialogTemuCreateProduct dlg(appKey, appSecret, imgbbKey, cli,
                                 std::move(draft), std::move(picks), std::move(pricing), this);
     dlg.exec();
+    // The dialog records temu/publishedCountries in settings.ini on success.
+    _updateTemuCreatedLabel();
 }
 
 void PaneSizing::onAplusExcludedColors()

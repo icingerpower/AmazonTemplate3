@@ -225,6 +225,11 @@ private:
                                      const QString &requestedAsin) const;
     QDir _resolveProductDir(const QString &asin, const QString &title, const QString &sku,
                              const QString &requestedAsin);
+    // Offline ASIN → seller-SKU lookup in the global report caches
+    // ({workingDir}/sizing/sku_cache_*.json). Used to recover the SKU when the
+    // Catalog Items API returned none, so product folders can be named
+    // "{sku}-{title}" instead of falling back to the parent ASIN.
+    QString _skuFromGlobalCache(const QString &asin) const;
     void _saveProductSettings();
     void _loadProductSettings();
     void _populateSizeRangeCombos();
@@ -349,6 +354,9 @@ private:
 
     // Temu store selection table (one selectable store per country).
     void _initTemuStoreTable();
+    // Green "Created in temu" / red "Not created in temu" label on the Temu
+    // page, driven by temu/publishedCountries in the product's settings.ini.
+    void _updateTemuCreatedLabel();
     QList<QPair<QString, QString>> _selectedTemuStores() const;
     QCoro::Task<void> onTemuCreateOrUpdate();
     // Resolves m_productType (Amazon browse-node key) from cache or a quick API
