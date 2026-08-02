@@ -153,6 +153,10 @@ private:
     QCoro::Task<void> _fetchAmazonPrices();  // per-SKU Amazon price → base/reference
     QCoro::Task<void> _fetchAmazonStock();   // per-SKU Amazon qty → Amz Qty col + stock
     QCoro::Task<void> _fetchAmazonData();     // prices then stock, in sequence
+    // True once the Amazon stock fetch completed without error — publish uses
+    // it to avoid shipping the default quantity 0 when the async fetch hasn't
+    // finished (or failed) yet.
+    bool m_stockFetched = false;
     void _applyRowToAll();                   // copy current row's price+packaging to all
     // Persist / restore the image selection+order and the filled attributes to
     // the product's settings.ini, so a failed upload doesn't cost the ~3 min of

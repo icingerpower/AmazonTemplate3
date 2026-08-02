@@ -584,9 +584,10 @@ void DialogTemuCreateProduct::_loadCountryText(const QString &country)
         }
     }
     if (!m_pageText.contains(country)) {
-        // No localized text for this country — fall back to the source draft text.
-        m_pageText.insert(country, { m_draft.title,
-                                     m_draft.bulletPoints.join(QLatin1Char('\n')), QString{} });
+        // NEVER fall back to the source draft here — that showed (and published)
+        // the source language (e.g. German) on the FR/IT/ES page. Missing text
+        // stays EMPTY until the user generates it in the right language.
+        m_pageText.insert(country, TemuPageText{});
     }
     const TemuPageText &t = m_pageText.value(country);
     m_titleEdit->setText(t.title);
@@ -596,8 +597,8 @@ void DialogTemuCreateProduct::_loadCountryText(const QString &country)
     if (m_draft.textByCountry.contains(country))
         m_logEdit->appendPlainText(tr("Loaded %1 listing text from Amazon.").arg(country));
     else
-        m_logEdit->appendPlainText(tr("No %1 text found on Amazon — showing source text; "
-            "click Regenerate/Generate to write it in %2.")
+        m_logEdit->appendPlainText(tr("No %1 text found on Amazon — fields left empty; "
+            "click Regenerate/Generate to write them in %2.")
             .arg(country, _storeLanguage().isEmpty() ? country : _storeLanguage()));
 }
 
@@ -1035,14 +1036,16 @@ void DialogTemuCreateProduct::done(int r)
 }
 
 // Original (pre-regeneration) text for a country: the Amazon-localized title +
-// bullets when we have them, else the source draft. Description starts empty.
+// bullets when we have them. Description starts empty. Without localized text
+// the original is EMPTY — never the source draft, whose language is wrong for
+// every other country.
 TemuPageText DialogTemuCreateProduct::_originalCountryText(const QString &country) const
 {
     if (m_draft.textByCountry.contains(country)) {
         const auto &lt = m_draft.textByCountry.value(country);
         return { lt.title, lt.bullets.join(QLatin1Char('\n')), QString{} };
     }
-    return { m_draft.title, m_draft.bulletPoints.join(QLatin1Char('\n')), QString{} };
+    return TemuPageText{};
 }
 
 void DialogTemuCreateProduct::_restoreTextState()
@@ -1549,32 +1552,44 @@ QCoro::Task<void> DialogTemuCreateProduct::_fetchAmazonStock()
     co_await src->fetchInventory(skus, &records,
         [this](const QString &m) { m_logEdit->appendPlainText(QStringLiteral("  ") + m); });
 
-    QHash<QString, int> availBySku;
-    for (const StockRecord &rec : records)
-        availBySku.insert(rec.sku, rec.available);
+    // Key case-insensitively and SUM duplicate records for the same SKU — a
+    // second record must not overwrite the first (that turned a positive
+    // Amazon quantity into 0).
+    QHash<QString, int> availBySku; // lower-cased SKU → summed available
+    for (const StockRecord &rec : records) {
+        const QString key = rec.sku.toLower();
+        if (rec.available > 0)
+            availBySku[key] = qMax(0, availBySku.value(key)) + rec.available;
+        else if (!availBySku.contains(key))
+            availBySku.insert(key, rec.available);
+    }
 
     for (int r = 0; r < m_skuTable->rowCount(); ++r) {
         const QString sku = m_skuTable->item(r, kColSku)->text();
-        if (!availBySku.contains(sku)) {
+        if (!availBySku.contains(sku.toLower())) {
             m_skuTable->item(r, kColAmzQty)->setText(QStringLiteral("?"));
             continue;
         }
-        const int avail = availBySku.value(sku);
+        const int avail = availBySku.value(sku.toLower());
         m_skuTable->item(r, kColAmzQty)->setText(avail < 0 ? QStringLiteral("?")
                                                            : QString::number(avail));
         // 1 in stock when Amazon has ≥ 2 units, else 0.
         m_skuTable->item(r, kColStock)->setText(avail >= 2 ? QStringLiteral("1")
                                                            : QStringLiteral("0"));
     }
+    if (src->lastError().isEmpty())
+        m_stockFetched = true;
     m_logEdit->appendPlainText(tr("Stock set: 1 where Amazon ≥ 2 units, else 0 "
                                   "(edit any cell to override)."));
 }
 
-// Prices then stock, in sequence, so the log stays readable.
+// Stock first (one batched call, fast), then prices (one call per SKU, slow) —
+// so the quantities are correct even if the user publishes while the price
+// fetch is still running.
 QCoro::Task<void> DialogTemuCreateProduct::_fetchAmazonData()
 {
-    co_await _fetchAmazonPrices();
     co_await _fetchAmazonStock();
+    co_await _fetchAmazonPrices();
 }
 
 void DialogTemuCreateProduct::_applyRowToAll()
@@ -1628,7 +1643,8 @@ QCoro::Task<void> DialogTemuCreateProduct::_generateText()
     const QString prompt = tr(
         "You write Temu product listings. From the data below, produce STRICT JSON "
         "{\"title\":\"…\",\"bullets\":[\"…\"],\"description\":\"…\"} — a concise selling "
-        "title (max 100 chars), 3-5 bullet points, and a short description. No markdown.\n\n"
+        "title (max 100 chars), 3-5 bullet points (each bullet MUST start with exactly one "
+        "relevant emoji, then a space), and a short description. No markdown.\n\n"
         "Product: %1\nBrand: %2\nExisting bullets:\n%3")
         .arg(m_draft.title, m_draft.brand, m_draft.bulletPoints.join(QLatin1Char('\n')))
         + _titleKeywordInstruction() + _variationInstruction() + _titleGuidance()
@@ -1684,7 +1700,8 @@ QCoro::Task<void> DialogTemuCreateProduct::_regenerateField(int which)
     // newlines/quotes routinely produces invalid JSON), so we request plain text
     // and accept it directly, while still tolerating a JSON reply.
     const QString shape = which == 1
-        ? QStringLiteral("STRICT JSON {\"bullets\":[\"…\"]} (3-5 concise selling bullet points), no markdown")
+        ? QStringLiteral("STRICT JSON {\"bullets\":[\"…\"]} (3-5 concise selling bullet points, "
+                         "each starting with exactly one relevant emoji followed by a space), no markdown")
         : which == 0 ? QStringLiteral("plain text only — a concise selling title, max 100 chars, no quotes, no markdown")
                      : QStringLiteral("plain text only — a short compelling description, no markdown, no JSON");
 
@@ -2243,6 +2260,25 @@ QCoro::Task<void> DialogTemuCreateProduct::_publish()
             QMessageBox::warning(this, tr("Price"),
                 tr("Set a base price for every variation (row %1 is empty).").arg(r + 1));
             co_return;
+        }
+    }
+
+    // The stock fetch runs asynchronously at dialog-open; publishing before it
+    // finished (or after it failed) would create the page with the default
+    // quantity 0 even though Amazon has stock. Fetch it now when needed.
+    if (!m_stockFetched) {
+        m_logEdit->appendPlainText(tr("Amazon stock not fetched yet — fetching before publish…"));
+        co_await _fetchAmazonStock();
+    }
+    // Rule: quantity is at least 1 whenever Amazon has more than 1 unit. A 0
+    // there means the fetch raced or a stale default — fix it, don't ship it.
+    for (int r = 0; r < m_skuTable->rowCount(); ++r) {
+        const int amz = m_skuTable->item(r, kColAmzQty)->text().trimmed().toInt();
+        const int qty = m_skuTable->item(r, kColStock)->text().trimmed().toInt();
+        if (qty <= 0 && amz > 1) {
+            m_skuTable->item(r, kColStock)->setText(QStringLiteral("1"));
+            m_logEdit->appendPlainText(tr("  %1: quantity 0 → 1 (Amazon has %2)")
+                .arg(m_skuTable->item(r, kColSku)->text()).arg(amz));
         }
     }
 

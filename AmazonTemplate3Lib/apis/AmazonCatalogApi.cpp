@@ -7,6 +7,7 @@
 // form of the same GCC 13 bug).
 #pragma GCC optimize("O1")
 #include "AmazonCatalogApi.h"
+#include "AmazonAplusApi.h"
 #include "AmazonMarketplace.h"
 
 #include <QNetworkAccessManager>
@@ -900,15 +901,47 @@ QCoro::Task<void> AmazonCatalogApi::fetchPackageDims(
     co_return;
 }
 
+// Language-STRICT listing text: only entries whose language_tag matches the
+// marketplace's own language are returned. Amazon mixes the seller's source
+// language (e.g. de_DE) into other marketplaces' attributes, and summaries
+// carry no language tag at all — using either published German text on the
+// FR/IT/ES pages. When nothing matches, title/bullets stay EMPTY: an empty
+// field is recoverable, a wrong-language page is not.
 QCoro::Task<void> AmazonCatalogApi::fetchListingText(
     QString marketplaceId, QString asin, QString* title, QStringList* bullets)
 {
     title->clear();
     bullets->clear();
-    AsinItem item;
-    co_await _fetchAsinItem(asin, marketplaceId, &item);
-    *title   = item.title;
-    *bullets = item.bulletPoints;
+
+    static const QStringList kData = {QStringLiteral("attributes")};
+    QByteArray data;
+    co_await _doGet(marketplaceId, asin, kData, &data);
+    if (data.isEmpty())
+        co_return;
+
+    // "fr-FR" → "fr"; language_tag arrives as "fr_FR" or "fr-FR".
+    const QString lang = AmazonAplusApi::localeForMarketplace(marketplaceId).left(2);
+    const QJsonObject attrs = QJsonDocument::fromJson(data).object()
+                                  .value(QStringLiteral("attributes")).toObject();
+    auto langMatches = [&lang](const QJsonObject &o) {
+        return o.value(QStringLiteral("language_tag")).toString()
+            .startsWith(lang, Qt::CaseInsensitive);
+    };
+
+    for (const QJsonValue &v : attrs.value(QStringLiteral("item_name")).toArray()) {
+        const QJsonObject o = v.toObject();
+        const QString val = o.value(QStringLiteral("value")).toString();
+        if (langMatches(o) && !val.isEmpty()) {
+            *title = val;
+            break;
+        }
+    }
+    for (const QJsonValue &v : attrs.value(QStringLiteral("bullet_point")).toArray()) {
+        const QJsonObject o = v.toObject();
+        const QString val = o.value(QStringLiteral("value")).toString();
+        if (langMatches(o) && !val.isEmpty() && !bullets->contains(val))
+            bullets->append(val);
+    }
     co_return;
 }
 
