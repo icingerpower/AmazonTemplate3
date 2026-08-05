@@ -193,6 +193,12 @@ public:
                                          bool* success,
                                          QString* detailsOut = nullptr);
 
+    // True for SKUs Amazon generates for refurbished/graded offers (they start
+    // with "amzn", e.g. "amzn.gr.CJLY…-GD"). Those must never be picked when
+    // resolving the seller's own SKU for an ASIN.
+    static bool isRefurbishedSku(const QString &sku)
+    { return sku.startsWith(QLatin1String("amzn"), Qt::CaseInsensitive); }
+
     // Fetches the parent SKU for a child listing by reading its variation
     // relationships. Virtual parent ASINs never appear in listing reports, so
     // this is the only reliable way to resolve a parent SKU from a child SKU.

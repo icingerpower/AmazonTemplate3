@@ -1776,10 +1776,16 @@ QCoro::Task<void> AmazonCatalogApi::checkListing(QString marketplaceId, QString 
             if (rel.value(QStringLiteral("type")).toString() != QStringLiteral("VARIATION"))
                 continue;
             const QJsonArray parents = rel.value(QStringLiteral("parentSkus")).toArray();
-            if (!parents.isEmpty() && out->parentSku.isEmpty())
-                out->parentSku = parents.first().toString();
-            for (const QJsonValue &cv : rel.value(QStringLiteral("childSkus")).toArray())
-                out->childSkus << cv.toString();
+            for (const QJsonValue &pv : parents) {
+                const QString p = pv.toString();
+                if (!p.isEmpty() && !isRefurbishedSku(p) && out->parentSku.isEmpty())
+                    out->parentSku = p;
+            }
+            for (const QJsonValue &cv : rel.value(QStringLiteral("childSkus")).toArray()) {
+                const QString c = cv.toString();
+                if (!c.isEmpty() && !isRefurbishedSku(c))
+                    out->childSkus << c;
+            }
             const QJsonObject theme = rel.value(QStringLiteral("variationTheme")).toObject();
             if (out->variationTheme.isEmpty())
                 out->variationTheme = theme.value(QStringLiteral("theme")).toString();
@@ -2891,9 +2897,10 @@ QCoro::Task<void> AmazonCatalogApi::fetchParentSku(QString marketplaceId,
 
         // Flat layout — parentSkus is an array (e.g. ["P-CAFTAN-CJYD2315867"])
         const QJsonArray flatArr = outerObj.value(QStringLiteral("parentSkus")).toArray();
-        if (!flatArr.isEmpty()) {
-            const QString flat = flatArr.first().toString();
-            if (!flat.isEmpty()) {
+        // Refurbished ("amzn…") SKUs are never the seller's parent SKU — skip them.
+        for (const QJsonValue &fv : flatArr) {
+            const QString flat = fv.toString();
+            if (!flat.isEmpty() && !isRefurbishedSku(flat)) {
                 *parentSkuOut = flat;
                 qDebug() << "AmazonCatalogApi: fetchParentSku" << childSku
                          << "→ parentSku (flat) =" << flat;
@@ -2906,9 +2913,9 @@ QCoro::Task<void> AmazonCatalogApi::fetchParentSku(QString marketplaceId,
         for (const QJsonValue &innerVal : inner) {
             const QJsonArray nestedArr = innerVal.toObject()
                                             .value(QStringLiteral("parentSkus")).toArray();
-            if (!nestedArr.isEmpty()) {
-                const QString nested = nestedArr.first().toString();
-                if (!nested.isEmpty()) {
+            for (const QJsonValue &nv : nestedArr) {
+                const QString nested = nv.toString();
+                if (!nested.isEmpty() && !isRefurbishedSku(nested)) {
                     *parentSkuOut = nested;
                     qDebug() << "AmazonCatalogApi: fetchParentSku" << childSku
                              << "→ parentSku (nested) =" << nested;
@@ -2928,7 +2935,7 @@ QCoro::Task<void> AmazonCatalogApi::fetchParentSku(QString marketplaceId,
     for (const QJsonValue &av : relAttr) {
         const QString attrParentSku = av.toObject()
                                         .value(QStringLiteral("parent_sku")).toString();
-        if (!attrParentSku.isEmpty()) {
+        if (!attrParentSku.isEmpty() && !isRefurbishedSku(attrParentSku)) {
             *parentSkuOut = attrParentSku;
             qDebug() << "AmazonCatalogApi: fetchParentSku" << childSku
                      << "→ parentSku (from attributes) =" << attrParentSku;
@@ -3816,7 +3823,10 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllFbaSkus(QString marketplaceId,
             const QJsonObject obj = v.toObject();
             const QString asin    = obj.value(QStringLiteral("asin")).toString();
             const QString sku     = obj.value(QStringLiteral("sellerSku")).toString();
-            if (!asin.isEmpty() && !sku.isEmpty() && !asinToSku->contains(asin))
+            // Skip Amazon-generated refurbished SKUs ("amzn.gr.…") — they must
+            // never win over the seller's own SKU for the same ASIN.
+            if (!asin.isEmpty() && !sku.isEmpty() && !isRefurbishedSku(sku)
+                && !asinToSku->contains(asin))
                 asinToSku->insert(asin, sku);
         }
 
@@ -4089,7 +4099,9 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
 
             if (isAsin) {
                 if (!sku.isEmpty() && !asin.isEmpty()) {
-                    if (!asinToSku->contains(asin))
+                    // Refurbished offers ("amzn.gr.…") share the ASIN but are not
+                    // the seller's SKU — never let them resolve the ASIN's SKU.
+                    if (!isRefurbishedSku(sku) && !asinToSku->contains(asin))
                         asinToSku->insert(asin, sku);
                     if (asinToInventory && qtyCol >= 0 && qtyCol < cols.size())
                         (*asinToInventory)[asin] += cols.at(qtyCol).trimmed().toInt();

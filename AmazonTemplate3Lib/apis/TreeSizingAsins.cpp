@@ -337,6 +337,7 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
         p.asin = family.parentAsin;
         p.sku  = family.parentSku;
         if (p.sku.isEmpty()) p.sku = asinsWithSkus.value(p.asin);
+        if (AmazonCatalogApi::isRefurbishedSku(p.sku)) p.sku.clear();
 
         // Regex shared across children: "XL=42", "M=10", etc.
         static const QRegularExpression kSizeRe(QStringLiteral(R"(([A-Z]{1,3})\s*=\s*\d+)"));
@@ -346,6 +347,7 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
             ci.asin         = c.asin;
             ci.sku          = c.sku;
             if (ci.sku.isEmpty()) ci.sku = asinsWithSkus.value(ci.asin);
+            if (AmazonCatalogApi::isRefurbishedSku(ci.sku)) ci.sku.clear();
             ci.size         = c.size;
             ci.color        = c.color;
             ci.title        = c.title;
@@ -592,10 +594,12 @@ QCoro::Task<void> TreeSizingAsins::_findOrLoadFamily(QString asin, QString marke
     ParentItem p;
     p.asin = family.parentAsin;
     p.sku  = family.parentSku;
+    if (AmazonCatalogApi::isRefurbishedSku(p.sku)) p.sku.clear();
     for (const auto& c : family.children) {
         ChildItem ci;
         ci.asin         = c.asin;
         ci.sku          = c.sku;
+        if (AmazonCatalogApi::isRefurbishedSku(ci.sku)) ci.sku.clear();
         ci.size         = c.size;
         ci.color        = c.color;
         ci.title        = c.title;
@@ -662,6 +666,13 @@ QCoro::Task<void> TreeSizingAsins::recordAPlusUploaded(
 
 void TreeSizingAsins::setSku(const QString& asin, const QString& sku)
 {
+    // Refuse Amazon-generated refurbished SKUs ("amzn.gr.…") at the model
+    // boundary — whatever the source (live fetch, sku cache, settings.ini),
+    // they must never resolve an ASIN's SKU.
+    if (AmazonCatalogApi::isRefurbishedSku(sku)) {
+        qDebug() << "TreeSizingAsins: ignoring refurbished SKU" << sku << "for" << asin;
+        return;
+    }
     // Update EVERY row matching the ASIN, not just the first one: a standalone
     // product is its own single child (same ASIN on the parent and child rows),
     // so returning after the parent match would leave the child row without a
