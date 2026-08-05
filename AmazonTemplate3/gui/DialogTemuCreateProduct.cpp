@@ -50,12 +50,125 @@
 #include "AbstractInventorySource.h"
 #include "AbstractInventorySourceFactory.h"
 #include "MarketplaceTypes.h"
+#include "fillers/FillerSize.h"
 #include "../../common/workingdirectory/WorkingDirectoryManager.h"
 
 namespace {
 // Columns of the per-variation SKU table.
 enum SkuCol { kColSku = 0, kColAmazon, kColBase, kColRef, kColAmzQty, kColStock,
               kColWeight, kColL, kColW, kColH, kSkuColCount };
+
+// Language name for a country code, for CLI language instructions.
+QString languageForCountry(const QString &cc)
+{
+    static const QHash<QString, QString> kLang = {
+        {"FR","French"},{"DE","German"},{"IT","Italian"},{"ES","Spanish"},
+        {"NL","Dutch"},{"SE","Swedish"},{"PL","Polish"},{"BE","French"},
+        {"IE","English"},{"UK","English"},{"TR","Turkish"},{"PT","Portuguese"}};
+    return kLang.value(cc.toUpper());
+}
+
+// Letter sizes are the same across the EU (and expandable for COM/CA/IE), so
+// they can be carried over between countries as-is via FillerSize::convertSize.
+bool isLetterSize(const QString &t)
+{
+    static const QRegularExpression re(
+        QStringLiteral("^(?:XXS|XS|S|M|L|XL|XXL|XXXL|[2-8]XL)$"),
+        QRegularExpression::CaseInsensitiveOption);
+    return re.match(t.trimmed()).hasMatch();
+}
+
+// True when the size value is a WORD label ("Einheitsgröße", "Taille unique")
+// rather than something the tables can convert — those go to CLI translation.
+bool isTextualSizeLabel(const QString &s)
+{
+    static const QRegularExpression wordRe(QStringLiteral("[A-Za-zÀ-ÿ]{2,}"));
+    auto it = wordRe.globalMatch(s);
+    while (it.hasNext())
+        if (!isLetterSize(it.next().captured()))
+            return true;
+    return false;
+}
+
+// Converts one numeric size via the FillerSize table selected by the product's
+// sizing category, with an explicit success flag: unlike FillerSize::convertSize
+// (which returns the input unchanged on a miss), a miss here must NOT fill the
+// cell — publishing a number from the wrong country's size system is worse than
+// leaving it empty.
+using SizeTable = DialogTemuCreateProduct::SizeTable;
+bool convertNumericSize(double num, const QString &from, const QString &to,
+                        SizeTable table, QString *out)
+{
+    auto norm = [](const QString &c) {
+        return c == QLatin1String("US") ? QStringLiteral("COM") : c;
+    };
+    const QString f = norm(from), t = norm(to);
+    if (table == SizeTable::ShoesFemale || table == SizeTable::ShoesMale) {
+        const auto &rows = table == SizeTable::ShoesMale
+            ? FillerSize::SHOE_MALE_ADULT_SIZES : FillerSize::SHOE_FEMALE_ADULT_SIZES;
+        for (const auto &row : rows) {
+            if (row.contains(f) && row.contains(t) && qFuzzyCompare(row[f], num)) {
+                *out = QString::number(row[t], 'g', 4);
+                return true;
+            }
+        }
+        return false;
+    }
+    const int inum = qRound(num);
+    if (double(inum) != num) // exact: qFuzzyCompare breaks on 0 (US size 0)
+        return false;        // clothing tables are integer-only
+    const auto &rows = table == SizeTable::ClothingMale
+        ? FillerSize::CLOTHE_MALE_ADULT_SIZES : FillerSize::CLOTHE_FEMALE_ADULT_SIZES;
+    for (const auto &row : rows) {
+        if (row.contains(f) && row.contains(t) && row[f] == inum) {
+            *out = QString::number(row[t]);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Converts a whole size value between countries: every numeric token is
+// converted through the tables ("34-40" DE → "36-42" FR), letter sizes pass
+// through convertSize, separators are kept. Returns an empty string when ANY
+// token can't be converted — a partially/wrongly converted size must never be
+// filled in.
+QString convertSizeValue(const QString &src, const QString &from,
+                         const QString &to, SizeTable table)
+{
+    static const QRegularExpression tokRe(
+        QStringLiteral("[0-9]+(?:[.,][0-9]+)?|[A-Za-zÀ-ÿ]+"));
+    const bool isShoes = table == SizeTable::ShoesFemale || table == SizeTable::ShoesMale;
+    const QString gender = (table == SizeTable::ClothingMale
+                            || table == SizeTable::ShoesMale)
+        ? QStringLiteral("male") : QStringLiteral("female");
+    QString result;
+    int pos = 0;
+    bool any = false;
+    auto it = tokRe.globalMatch(src);
+    while (it.hasNext()) {
+        const auto m = it.next();
+        result += src.mid(pos, m.capturedStart() - pos);
+        const QString tok = m.captured();
+        bool okNum = false;
+        const double num = QString(tok).replace(QLatin1Char(','), QLatin1Char('.'))
+                               .toDouble(&okNum);
+        QString conv;
+        if (okNum) {
+            if (!convertNumericSize(num, from, to, table, &conv))
+                return {};
+        } else if (isLetterSize(tok)) {
+            conv = FillerSize::convertSize(tok.toUpper(), from, to, gender, isShoes);
+        } else {
+            return {}; // word label — CLI translation territory
+        }
+        result += conv;
+        any = true;
+        pos = m.capturedEnd();
+    }
+    result += src.mid(pos);
+    return any ? result : QString{};
+}
 } // namespace
 
 #include <QFuture>
@@ -249,18 +362,19 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     attrBoxLay->addWidget(aiPickAttrsBtn);
     attrBoxLay->addWidget(attrScroll);
 
-    auto *topSplit = new QSplitter(Qt::Horizontal, this);
-    topSplit->addWidget(imagesBox);
-    topSplit->addWidget(previewBox);
-    topSplit->addWidget(attrBox);
-    topSplit->setSizes({260, 320, 380});
+    m_topSplit = new QSplitter(Qt::Horizontal, this);
+    m_topSplit->addWidget(imagesBox);
+    m_topSplit->addWidget(previewBox);
+    m_topSplit->addWidget(attrBox);
+    m_topSplit->setSizes({260, 320, 380});
 
     // --- Text (each field individually regenerable via the CLI) ---
+    // No maximum heights on the text editors / log: a hard cap makes the
+    // vertical splitter handles immovable (the section can't grow), so the
+    // initial compactness comes from the splitter sizes instead.
     m_titleEdit = new QLineEdit(m_draft.title, this);
     m_bulletsEdit = new QPlainTextEdit(m_draft.bulletPoints.join(QLatin1Char('\n')), this);
-    m_bulletsEdit->setMaximumHeight(90);
     m_descEdit = new QPlainTextEdit(m_draft.description, this);
-    m_descEdit->setMaximumHeight(70);
     auto *genBtn = new QPushButton(tr("Generate all text"), this);
     auto *regenAllBtn = new QPushButton(tr("Regenerate all (every language)"), this);
     auto *resetTextBtn = new QPushButton(tr("Reset"), this);
@@ -426,7 +540,6 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     // --- Log + buttons ---
     m_logEdit = new QPlainTextEdit(this);
     m_logEdit->setReadOnly(true);
-    m_logEdit->setMaximumHeight(110);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
     m_publishBtn = buttons->addButton(tr("Create / Update"), QDialogButtonBox::AcceptRole);
@@ -435,10 +548,11 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     // Stack the resizable sections in a vertical splitter so the user can drag a
     // handle to give more room to whichever section they're working in — e.g.
     // enlarge the images/preview/attributes row when reordering images.
-    auto *mainSplit = new QSplitter(Qt::Vertical, this);
+    m_mainSplit = new QSplitter(Qt::Vertical, this);
+    QSplitter *mainSplit = m_mainSplit;
     mainSplit->setChildrenCollapsible(false);
 
-    mainSplit->addWidget(topSplit); // images | preview | attributes
+    mainSplit->addWidget(m_topSplit); // images | preview | attributes
 
     auto *textWidget = new QWidget(mainSplit);
     auto *textRow = new QHBoxLayout(textWidget);
@@ -465,8 +579,21 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     auto *treeWidget = new QWidget(mainSplit);
     auto *treeLay = new QVBoxLayout(treeWidget);
     treeLay->setContentsMargins(0, 0, 0, 0);
-    treeLay->addWidget(new QLabel(tr("Per-country variation names (from each Amazon marketplace — "
-                                     "edit any colour/size):"), treeWidget));
+    {
+        auto *treeHead = new QHBoxLayout;
+        m_completeVariantsBtn = new QPushButton(tr("Complete"), treeWidget);
+        m_completeVariantsBtn->setToolTip(
+            tr("Fills the missing cells from the countries that have a value:\n"
+               "• sizes are converted between the countries' size systems using "
+               "the product's sizing category (e.g. women: FR 40 = DE 38 = IT 44);\n"
+               "• colours (and textual size labels) are translated by the AI CLI "
+               "into each country's language.\n"
+               "Cells you edited are never overwritten."));
+        treeHead->addWidget(m_completeVariantsBtn);
+        treeHead->addWidget(new QLabel(tr("Per-country variation names (from each Amazon "
+                                          "marketplace — edit any colour/size):"), treeWidget), 1);
+        treeLay->addLayout(treeHead);
+    }
     treeLay->addWidget(m_variantTree);
     mainSplit->addWidget(treeWidget);
 
@@ -483,6 +610,18 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     mainSplit->setStretchFactor(2, 3); // variations table
     mainSplit->setStretchFactor(3, 2); // per-country tree
     mainSplit->setStretchFactor(4, 1); // log
+    // Initial compact distribution (the editors no longer carry max-height
+    // caps, so this is what keeps the first-open look tidy).
+    mainSplit->setSizes({340, 210, 200, 150, 110});
+
+    // Restore the splitter positions from the previous session (saved in done()).
+    {
+        QSettings st;
+        const QByteArray mainState = st.value(QStringLiteral("temuCreateDialog/mainSplitter")).toByteArray();
+        if (!mainState.isEmpty()) mainSplit->restoreState(mainState);
+        const QByteArray topState = st.value(QStringLiteral("temuCreateDialog/topSplitter")).toByteArray();
+        if (!topState.isEmpty()) m_topSplit->restoreState(topState);
+    }
 
     auto *lay = new QVBoxLayout(this);
     lay->addLayout(header);
@@ -500,6 +639,8 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     connect(genBtn, &QPushButton::clicked, this, [this]() { m_textTask = _generateText(); });
     connect(fetchPriceBtn, &QPushButton::clicked, this, [this]() { m_priceTask = _fetchAmazonData(); });
     connect(applyAllBtn, &QPushButton::clicked, this, [this]() { _applyRowToAll(); });
+    connect(m_completeVariantsBtn, &QPushButton::clicked, this,
+            [this]() { m_completeTask = _completeVariantNames(); });
     connect(editKwBtn, &QPushButton::clicked, this, [this]() {
         DialogKeywordTemplates dlg(this);
         // Offer the country codes of the configured Temu stores as the pick-list.
@@ -1032,6 +1173,10 @@ void DialogTemuCreateProduct::_applySavedAttributes()
 void DialogTemuCreateProduct::done(int r)
 {
     _saveWorkState(); // preserve the manual setup on Cancel / window close too
+    // Remember the splitter positions for the next dialog open.
+    QSettings st;
+    if (m_mainSplit) st.setValue(QStringLiteral("temuCreateDialog/mainSplitter"), m_mainSplit->saveState());
+    if (m_topSplit)  st.setValue(QStringLiteral("temuCreateDialog/topSplitter"),  m_topSplit->saveState());
     QDialog::done(r);
 }
 
@@ -1338,17 +1483,10 @@ QString DialogTemuCreateProduct::_titleKeywordInstruction() const
 // Language of the current store's country, for CLI generation.
 QString DialogTemuCreateProduct::_storeLanguage() const
 {
-    static const QHash<QString, QString> kLang = {
-        {"FR","French"},{"DE","German"},{"IT","Italian"},{"ES","Spanish"},
-        {"NL","Dutch"},{"SE","Swedish"},{"PL","Polish"},{"BE","French"},
-        {"IE","English"},{"UK","English"},{"TR","Turkish"},{"PT","Portuguese"}};
     // Key off the country currently shown in the text editors (the language the
     // user is viewing/regenerating), not the publish-target store dropdown — the
     // two are independent now that a language can be picked in the side list.
-    const QString cc = _textCountry();
-    if (cc.isEmpty())
-        return {};
-    return kLang.value(cc);
+    return languageForCountry(_textCountry());
 }
 
 // Asks the CLI to weave the product's variation values (colour/size) into the
@@ -1487,6 +1625,52 @@ QString DialogTemuCreateProduct::_finalizeTitle(QString title) const
     return title.trimmed();
 }
 
+// Drops bullet lines pinning a specific size when the product has several sizes.
+QString DialogTemuCreateProduct::_sanitizeBullets(const QString &bullets) const
+{
+    // Distinct sizes across variations — with 0/1 size, a size mention is fine.
+    QSet<QString> sizes;
+    for (const auto &s : m_draft.skus)
+        if (!s.size.trimmed().isEmpty())
+            sizes.insert(s.size.trimmed().toLower());
+    if (sizes.size() <= 1)
+        return bullets;
+
+    // A size keyword followed by a value ("Taille M", "Größe 40", "size M=40",
+    // "taglia 42") pins one variation's size — wrong for all the others.
+    static const QRegularExpression kSizeClaim(
+        QStringLiteral("\\b(?:taille|talla|taglia|gr(?:ö|oe)?(?:ss|ß)e|size|maat|"
+                       "rozmiar|storlek)\\b\\s*[:=]?\\s*[0-9A-Za-z]"),
+        QRegularExpression::CaseInsensitiveOption);
+
+    QStringList kept, dropped;
+    for (const QString &line : bullets.split(QLatin1Char('\n'))) {
+        if (line.trimmed().isEmpty())
+            continue;
+        if (kSizeClaim.match(line).hasMatch())
+            dropped << line.trimmed();
+        else
+            kept << line;
+    }
+    if (!dropped.isEmpty() && m_logEdit)
+        m_logEdit->appendPlainText(tr("  dropped size-pinned bullet(s): %1")
+                                       .arg(dropped.join(QStringLiteral(" | "))));
+    return kept.join(QLatin1Char('\n'));
+}
+
+QString DialogTemuCreateProduct::_noSizeInBulletsInstruction() const
+{
+    QSet<QString> sizes;
+    for (const auto &s : m_draft.skus)
+        if (!s.size.trimmed().isEmpty())
+            sizes.insert(s.size.trimmed().toLower());
+    if (sizes.size() <= 1)
+        return {};
+    return tr("\n\nDo NOT mention any specific size or size correspondence in the "
+              "bullets or description — this product exists in several sizes and "
+              "the text is shared by all of them.");
+}
+
 // Base (selling) price = the Amazon price.
 static double baseFromAmazon(double amazon)
 {
@@ -1609,6 +1793,192 @@ void DialogTemuCreateProduct::_applyRowToAll()
     m_logEdit->appendPlainText(tr("Applied row %1's price + packaging to all variations.").arg(src + 1));
 }
 
+// "Complete" on the per-country tree: fill only what's missing. Sizes convert
+// mechanically through the FillerSize country tables from any country that has
+// a value; what can't be converted mechanically (colours, textual size labels
+// like "Einheitsgröße") is translated by the CLI into each country's language
+// in ONE batched call. Hand-edited cells are never overwritten.
+QCoro::Task<void> DialogTemuCreateProduct::_completeVariantNames()
+{
+    if (!m_variantTree || !m_completeVariantsBtn || !m_completeVariantsBtn->isEnabled())
+        co_return;
+    m_completeVariantsBtn->setEnabled(false);
+    auto guard = qScopeGuard([this] { m_completeVariantsBtn->setEnabled(true); });
+
+    // The conversion table comes from the sizing category selected in
+    // PaneSizing (women/men × clothing/shoes have different FR/DE/IT offsets —
+    // e.g. women FR 40 = DE 38 = IT 44, but men FR 40 = DE 46). Only when no
+    // category was recorded do we fall back to guessing from title keywords.
+    SizeTable table = m_draft.sizeTable;
+    if (table == SizeTable::Unknown) {
+        const QString hints = (m_draft.title + QLatin1Char(' ') + m_draft.amazonProductType
+                               + QLatin1Char(' ')
+                               + (m_catNameLabel ? m_catNameLabel->text() : QString{})).toUpper();
+        const bool isShoes = hints.contains(QLatin1String("SHOE"))
+                          || hints.contains(QLatin1String("SANDAL"))
+                          || hints.contains(QLatin1String("BOOT"))
+                          || hints.contains(QLatin1String("SNEAKER"))
+                          || hints.contains(QLatin1String("SCHUH"));
+        const bool isMale = hints.contains(QLatin1String("HERREN"))
+                         || hints.contains(QLatin1String(" MEN"))
+                         || hints.contains(QLatin1String("HOMME"))
+                         || hints.contains(QLatin1String("UOMO"))
+                         || hints.contains(QLatin1String("HOMBRE"));
+        table = isShoes ? (isMale ? SizeTable::ShoesMale : SizeTable::ShoesFemale)
+                        : (isMale ? SizeTable::ClothingMale : SizeTable::ClothingFemale);
+        m_logEdit->appendPlainText(tr("Complete: no sizing category recorded — guessed "
+                                      "the %1 %2 size table from the title.")
+                                       .arg(isMale ? tr("men's") : tr("women's"),
+                                            isShoes ? tr("shoe") : tr("clothing")));
+    } else {
+        const QString name = table == SizeTable::ShoesFemale ? tr("women's shoes")
+                           : table == SizeTable::ShoesMale   ? tr("men's shoes")
+                           : table == SizeTable::ClothingMale ? tr("men's clothing")
+                                                              : tr("women's clothing");
+        m_logEdit->appendPlainText(tr("Complete: converting sizes with the %1 table "
+                                      "(from the sizing category).").arg(name));
+    }
+
+    // A CLI-translation job for one cell, addressed by indices (not pointers —
+    // the tree may change while the CLI runs).
+    struct CliItem {
+        int row, child, column;
+        QString language, value, kind, before;
+    };
+    QList<CliItem> cliItems;
+    int converted = 0;
+
+    for (int r = 0; r < m_variantTree->topLevelItemCount(); ++r) {
+        QTreeWidgetItem *top = m_variantTree->topLevelItem(r);
+
+        // --- Sizes: mechanical conversion from any country that has one ---
+        QList<QPair<QString, QString>> sizeSources; // (country, value)
+        for (int k = 0; k < top->childCount(); ++k) {
+            const QString v = top->child(k)->text(2).trimmed();
+            if (!v.isEmpty())
+                sizeSources.append({top->child(k)->text(0).toUpper(), v});
+        }
+        for (int k = 0; k < top->childCount(); ++k) {
+            QTreeWidgetItem *child = top->child(k);
+            if (!child->text(2).trimmed().isEmpty())
+                continue;
+            const QString cc = child->text(0).toUpper();
+            QString filled;
+            QString labelSource; // untranslatable word label → CLI fallback
+            for (const auto &srcPair : sizeSources) {
+                if (srcPair.first == cc)
+                    continue;
+                filled = convertSizeValue(srcPair.second, srcPair.first, cc, table);
+                if (!filled.isEmpty())
+                    break;
+                if (labelSource.isEmpty() && isTextualSizeLabel(srcPair.second))
+                    labelSource = srcPair.second;
+            }
+            if (!filled.isEmpty()) {
+                child->setText(2, filled);
+                ++converted;
+            } else if (!labelSource.isEmpty()) {
+                const QString lang = languageForCountry(cc);
+                if (!lang.isEmpty())
+                    cliItems.append({r, k, 2, lang, labelSource,
+                                     QStringLiteral("size label"), QString{}});
+            }
+        }
+
+        // --- Colours: translate wherever no localized value exists ---
+        const Draft::Sku ds = m_draft.skus.value(r);
+        // Best available source wording: the draft colour, else any filled cell.
+        QString srcColor = ds.color.trimmed();
+        for (int k = 0; k < top->childCount() && srcColor.isEmpty(); ++k)
+            srcColor = top->child(k)->text(1).trimmed();
+        if (srcColor.isEmpty())
+            continue;
+        for (int k = 0; k < top->childCount(); ++k) {
+            QTreeWidgetItem *child = top->child(k);
+            const QString cc  = child->text(0).toUpper();
+            const QString cur = child->text(1).trimmed();
+            // A cell is localized when Amazon delivered a per-country value or
+            // the user typed something different from the generic fallback.
+            if (!cur.isEmpty()
+                && (cur != ds.color.trimmed() || ds.colorByCountry.contains(cc)))
+                continue;
+            const QString lang = languageForCountry(cc);
+            if (lang.isEmpty())
+                continue;
+            cliItems.append({r, k, 1, lang, srcColor, QStringLiteral("colour"), QString{}});
+        }
+    }
+
+    if (converted > 0)
+        m_logEdit->appendPlainText(tr("Complete: %1 size cell(s) converted via the "
+                                      "size tables.").arg(converted));
+    if (cliItems.isEmpty()) {
+        if (converted == 0)
+            m_logEdit->appendPlainText(tr("Complete: nothing to fill — every cell already "
+                                          "has a value (or no source value exists)."));
+        co_return;
+    }
+    if (!m_cli) {
+        m_logEdit->appendPlainText(tr("Complete: no CLI selected — %1 colour/label "
+                                      "value(s) left untranslated.").arg(cliItems.size()));
+        co_return;
+    }
+
+    // Snapshot the pre-CLI cell text so an edit made while the CLI runs wins.
+    for (CliItem &it : cliItems)
+        it.before = m_variantTree->topLevelItem(it.row)->child(it.child)->text(it.column);
+
+    QString prompt = tr(
+        "Translate each product variation value below into its target language.\n"
+        "Reply with STRICT JSON only: {\"items\":[{\"id\":0,\"value\":\"…\"}]} — one entry "
+        "per input id, no other keys, no markdown, no explanations.\n"
+        "Each value is a short colour or size name shown on a shopping site: translate "
+        "it, capitalize it like a product listing variation, and return it unchanged "
+        "when it is already in the target language.\n\nItems:\n");
+    for (int i = 0; i < cliItems.size(); ++i)
+        prompt += QStringLiteral("id=%1 | %2 | target language: %3 | value: %4\n")
+                      .arg(QString::number(i), cliItems.at(i).kind,
+                           cliItems.at(i).language, cliItems.at(i).value);
+
+    m_logEdit->appendPlainText(tr("Complete: translating %1 value(s) with %2…")
+                                   .arg(cliItems.size()).arg(m_cli->getName()));
+    const CliRunResult res = co_await _runCli(prompt);
+    QString out = res.output.trimmed();
+    const int a = out.indexOf(QLatin1Char('{'));
+    const int b = out.lastIndexOf(QLatin1Char('}'));
+    if (a >= 0 && b > a)
+        out = out.mid(a, b - a + 1);
+    const QJsonArray items = QJsonDocument::fromJson(out.toUtf8()).object()
+                                 .value(QStringLiteral("items")).toArray();
+    if (items.isEmpty()) {
+        m_logEdit->appendPlainText(tr("Complete: CLI returned no parseable JSON; "
+                                      "cells left unchanged."));
+        co_return;
+    }
+    int applied = 0;
+    for (const QJsonValue &v : items) {
+        const QJsonObject o = v.toObject();
+        const QJsonValue idv = o.value(QStringLiteral("id"));
+        bool okId = idv.isDouble();
+        const int id = okId ? idv.toInt() : idv.toString().toInt(&okId);
+        const QString value = o.value(QStringLiteral("value")).toString().trimmed();
+        if (!okId || id < 0 || id >= cliItems.size() || value.isEmpty())
+            continue;
+        const CliItem &it = cliItems.at(id);
+        if (it.row >= m_variantTree->topLevelItemCount())
+            continue;
+        QTreeWidgetItem *top = m_variantTree->topLevelItem(it.row);
+        if (it.child >= top->childCount())
+            continue;
+        QTreeWidgetItem *cell = top->child(it.child);
+        if (cell->text(it.column) != it.before)
+            continue; // edited while the CLI ran — the user's value wins
+        cell->setText(it.column, value);
+        ++applied;
+    }
+    m_logEdit->appendPlainText(tr("Complete: %1 value(s) translated and filled.").arg(applied));
+}
+
 QCoro::Task<CliRunResult> DialogTemuCreateProduct::_runCli(const QString &prompt,
                                                            const QString &workingDir)
 {
@@ -1646,9 +2016,10 @@ QCoro::Task<void> DialogTemuCreateProduct::_generateText()
         "title (max 100 chars), 3-5 bullet points (each bullet MUST start with exactly one "
         "relevant emoji, then a space), and a short description. No markdown.\n\n"
         "Product: %1\nBrand: %2\nExisting bullets:\n%3")
-        .arg(m_draft.title, m_draft.brand, m_draft.bulletPoints.join(QLatin1Char('\n')))
+        .arg(m_draft.title, m_draft.brand,
+             _sanitizeBullets(m_draft.bulletPoints.join(QLatin1Char('\n'))))
         + _titleKeywordInstruction() + _variationInstruction() + _titleGuidance()
-        + _noBrandInstruction()
+        + _noBrandInstruction() + _noSizeInBulletsInstruction()
         + _languageInstruction(tr("the title, bullets and description"));
 
     m_logEdit->appendPlainText(_storeLanguage().isEmpty()
@@ -1671,7 +2042,7 @@ QCoro::Task<void> DialogTemuCreateProduct::_generateText()
         QStringList bl;
         for (const QJsonValue &v : o.value(QStringLiteral("bullets")).toArray())
             bl << v.toString();
-        _applyTextResult(target, 1, bl.join(QLatin1Char('\n')));
+        _applyTextResult(target, 1, _sanitizeBullets(bl.join(QLatin1Char('\n'))));
     }
     if (o.contains(QStringLiteral("description")))
         _applyTextResult(target, 2, o.value(QStringLiteral("description")).toString());
@@ -1692,8 +2063,11 @@ QCoro::Task<void> DialogTemuCreateProduct::_regenerateField(int which)
     const QString field = which == 0 ? QStringLiteral("title")
                         : which == 1 ? QStringLiteral("bullets")
                                      : QStringLiteral("description");
+    // For bullets, feed the CLI only SANITIZED context: a size-pinned line in
+    // the current/source bullets would be dutifully carried back into the
+    // rewrite (e.g. "📏 Taille M correspondant au 40").
     const QString current = which == 0 ? m_titleEdit->text()
-                          : which == 1 ? m_bulletsEdit->toPlainText()
+                          : which == 1 ? _sanitizeBullets(m_bulletsEdit->toPlainText())
                                        : m_descEdit->toPlainText();
     // Only bullets need structured (JSON) output. Title and description are
     // single free-text fields — asking for JSON there is fragile (long text with
@@ -1709,10 +2083,11 @@ QCoro::Task<void> DialogTemuCreateProduct::_regenerateField(int which)
         "You improve Temu product copy. Produce a BETTER %1 as %2.\n\n"
         "Product: %3\nBrand: %4\nSource bullets:\n%5\n\nCurrent %1 (improve on it):\n%6")
         .arg(field, shape, m_draft.title, m_draft.brand,
-             m_draft.bulletPoints.join(QLatin1Char('\n')), current)
+             _sanitizeBullets(m_draft.bulletPoints.join(QLatin1Char('\n'))), current)
         + (which == 0 ? _titleKeywordInstruction() + _variationInstruction() + _titleGuidance()
                       : QString{})
         + _noBrandInstruction()
+        + (which != 0 ? _noSizeInBulletsInstruction() : QString{})
         + _languageInstruction(field);
 
     m_logEdit->appendPlainText(_storeLanguage().isEmpty()
@@ -1764,7 +2139,13 @@ QCoro::Task<void> DialogTemuCreateProduct::_regenerateField(int which)
             m_logEdit->appendPlainText(tr("  no usable output; unchanged."));
             co_return;
         }
-        _applyTextResult(target, 1, bl.join(QLatin1Char('\n')));
+        // Backstop: drop any size-pinned bullet the model reintroduced anyway.
+        const QString cleaned = _sanitizeBullets(bl.join(QLatin1Char('\n')));
+        if (cleaned.trimmed().isEmpty()) {
+            m_logEdit->appendPlainText(tr("  all bullets were size-pinned; unchanged."));
+            co_return;
+        }
+        _applyTextResult(target, 1, cleaned);
     } else {
         // Title / description: prefer the JSON field if present, else the raw text.
         const QString key = which == 0 ? QStringLiteral("title") : QStringLiteral("description");

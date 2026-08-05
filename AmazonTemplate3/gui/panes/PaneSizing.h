@@ -16,6 +16,7 @@
 #include <QCoro/QCoroTask>
 
 #include "AbstractCli.h"
+#include "gui/DialogTemuCreateProduct.h"
 #include "apis/AmazonAplusApi.h"
 #include "aplus/APlusContent.h"
 #include "aplus/APlusTreeModel.h"
@@ -359,6 +360,14 @@ private:
     void _updateTemuCreatedLabel();
     QList<QPair<QString, QString>> _selectedTemuStores() const;
     QCoro::Task<void> onTemuCreateOrUpdate();
+    // Cleans the draft's source bullet points before the Temu dialog opens:
+    // gathers the bullets of every ACTIVE (non-excluded) colour's listing and
+    // asks the CLI to keep the reliable set and remove forbidden claims
+    // (return/refund promises, "authentic photos", size-equivalence claims…),
+    // which otherwise poison every AI generation in the dialog. The result is
+    // cached in settings.ini keyed by an input hash, so the CLI only re-runs
+    // when the source bullets (or the active colours) change.
+    QCoro::Task<void> _sanitizeDraftBullets(DialogTemuCreateProduct::Draft *draft);
     // Resolves m_productType (Amazon browse-node key) from cache or a quick API
     // lookup, so the Temu category can be remembered per Amazon category.
     QCoro::Task<void> _ensureProductType();

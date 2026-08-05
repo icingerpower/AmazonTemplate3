@@ -14,6 +14,10 @@
 #include "BulletFixPrompt.h"
 #include "aplus/APlusUploadDialog.h"
 #include "sizecategories/AbstractSizeCategory.h"
+#include "sizecategories/ClothingMenCategory.h"
+#include "sizecategories/ClothingWomenCategory.h"
+#include "sizecategories/ShoesMenCategory.h"
+#include "sizecategories/ShoesWomenCategory.h"
 #include "sizecategories/SizingTableTemplateModel.h"
 #include "gui/DialogEditPrompts.h"
 #include "gui/DialogTemuStoreBrands.h"
@@ -66,6 +70,7 @@
 #include <QSplitter>
 #include <QTextEdit>
 #include <QProgressBar>
+#include <QCryptographicHash>
 #include <QProgressDialog>
 #include <QFontDatabase>
 #include <QGuiApplication>
@@ -875,12 +880,18 @@ void PaneSizing::_loadProductSettings()
             const QModelIndex pi = m_treeModel->index(fi, 0);
             const QString pAsin  = m_treeModel->data(m_treeModel->index(fi, TreeSizingAsins::ASIN), Qt::DisplayRole).toString();
             const QString pSku   = s.value(QStringLiteral("sizing/skus/") + pAsin).toString();
-            if (!pSku.isEmpty()) m_treeModel->setSku(pAsin, pSku);
+            if (AmazonCatalogApi::isRefurbishedSku(pSku))
+                s.remove(QStringLiteral("sizing/skus/") + pAsin); // purge stale cache
+            else if (!pSku.isEmpty())
+                m_treeModel->setSku(pAsin, pSku);
 
             for (int ci = 0; ci < m_treeModel->rowCount(pi); ++ci) {
                 const QString cAsin = m_treeModel->data(m_treeModel->index(ci, TreeSizingAsins::ASIN, pi), Qt::DisplayRole).toString();
                 const QString cSku  = s.value(QStringLiteral("sizing/skus/") + cAsin).toString();
-                if (!cSku.isEmpty()) m_treeModel->setSku(cAsin, cSku);
+                if (AmazonCatalogApi::isRefurbishedSku(cSku))
+                    s.remove(QStringLiteral("sizing/skus/") + cAsin); // purge stale cache
+                else if (!cSku.isEmpty())
+                    m_treeModel->setSku(cAsin, cSku);
             }
         }
     }
@@ -2480,10 +2491,28 @@ QCoro::Task<void> PaneSizing::_fetchAllSkusCached(const QString &marketplaceId,
     // 1. Try to load from cache (SKUs only — GTINs always fetched live from report)
     if (!forceRefresh && cacheFile.open(QIODevice::ReadOnly)) {
         const QJsonObject root = QJsonDocument::fromJson(cacheFile.readAll()).object();
-        for (auto it = root.begin(); it != root.end(); ++it)
-            asinToSku->insert(it.key(), it.value().toString());
-
-        if (!asinToSku->isEmpty()) {
+        int droppedRefurb = 0;
+        for (auto it = root.begin(); it != root.end(); ++it) {
+            // Heal caches written before refurbished ("amzn…") SKUs were
+            // excluded: drop them so the ASIN resolves to the real SKU again.
+            if (AmazonCatalogApi::isRefurbishedSku(it.value().toString()))
+                ++droppedRefurb;
+            else
+                asinToSku->insert(it.key(), it.value().toString());
+        }
+        cacheFile.close();
+        // A cache that held refurbished entries is INCOMPLETE for those ASINs:
+        // their real SKU (a separate row in the listings report) was shadowed by
+        // the refurb row when the cache was written. Don't return the purged map
+        // (that leaves those ASINs SKU-less) — fall through to a fresh report
+        // fetch, which now skips refurb rows and finds the real SKUs, then
+        // rewrites the cache below.
+        if (droppedRefurb > 0) {
+            asinToSku->clear();
+            qDebug() << "PaneSizing: cache for" << marketplaceId << "had"
+                     << droppedRefurb << "refurbished (amzn*) SKUs — re-fetching "
+                        "the report to resolve the real SKUs.";
+        } else if (!asinToSku->isEmpty()) {
             qDebug() << "PaneSizing: loaded" << asinToSku->size()
                      << "SKUs from global cache for" << marketplaceId;
             co_return;
@@ -3902,6 +3931,150 @@ QCoro::Task<void> PaneSizing::_ensureProductType()
     }
 }
 
+// The draft's bullet points come from ONE child ASIN — often an old or
+// excluded (sold-out) colour whose Amazon listing still carries claims that
+// must never seed an AI generation: "retour sous 30 jours", "photos
+// authentiques", "taille M correspondant au 38"… Once such a bullet is in the
+// source material, every generation in the Temu dialog reproduces it. So:
+// gather the bullet lists of every ACTIVE colour, add the current draft's
+// list, and let the CLI keep the most reliable set with every forbidden claim
+// removed. The cleaned list only replaces draft->bulletPoints (never
+// m_currentBulletPoints, which stays the raw input so the cache key below is
+// stable across reopens); it is cached in settings.ini keyed by a hash of the
+// inputs, so the CLI re-runs only when the source bullets or the active
+// colours change.
+QCoro::Task<void> PaneSizing::_sanitizeDraftBullets(DialogTemuCreateProduct::Draft *draft)
+{
+    // One representative child ASIN per active colour (draft->skus already
+    // excludes the excluded colours' children).
+    QStringList activeColors;
+    QList<QPair<QString, QString>> colorReps; // (colour, ASIN)
+    for (const auto &s : draft->skus) {
+        const QString color = s.color.trimmed();
+        if (!color.isEmpty() && !activeColors.contains(color, Qt::CaseInsensitive))
+            activeColors << color;
+        bool seen = false;
+        for (const auto &cr : colorReps)
+            if (cr.first.compare(color, Qt::CaseInsensitive) == 0) { seen = true; break; }
+        if (!seen && !s.asin.isEmpty())
+            colorReps.append({color, s.asin});
+    }
+
+    QProgressDialog prog(tr("Cleaning bullet points (removing forbidden claims)…"),
+                         QString{}, 0, 0, this);
+    prog.setWindowModality(Qt::WindowModal);
+    prog.setMinimumDuration(0);
+    prog.show();
+    QCoreApplication::processEvents();
+    auto progGuard = qScopeGuard([&prog] { prog.close(); });
+
+    // Bullet candidates: the current draft list + each active colour's own
+    // listing bullets (FR marketplace — language-strict, so a colour whose FR
+    // listing has no French bullets simply contributes nothing).
+    struct BulletSet { QString label; QStringList bullets; };
+    QList<BulletSet> sets;
+    if (!draft->bulletPoints.isEmpty())
+        sets.append({tr("current draft"), draft->bulletPoints});
+    static const QString kMpFr = QStringLiteral("A13V1IB3VIYZZH");
+    for (const auto &cr : colorReps) {
+        QString title;
+        QStringList bullets;
+        co_await m_api->fetchListingText(kMpFr, cr.second, &title, &bullets);
+        if (!bullets.isEmpty())
+            sets.append({cr.first.isEmpty() ? tr("(no colour)") : cr.first, bullets});
+    }
+    if (sets.isEmpty())
+        co_return;
+
+    // Cache key over ALL inputs — raw bullets and the active colour list.
+    QCryptographicHash hash(QCryptographicHash::Md5);
+    for (const auto &bs : sets) {
+        hash.addData(bs.label.toUtf8());
+        for (const QString &b : bs.bullets)
+            hash.addData(b.toUtf8());
+    }
+    hash.addData(activeColors.join(QLatin1Char(',')).toUtf8());
+    const QString key = QString::fromLatin1(hash.result().toHex());
+
+    QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                 QSettings::IniFormat);
+    if (ps.value(QStringLiteral("temu/cleanBulletsKey")).toString() == key) {
+        const QStringList cached = ps.value(QStringLiteral("temu/cleanBullets")).toStringList();
+        if (!cached.isEmpty()) {
+            draft->bulletPoints = cached;
+            qDebug() << "PaneSizing: sanitized bullets served from cache ("
+                     << cached.size() << "bullet(s) )";
+            co_return;
+        }
+    }
+
+    AbstractCli *cli = ui->comboBoxCli->currentData().value<AbstractCli *>();
+    if (!cli) {
+        qWarning() << "PaneSizing: no CLI selected — Temu draft bullets NOT sanitized";
+        co_return;
+    }
+
+    QString prompt = QStringLiteral(
+        "You clean Amazon bullet points so they can be used as SOURCE material for "
+        "AI-generated product listings.\n\n"
+        "Below are bullet lists taken from different colour variations of the SAME "
+        "product. Some come from outdated or discontinued listings.\n\n"
+        "Reply with STRICT JSON only: {\"bullets\":[\"…\"]} — ONE list with the most "
+        "reliable bullets that describe the product itself. Keep the original "
+        "language. Never invent new claims. No markdown, no explanations.\n\n"
+        "REMOVE any bullet containing claims that must never be reused:\n"
+        "- return / refund / exchange promises (e.g. \"retour sous 30 jours\")\n"
+        "- shipping or delivery promises\n"
+        "- guarantees, warranties, customer-service promises\n"
+        "- \"authentic photos\" / \"the item received matches the photos\" claims\n"
+        "- price, discount, stock, bestseller or review claims\n"
+        "- size-equivalence claims tying a size to a number (e.g. \"taille M "
+        "correspondant au 38\") — sizes differ per country and per variation\n"
+        "- bullets describing a colour that is NOT in the active colour list below "
+        "(that variation is discontinued)\n\n"
+        "KEEP bullets about material, fabric, fit, comfort, style, occasions, care.\n\n");
+    prompt += QStringLiteral("Active colours: %1\n\nBullet lists:\n")
+                  .arg(activeColors.isEmpty() ? QStringLiteral("(single colour)")
+                                              : activeColors.join(QStringLiteral(", ")));
+    for (const auto &bs : sets) {
+        prompt += QStringLiteral("[%1]\n").arg(bs.label);
+        for (const QString &b : bs.bullets)
+            prompt += QStringLiteral("- %1\n").arg(b);
+        prompt += QLatin1Char('\n');
+    }
+
+    qDebug() << "PaneSizing: sanitizing" << sets.size() << "bullet list(s) with"
+             << cli->getName();
+    QString out;
+    co_await _runCliText(cli, prompt, m_productWorkingDir.absolutePath(), &out);
+    const int a = out.indexOf(QLatin1Char('{'));
+    const int b = out.lastIndexOf(QLatin1Char('}'));
+    if (a >= 0 && b > a)
+        out = out.mid(a, b - a + 1);
+    QStringList cleaned;
+    for (const QJsonValue &v : QJsonDocument::fromJson(out.toUtf8()).object()
+                                   .value(QStringLiteral("bullets")).toArray()) {
+        const QString s = v.toString().trimmed();
+        if (!s.isEmpty())
+            cleaned << s;
+    }
+    if (cleaned.isEmpty()) {
+        qWarning() << "PaneSizing: bullet sanitizing returned no parseable JSON — "
+                      "keeping the raw bullets";
+        co_return;
+    }
+
+    draft->bulletPoints = cleaned;
+    ps.setValue(QStringLiteral("temu/cleanBulletsKey"), key);
+    ps.setValue(QStringLiteral("temu/cleanBullets"), cleaned);
+    qDebug() << "PaneSizing: bullets sanitized:" << cleaned.size()
+             << "kept out of" << [&sets] {
+                    int n = 0;
+                    for (const auto &bs : sets) n += bs.bullets.size();
+                    return n;
+                }();
+}
+
 QCoro::Task<void> PaneSizing::onTemuCreateOrUpdate()
 {
     // Guard against re-entrancy: the draft build awaits several network calls
@@ -3942,6 +4115,20 @@ QCoro::Task<void> PaneSizing::onTemuCreateOrUpdate()
         QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
                      QSettings::IniFormat);
         draft.amazonProductType = ps.value(QStringLiteral("sizing/productType")).toString();
+    }
+
+    // Which size-conversion table applies, from the selected sizing category —
+    // a men's product converts FR/DE/IT sizes through the male table.
+    if (const auto *sizeCat = _currentCategory()) {
+        using ST = DialogTemuCreateProduct::SizeTable;
+        if (dynamic_cast<const ShoesWomenCategory*>(sizeCat))
+            draft.sizeTable = ST::ShoesFemale;
+        else if (dynamic_cast<const ShoesMenCategory*>(sizeCat))
+            draft.sizeTable = ST::ShoesMale;
+        else if (dynamic_cast<const ClothingMenCategory*>(sizeCat)) // incl. Top – Men
+            draft.sizeTable = ST::ClothingMale;
+        else if (dynamic_cast<const ClothingWomenCategory*>(sizeCat)) // incl. Top – Women
+            draft.sizeTable = ST::ClothingFemale;
     }
 
     // Gallery images: every image file left in the product dir root (excluded
@@ -4171,6 +4358,11 @@ QCoro::Task<void> PaneSizing::onTemuCreateOrUpdate()
             }
         }
     }
+
+    // Clean the source bullets BEFORE the dialog opens: bullets inherited from
+    // an old / excluded colour carry forbidden claims that poison every AI
+    // generation inside the dialog.
+    co_await _sanitizeDraftBullets(&draft);
 
     // Amazon pricing context — FR marketplace (EUR) to fetch the base price.
     DialogTemuCreateProduct::AmazonPricingCtx pricing;
@@ -7243,6 +7435,7 @@ QCoro::Task<void> PaneSizing::_saveToSizeTableFolder()
                          QSettings::IniFormat);
             for (const QString &asin : childAsins) {
                 sku = ps.value(QStringLiteral("sizing/skus/") + asin).toString();
+                if (AmazonCatalogApi::isRefurbishedSku(sku)) sku.clear();
                 if (!sku.isEmpty()) break;
             }
         }
@@ -7718,6 +7911,7 @@ QCoro::Task<void> PaneSizing::_resolveSkus(QList<AsinSku> &items,
         for (auto &item : items) {
             if (item.sku.isEmpty()) {
                 item.sku = s.value(QStringLiteral("sizing/skus/") + item.asin).toString();
+                if (AmazonCatalogApi::isRefurbishedSku(item.sku)) item.sku.clear();
                 if (!item.sku.isEmpty())
                     qDebug() << "PaneSizing: ASIN" << item.asin << "resolved from local settings.ini:" << item.sku;
             }
@@ -8664,14 +8858,14 @@ QCoro::Task<void> PaneSizing::_loadBrokenChildData(bool forceRefresh)
         for (const auto &row : m_brokenChildTable->rows()) {
             if (asinToSku.value(row.asin).isEmpty()) {
                 const QString s = ps.value(QStringLiteral("sizing/skus/") + row.asin).toString();
-                if (!s.isEmpty()) {
+                if (!s.isEmpty() && !AmazonCatalogApi::isRefurbishedSku(s)) {
                     asinToSku.insert(row.asin, s);
                     qDebug() << "PaneSizing: ASIN" << row.asin << "resolved from settings.ini:" << s;
                 }
             }
             if (!row.parentAsin.isEmpty() && asinToSku.value(row.parentAsin).isEmpty()) {
                 const QString s = ps.value(QStringLiteral("sizing/skus/") + row.parentAsin).toString();
-                if (!s.isEmpty()) {
+                if (!s.isEmpty() && !AmazonCatalogApi::isRefurbishedSku(s)) {
                     asinToSku.insert(row.parentAsin, s);
                     qDebug() << "PaneSizing: parent ASIN" << row.parentAsin << "resolved from settings.ini:" << s;
                 }
@@ -10088,7 +10282,8 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
         for (const QString &asin : std::as_const(uniqueAsins)) {
             if (asinToSku.value(asin).isEmpty()) {
                 const QString sku = ps.value(QStringLiteral("sizing/skus/") + asin).toString();
-                if (!sku.isEmpty()) asinToSku.insert(asin, sku);
+                if (!sku.isEmpty() && !AmazonCatalogApi::isRefurbishedSku(sku))
+                    asinToSku.insert(asin, sku);
             }
         }
     }

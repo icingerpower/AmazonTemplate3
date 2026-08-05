@@ -23,6 +23,7 @@ class QLabel;
 class QFormLayout;
 class QPushButton;
 class QDoubleSpinBox;
+class QSplitter;
 class QTableWidget;
 class QTreeWidget;
 
@@ -55,10 +56,16 @@ public:
         QString marketplaceId; // EUR marketplace (e.g. France A13V1IB3VIYZZH)
     };
 
+    // Which FillerSize conversion table applies to this product's sizes,
+    // derived from the sizing category selected in PaneSizing (a men's top must
+    // convert through the male table — FR/DE/IT offsets differ from women's).
+    enum class SizeTable { Unknown, ClothingFemale, ClothingMale, ShoesFemale, ShoesMale };
+
     // The product data assembled by PaneSizing.
     struct Draft {
         QString     productDir;       // working dir holding the images
         QString     amazonProductType; // Amazon category key (e.g. "NOTEBOOK")
+        SizeTable   sizeTable = SizeTable::Unknown; // from the sizing category
         QString     parentSku;        // Amazon parent SKU → Temu outGoodsSn
         QString     title;
         QStringList bulletPoints;
@@ -147,6 +154,14 @@ private:
     // tends to copy from the source despite the prompt) and Title-Cases every
     // word. Applied to every title we accept.
     QString _finalizeTitle(QString title) const;
+    // Drops bullet lines that pin a specific size ("Taille M correspondant au
+    // 40") when the product has SEVERAL sizes — Temu bullets are shared across
+    // every variation, so a single-size claim is wrong for the others. Applied
+    // to the bullets fed to the CLI as context (so the model can't copy the
+    // claim back) AND to the CLI's bullet output (deterministic backstop).
+    QString _sanitizeBullets(const QString &bullets) const;
+    // "Do not mention any specific size" clause, empty for single-size products.
+    QString _noSizeInBulletsInstruction() const;
     QCoro::Task<void> _suggestCategory();    // category.recommend → set catId
     QCoro::Task<void> _aiPickCategory();     // CLI walks the named tree to a leaf
     QCoro::Task<void> _browseCategory();     // cascading cats.get picker
@@ -256,8 +271,19 @@ private:
     // country showing that country's localized Color / Size (editable). Row r
     // aligns with m_skuTable row r and m_draft.skus[r].
     QTreeWidget    *m_variantTree = nullptr;
+    // Fills the empty / not-yet-localized cells of m_variantTree: sizes are
+    // converted mechanically from any country that already has a value
+    // (FillerSize tables, e.g. DE 34-40 → FR 36-42); colours and textual size
+    // labels ("Einheitsgröße") are translated by the CLI into each country's
+    // language, all in one batched call. Cells the user edited are never touched.
+    QCoro::Task<void> _completeVariantNames();
+    QPushButton    *m_completeVariantsBtn = nullptr;
     QPlainTextEdit *m_logEdit = nullptr;
     QPushButton    *m_publishBtn = nullptr;
+    // Splitters kept as members so their positions persist across sessions
+    // (restored in the ctor, saved in done()).
+    QSplitter      *m_topSplit = nullptr;
+    QSplitter      *m_mainSplit = nullptr;
 
     // Fire-and-forget coroutines must be kept alive or their frames are freed
     // mid-flight (→ crash when a slow await resumes). One member per entry point.
@@ -269,6 +295,7 @@ private:
     QCoro::Task<void> m_textAllTask; // regenerate-all (every language)
     QCoro::Task<void> m_priceTask;  // fetch Amazon prices
     QCoro::Task<void> m_publishTask;
+    QCoro::Task<void> m_completeTask; // Complete button (variant names)
 };
 
 #endif // DIALOGTEMUCREATEPRODUCT_H
