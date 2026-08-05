@@ -35,8 +35,11 @@
 #include <QUrlQuery>
 #include <QVBoxLayout>
 
+#include <QTimer>
+
 #include <QCoro/QCoroNetworkReply>
 #include <QCoro/QCoroTask>
+#include <QCoro/QCoroTimer>
 
 #include <QHeaderView>
 #include <QTableWidget>
@@ -1402,14 +1405,20 @@ QCoro::Task<void> DialogTemuCreateProduct::_aiPickAttributes()
     _saveWorkState(); // persist the AI picks immediately
 }
 
-QCoro::Task<QString> DialogTemuCreateProduct::_hostLocalImage(QString path)
+QCoro::Task<QString> DialogTemuCreateProduct::_hostLocalImage(QString path, QString *errorOut)
 {
-    if (m_imgbbKey.isEmpty() || !QFileInfo::exists(path))
+    if (errorOut) errorOut->clear();
+    if (m_imgbbKey.isEmpty() || !QFileInfo::exists(path)) {
+        if (errorOut) *errorOut = m_imgbbKey.isEmpty() ? tr("no imgbb API key configured")
+                                                       : tr("file not found");
         co_return QString{};
+    }
 
     QFile f(path);
-    if (!f.open(QIODevice::ReadOnly))
+    if (!f.open(QIODevice::ReadOnly)) {
+        if (errorOut) *errorOut = tr("cannot read file");
         co_return QString{};
+    }
     const QByteArray b64 = f.readAll().toBase64();
     f.close();
 
@@ -1421,18 +1430,64 @@ QCoro::Task<QString> DialogTemuCreateProduct::_hostLocalImage(QString path)
     QNetworkRequest req(url);
     req.setHeader(QNetworkRequest::ContentTypeHeader,
                   QStringLiteral("application/x-www-form-urlencoded"));
-    QByteArray body = "image=" + QUrl::toPercentEncoding(QString::fromLatin1(b64));
+    // A stalled upload must fail, not hang the publish forever at
+    // "Preparing images…" — 90 s is generous for a few-MB POST.
+    req.setTransferTimeout(90 * 1000);
+    const QByteArray body = "image=" + QUrl::toPercentEncoding(QString::fromLatin1(b64));
 
-    auto *nam = new QNetworkAccessManager;
-    QNetworkReply *reply = nam->post(req, body);
-    co_await qCoro(reply).waitForFinished();
-    const QByteArray data = reply->readAll();
-    reply->deleteLater();
-    nam->deleteLater();
+    // Up to 3 attempts; a rate/quota rejection waits before retrying (imgbb
+    // rate limits are per-minute, so a pause usually clears them).
+    QString lastError;
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        auto *nam = new QNetworkAccessManager;
+        QNetworkReply *reply = nam->post(req, body);
+        co_await qCoro(reply).waitForFinished();
+        const QByteArray data = reply->readAll();
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QString netErr = reply->error() != QNetworkReply::NoError
+            ? reply->errorString() : QString{};
+        reply->deleteLater();
+        nam->deleteLater();
 
-    const QJsonObject root = QJsonDocument::fromJson(data).object();
-    co_return root.value(QStringLiteral("data")).toObject()
-                 .value(QStringLiteral("url")).toString();
+        const QJsonObject root = QJsonDocument::fromJson(data).object();
+        const QString hosted = root.value(QStringLiteral("data")).toObject()
+                                   .value(QStringLiteral("url")).toString();
+        if (!hosted.isEmpty())
+            co_return hosted;
+
+        // Surface imgbb's own message — this is where a quota/rate-limit
+        // rejection shows up ("Rate limit reached", "Upload limit", …).
+        QString apiMsg = root.value(QStringLiteral("error")).toObject()
+                             .value(QStringLiteral("message")).toString();
+        if (apiMsg.isEmpty())
+            apiMsg = root.value(QStringLiteral("status_txt")).toString();
+        QStringList parts;
+        if (!netErr.isEmpty())  parts << netErr;
+        if (httpStatus != 0)    parts << tr("HTTP %1").arg(httpStatus);
+        if (!apiMsg.isEmpty())  parts << apiMsg;
+        if (parts.isEmpty())    parts << tr("unparseable response: %1")
+                                             .arg(QString::fromUtf8(data.left(200)));
+        lastError = parts.join(QStringLiteral(" — "));
+
+        const bool rateLimited = httpStatus == 429
+            || apiMsg.contains(QLatin1String("rate"),  Qt::CaseInsensitive)
+            || apiMsg.contains(QLatin1String("limit"), Qt::CaseInsensitive)
+            || apiMsg.contains(QLatin1String("quota"), Qt::CaseInsensitive);
+        if (attempt == 3)
+            break;
+        if (m_logEdit)
+            m_logEdit->appendPlainText(rateLimited
+                ? tr("    imgbb limit hit (%1) — waiting 35 s then retrying (%2/3)…")
+                      .arg(lastError).arg(attempt + 1)
+                : tr("    imgbb upload failed (%1) — retrying (%2/3)…")
+                      .arg(lastError).arg(attempt + 1));
+        QTimer wait;
+        wait.setSingleShot(true);
+        wait.start(rateLimited ? 35 * 1000 : 3 * 1000);
+        co_await qCoro(&wait).waitForTimeout();
+    }
+    if (errorOut) *errorOut = lastError;
+    co_return QString{};
 }
 
 void DialogTemuCreateProduct::_setCatBusy(bool busy)
@@ -2723,9 +2778,13 @@ QCoro::Task<void> DialogTemuCreateProduct::_publish()
             if (!url.isEmpty()) {
                 m_logEdit->appendPlainText(tr("  reused hosted image: %1").arg(fname));
             } else {
-                url = co_await _hostLocalImage(local);
+                m_logEdit->appendPlainText(tr("  hosting %1 (%2 KB)…").arg(fname)
+                                               .arg(QFileInfo(local).size() / 1024));
+                QString hostErr;
+                url = co_await _hostLocalImage(local, &hostErr);
                 if (url.isEmpty()) {
-                    m_logEdit->appendPlainText(tr("  ! could not host %1").arg(fname));
+                    m_logEdit->appendPlainText(tr("  ! could not host %1: %2")
+                                                   .arg(fname, hostErr));
                     continue;
                 }
                 m_imageUrlCache.insert(_imageCacheKey(local), url);

@@ -193,7 +193,9 @@ private:
     // navigating). Stored in the working directory.
     void _loadCatPathCache();
     void _saveCatPathCache();
-    QCoro::Task<QString> _hostLocalImage(QString path); // local file → imgbb public URL
+    // Local file → imgbb public URL. Empty on failure; errorOut then carries
+    // the reason (network error, HTTP status, imgbb's message — e.g. quota).
+    QCoro::Task<QString> _hostLocalImage(QString path, QString *errorOut = nullptr);
     const StorePick &_currentStore() const;
     // Caches the Temu CDN URL for each local image (per store) in the product
     // working dir so repeated publish attempts don't re-upload every time.
