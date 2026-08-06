@@ -16,6 +16,8 @@ public:
     static const AmazonMarketplace *forMarketplaceId(const QString &marketplaceId);
     // All marketplaces in a region
     static QList<const AmazonMarketplace *> forRegion(Region region);
+    // Marketplaces of European Union member states (Europe region minus GB)
+    static QList<const AmazonMarketplace *> europeanUnion();
     // Full registry
     static const QList<AmazonMarketplace> &all();
 

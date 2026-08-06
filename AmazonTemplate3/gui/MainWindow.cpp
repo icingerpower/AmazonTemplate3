@@ -7,6 +7,7 @@
 #include "panes/PanePricing.h"
 #include "panes/PaneDiscount.h"
 #include "panes/PaneCases.h"
+#include "panes/PaneGspr.h"
 #include "panes/PaneStore.h"
 #include "panes/PaneSettings.h"
 #include "AbstractCli.h"
@@ -66,6 +67,11 @@ MainWindow::MainWindow(QWidget *parent)
     paneCases->setWorkingDir(WorkingDirectoryManager::instance()->workingDir());
     paneCases->setAvailableClis(m_availableClis);
     ui->tabWidget->addTab(paneCases, tr("Cases"));
+
+    auto *paneGspr = new PaneGspr(this);
+    paneGspr->setWorkingDir(WorkingDirectoryManager::instance()->workingDir());
+    paneGspr->setAvailableClis(m_availableClis);
+    ui->tabWidget->addTab(paneGspr, tr("GSPR"));
 
     auto *paneStore = new PaneStore(this);
     paneStore->setWorkingDir(WorkingDirectoryManager::instance()->workingDir());

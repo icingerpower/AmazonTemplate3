@@ -59,3 +59,12 @@ QList<const AmazonMarketplace *> AmazonMarketplace::forRegion(Region region)
             result.append(&mp);
     return result;
 }
+
+QList<const AmazonMarketplace *> AmazonMarketplace::europeanUnion()
+{
+    QList<const AmazonMarketplace *> result;
+    for (const auto &mp : all())
+        if (mp.m_region == Region::Europe && mp.m_countryCode != QLatin1String("GB"))
+            result.append(&mp);
+    return result;
+}

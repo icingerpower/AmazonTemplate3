@@ -7,6 +7,7 @@
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QSettings>
+#include <QTimer>
 
 #ifndef CASE_WORKER_DIR
 #define CASE_WORKER_DIR ""
@@ -106,7 +107,8 @@ static QProcessEnvironment childEnv()
 }
 
 void CaseWorkerRunner::_run(const QJsonObject &job, QObject *context,
-                            std::function<void(QJsonObject, QString)> onDone)
+                            std::function<void(QJsonObject, QString)> onDone,
+                            bool keepStdinOpen)
 {
     QString why;
     if (!isConfigured(&why)) {
@@ -117,6 +119,7 @@ void CaseWorkerRunner::_run(const QJsonObject &job, QObject *context,
     auto *proc = new QProcess(this);
     proc->setWorkingDirectory(m_workerDir);
     proc->setProcessEnvironment(childEnv());
+    m_procs.append(proc);
 
     QPointer<QObject> ctx(context);
     QObject::connect(proc, &QProcess::errorOccurred, this,
@@ -133,7 +136,8 @@ void CaseWorkerRunner::_run(const QJsonObject &job, QObject *context,
     });
 
     QObject::connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-        [proc, ctx, onDone](int, QProcess::ExitStatus) {
+        [this, proc, ctx, onDone](int, QProcess::ExitStatus) {
+        m_procs.removeAll(proc);
         proc->deleteLater();
         if (!ctx) return; // caller gone
         const QByteArray out = proc->readAllStandardOutput();
@@ -161,8 +165,21 @@ void CaseWorkerRunner::_run(const QJsonObject &job, QObject *context,
     });
 
     proc->start(_tsxPath(), {_scriptPath()});
-    proc->write(QJsonDocument(job).toJson(QJsonDocument::Compact));
-    proc->closeWriteChannel();
+    // The worker reads the job as the FIRST LINE of stdin (line-based).
+    proc->write(QJsonDocument(job).toJson(QJsonDocument::Compact) + '\n');
+    if (!keepStdinOpen)
+        proc->closeWriteChannel();
+}
+
+bool CaseWorkerRunner::sendLineToWorker(const QByteArray &line)
+{
+    for (const QPointer<QProcess> &p : m_procs) {
+        if (p && p->state() == QProcess::Running) {
+            p->write(line.trimmed() + '\n');
+            return true;
+        }
+    }
+    return false;
 }
 
 void CaseWorkerRunner::scrape(const QList<WorkerCase> &casesIn,
@@ -229,6 +246,83 @@ void CaseWorkerRunner::reply(const QList<ReplyJob> &jobs, bool manualSend,
         }
         callback(out);
     });
+}
+
+void CaseWorkerRunner::gspr(const QString &subaction, const QList<GsprTarget> &targets,
+                            const QString &dumpDir, const QString &ecRepPattern,
+                            const QJsonArray &manufacturers, const QStringList &userSkipAsins,
+                            bool manualManufacturerSave,
+                            QObject *context, std::function<void(QList<GsprResult>)> callback)
+{
+    QJsonArray userSkip;
+    for (const QString &asin : userSkipAsins)
+        userSkip.append(asin);
+    QJsonArray marketplaces;
+    for (const GsprTarget &t : targets) {
+        QJsonArray skip, skipRp, skipMfr;
+        for (const QString &asin : t.skipAsins)
+            skip.append(asin);
+        for (const QString &asin : t.skipAsinsRp)
+            skipRp.append(asin);
+        for (const QString &asin : t.skipAsinsMfr)
+            skipMfr.append(asin);
+        marketplaces.append(QJsonObject{{QStringLiteral("country"), t.countryCode},
+                                        {QStringLiteral("countryName"), t.countryName},
+                                        {QStringLiteral("skipAsins"), skip},
+                                        {QStringLiteral("skipAsinsRp"), skipRp},
+                                        {QStringLiteral("skipAsinsMfr"), skipMfr}});
+    }
+    const QJsonObject job{{QStringLiteral("action"), QStringLiteral("gspr")},
+                          {QStringLiteral("subaction"), subaction},
+                          {QStringLiteral("marketplaces"), marketplaces},
+                          {QStringLiteral("dumpDir"), dumpDir},
+                          {QStringLiteral("ecRepPattern"), ecRepPattern},
+                          {QStringLiteral("manufacturers"), manufacturers},
+                          {QStringLiteral("userSkipAsins"), userSkip},
+                          {QStringLiteral("manualManufacturerSave"), manualManufacturerSave}};
+
+    _run(job, context, [callback](QJsonObject result, QString error) {
+        QList<GsprResult> out;
+        if (!error.isEmpty()) { callback(out); return; }
+        for (const QJsonValue &v : result.value(QStringLiteral("results")).toArray()) {
+            const QJsonObject o = v.toObject();
+            GsprResult r;
+            r.countryCode = o.value(QStringLiteral("country")).toString();
+            r.ok          = o.value(QStringLiteral("ok")).toBool();
+            r.url         = o.value(QStringLiteral("url")).toString();
+            r.dumpDir     = o.value(QStringLiteral("dumpDir")).toString();
+            r.error       = o.value(QStringLiteral("error")).toString();
+            r.sessionExpired = o.value(QStringLiteral("sessionExpired")).toBool();
+            for (const QJsonValue &wv : o.value(QStringLiteral("warnings")).toArray()) {
+                const QJsonObject w = wv.toObject();
+                r.warnings.append(GsprWarningOutcome{
+                    w.value(QStringLiteral("asin")).toString(),
+                    w.value(QStringLiteral("ok")).toBool(),
+                    w.value(QStringLiteral("status")).toString(),
+                    w.value(QStringLiteral("reason")).toString(),
+                    w.value(QStringLiteral("statusText")).toString(),
+                    w.value(QStringLiteral("type")).toString(),
+                });
+            }
+            out.append(r);
+        }
+        callback(out);
+    }, /*keepStdinOpen=*/true); // gspr pauses on @@gspr-ask and awaits replies
+}
+
+void CaseWorkerRunner::stopAll()
+{
+    for (const QPointer<QProcess> &p : m_procs) {
+        if (!p || p->state() == QProcess::NotRunning)
+            continue;
+        emit logMessage(tr("stopping worker (pid %1)…").arg(p->processId()));
+        p->terminate(); // SIGTERM — Playwright closes the browser on it
+        QPointer<QProcess> proc = p;
+        QTimer::singleShot(5000, this, [proc]() {
+            if (proc && proc->state() != QProcess::NotRunning)
+                proc->kill();
+        });
+    }
 }
 
 void CaseWorkerRunner::login(const QString &region,

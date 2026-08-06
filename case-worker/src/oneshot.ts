@@ -11,6 +11,9 @@
  *       → { "results": [ {region, caseId, ok, error?, sessionExpired?} ] }
  *   { "action": "login",  "region": "eu" }
  *       → { "ok": <loggedIn>, "region": "eu" }
+ *   { "action": "gspr", "subaction": "snapshot", "dumpDir": "/tmp/gspr",
+ *     "marketplaces": [ {"country":"DE","countryName":"Germany"} ] }
+ *       → { "results": [ {country, ok, url?, dumpDir?, error?, sessionExpired?} ] }
  *
  * One browser context is opened per region within a single invocation and
  * reused for every case in that region, then closed.
@@ -18,16 +21,55 @@
 import type { Page } from "playwright";
 import { loadConfig, caseListUrl } from "./config.js";
 import { launchContext, firstPage } from "./browser.js";
+import { join } from "node:path";
 import { getThread, submitReply, isLoggedIn, passAccountSwitcher, SessionExpiredError } from "./casePage.js";
+import { timestampSlug } from "./browser.js";
+import { openComplianceFor, snapshotCompliance, processSafetyWarnings,
+         processResponsiblePerson, processManufacturer,
+         type GsprMarketplace, type GsprSnapshotResult,
+         type ManufacturerEntry, type AskReply } from "./gsprPage.js";
 import type { Config, Region } from "./types.js";
 
 interface CaseJob { region?: Region; caseId: string; text?: string; account?: string; files?: string[]; }
-interface Job { action: "scrape" | "reply" | "login"; cases?: CaseJob[]; region?: Region; manualSend?: boolean; }
+interface Job {
+  action: "scrape" | "reply" | "login" | "gspr";
+  cases?: CaseJob[];
+  region?: Region;
+  manualSend?: boolean;
+  // gspr-only:
+  subaction?: string;
+  marketplaces?: GsprMarketplace[];
+  dumpDir?: string;
+  ecRepPattern?: string; // Responsible Person choice prefix
+  userSkipAsins?: string[]; // products excluded by the user — skip everywhere
+  manualManufacturerSave?: boolean; // pause for the user to Save new manufacturers
+  manufacturers?: ManufacturerEntry[]; // SKU-prefix → manufacturer contact map
+}
 
-async function readStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const c of process.stdin) chunks.push(c as Buffer);
-  return Buffer.concat(chunks).toString("utf8");
+// Line-based stdin: the first line is the job; later lines are interactive
+// replies (gspr pauses on @@gspr-ask and waits for one). Callers that close
+// stdin right after the job (scrape/reply/login) still work — only the first
+// line is consumed for them.
+const stdinLines: string[] = [];
+const stdinWaiters: Array<(line: string) => void> = [];
+{
+  let buf = "";
+  process.stdin.on("data", (chunk: Buffer) => {
+    buf += chunk.toString("utf8");
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      const w = stdinWaiters.shift();
+      if (w) w(line); else stdinLines.push(line);
+    }
+  });
+}
+function readStdinLine(): Promise<string> {
+  const queued = stdinLines.shift();
+  if (queued !== undefined) return Promise.resolve(queued);
+  return new Promise((resolve) => stdinWaiters.push(resolve));
 }
 
 function log(msg: string) { process.stderr.write(msg + "\n"); }
@@ -55,7 +97,12 @@ async function ensureLoggedIn(page: Page, cfg: Config, region: Region): Promise<
 
 async function main() {
   const cfg = loadConfig();
-  const job = JSON.parse(await readStdin()) as Job;
+  const job = JSON.parse(await readStdinLine()) as Job;
+  // Qt keeps our stdin open for interactive replies (gspr). An active stdin
+  // keeps the Node event loop alive forever, so unref it: replies still
+  // arrive while the browser keeps the process running, and once all work is
+  // done the process can exit instead of hanging.
+  process.stdin.unref();
   const now = Date.now();
 
   // -- login -------------------------------------------------------------
@@ -75,6 +122,104 @@ async function main() {
     } finally {
       await ctx.close().catch(() => {});
     }
+    return;
+  }
+
+  // -- gspr: compliance page, one EU marketplace at a time ----------------
+  if (job.action === "gspr") {
+    const region: Region = "eu"; // GSPR is EU-only; all marketplaces share the EU session
+    const rc = cfg.regions[region];
+    const dumpDir = job.dumpDir ?? "/tmp/gspr";
+    const marketplaces = job.marketplaces ?? [];
+    const results: unknown[] = [];
+
+    // Shared across marketplaces; refreshed in place when the user completes
+    // the xlsx files after a @@gspr-ask pause.
+    const gsprManufacturers: ManufacturerEntry[] = job.manufacturers ?? [];
+    // User-excluded products: skipped in every phase and every country.
+    const userSkip = new Set<string>(job.userSkipAsins ?? []);
+    const askUser = async (payload: Record<string, unknown>): Promise<AskReply> => {
+      log(`@@gspr-ask ${JSON.stringify(payload)}`);
+      const line = await readStdinLine(); // Qt answers via the worker's stdin
+      try { return JSON.parse(line) as AskReply; } catch { return { cmd: "stop" }; }
+    };
+
+    const ctx = await launchContext(cfg, region);
+    try {
+      const page = await firstPage(ctx);
+      if (!(await ensureLoggedIn(page, cfg, region))) {
+        for (const mp of marketplaces)
+          results.push({ country: mp.country, ok: false,
+                         error: "not logged in (login wait timed out)", sessionExpired: true });
+      } else {
+        for (const mp of marketplaces) {
+          const mpDumpDir = join(dumpDir, timestampSlug(now), mp.country);
+          try {
+            log(`[gspr:${mp.country}] opening compliance page…`);
+            const selected = await openComplianceFor(page, rc.domain, mp, mpDumpDir);
+            if (!(await isLoggedIn(page, cfg)))
+              throw new SessionExpiredError(region);
+
+            // Only act on the page once we're sure the right marketplace is up.
+            const onTarget = selected === mp.countryName;
+            let warnings;
+            if (job.subaction === "safety" && onTarget) {
+              // Warning types in order: warning/safety info, then Responsible
+              // Person, then manufacturer contact (skip the rest if the
+              // browser was closed = user stop).
+              warnings = await processSafetyWarnings(page, mp, mpDumpDir, userSkip);
+              if (!page.isClosed()) {
+                const rp = await processResponsiblePerson(
+                  page, mp, mpDumpDir, job.ecRepPattern ?? "", userSkip);
+                warnings = warnings.concat(rp);
+              }
+              if (!page.isClosed()) {
+                const mfr = await processManufacturer(
+                  page, mp, mpDumpDir, gsprManufacturers, askUser, userSkip,
+                  job.manualManufacturerSave ?? true);
+                warnings = warnings.concat(mfr);
+              }
+            }
+
+            // Keep the collected warnings even when the snapshot can't be
+            // taken any more (e.g. the user closed the browser mid-run).
+            let snap: GsprSnapshotResult;
+            try {
+              snap = await snapshotCompliance(page, mp, mpDumpDir);
+            } catch (e) {
+              snap = { country: mp.country, ok: true,
+                       error: `snapshot failed: ${(e as Error).message ?? e}` };
+            }
+            snap.selected = selected;
+            snap.warnings = warnings;
+            if (!onTarget) {
+              snap.ok = false;
+              snap.error = `marketplace mismatch: wanted "${mp.countryName}" but page shows "${selected}" — see ${mpDumpDir}`;
+            }
+            results.push(snap);
+
+            // The user closing the browser means STOP — don't relaunch for
+            // the remaining marketplaces.
+            if (page.isClosed()) {
+              log(`[gspr] browser closed — stopping run, remaining marketplaces skipped`);
+              break;
+            }
+          } catch (e) {
+            const msg = (e as Error).message ?? String(e);
+            log(`[gspr:${mp.country}] FAILED: ${msg}`);
+            results.push({ country: mp.country, ok: false, error: msg,
+                           sessionExpired: e instanceof SessionExpiredError });
+            if (/has been closed|Target (page|browser).*closed|browser has been closed/i.test(msg)) {
+              log(`[gspr] browser/context closed — stopping run`);
+              break;
+            }
+          }
+        }
+      }
+    } finally {
+      await ctx.close().catch(() => {});
+    }
+    process.stdout.write(JSON.stringify({ results }) + "\n");
     return;
   }
 

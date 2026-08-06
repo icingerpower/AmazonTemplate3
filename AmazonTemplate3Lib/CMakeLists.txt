@@ -107,6 +107,14 @@ add_library(AmazonTemplate3Lib STATIC
   AttributeEquivalentTable.cpp
   AiFailureTable.h
   AiFailureTable.cpp
+  GsprFailedTable.h
+  GsprFailedTable.cpp
+  GsprDoneTable.h
+  GsprDoneTable.cpp
+  GsprManufacturerStore.h
+  GsprManufacturerStore.cpp
+  GsprSkippedTable.h
+  GsprSkippedTable.cpp
   BulletFixPrompt.h
   BulletFixPrompt.cpp
   ${FILLER_FILES}
@@ -215,6 +223,14 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   AttributeValueReplacedTable.cpp
   AiFailureTable.h
   AiFailureTable.cpp
+  GsprFailedTable.h
+  GsprFailedTable.cpp
+  GsprDoneTable.h
+  GsprDoneTable.cpp
+  GsprManufacturerStore.h
+  GsprManufacturerStore.cpp
+  GsprSkippedTable.h
+  GsprSkippedTable.cpp
   BulletFixPrompt.h
   BulletFixPrompt.cpp
   ${FILLER_FILES}

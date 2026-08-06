@@ -58,6 +58,37 @@ struct ReplyJob {
     QStringList files;      // absolute paths to attach
 };
 
+// One EU marketplace to process on the GSPR compliance page.
+struct GsprTarget {
+    QString countryCode;      // "DE"
+    QString countryName;      // account-switcher label, e.g. "Germany"
+    QStringList skipAsins;    // warning/safety info done earlier — never retried
+    QStringList skipAsinsRp;  // Responsible Person done earlier — never retried
+    QStringList skipAsinsMfr; // manufacturer contact done earlier — never retried
+};
+
+// Outcome of one per-ASIN GSPR warning row. status:
+// "submitted" (saved by this run) | "failed" | "pending" (not actionable on
+// the page — submitted earlier or by a human) | "skipped" (in skipAsins).
+struct GsprWarningOutcome {
+    QString asin;
+    bool    ok = false;
+    QString status;
+    QString reason;        // why it failed (e.g. no "Safety attestation" option)
+    QString statusText;    // row's next-steps text (pending diagnosis)
+    QString type;          // "psi" (warning/safety info) | "rp" (Responsible Person)
+};
+
+struct GsprResult {
+    QString countryCode;
+    bool    ok = false;
+    QString url;           // final page URL
+    QString dumpDir;       // where the worker dumped the page (snapshot runs)
+    QString error;
+    bool    sessionExpired = false;
+    QList<GsprWarningOutcome> warnings; // per-ASIN outcomes ("safety" runs)
+};
+
 struct ReplyResult {
     QString region;
     QString caseId;
@@ -94,18 +125,39 @@ public:
                QObject *context, std::function<void(QList<ReplyResult>)> callback);
     void login(const QString &region,
                QObject *context, std::function<void(bool ok, QString error)> callback);
+    // GSPR compliance-page run (EU session). Marketplaces are processed one at
+    // a time in one browser window; the worker dumps each page under dumpDir.
+    void gspr(const QString &subaction, const QList<GsprTarget> &targets,
+              const QString &dumpDir, const QString &ecRepPattern,
+              const QJsonArray &manufacturers, const QStringList &userSkipAsins,
+              bool manualManufacturerSave,
+              QObject *context, std::function<void(QList<GsprResult>)> callback);
+
+    // Answer a worker "@@gspr-ask" pause: writes one JSON line to the stdin of
+    // the (single) live worker process. Returns false when none is running.
+    bool sendLineToWorker(const QByteArray &line);
+
+    // Gracefully stop every worker process this runner started (SIGTERM, then
+    // SIGKILL after 5 s). Playwright closes its browser on SIGTERM, releasing
+    // the profile lock. Each job's callback still fires (with whatever output
+    // the worker managed to produce).
+    void stopAll();
 
 signals:
     void logMessage(const QString &msg); // forwards the worker's stderr lines
 
 private:
     // Runs one job; onDone gets the parsed result object (or an error string).
+    // keepStdinOpen leaves the worker's stdin writable for interactive replies
+    // (gspr pauses); other jobs close it after the job line.
     void _run(const QJsonObject &job, QObject *context,
-              std::function<void(QJsonObject result, QString error)> onDone);
+              std::function<void(QJsonObject result, QString error)> onDone,
+              bool keepStdinOpen = false);
     QString _tsxPath() const;
     QString _scriptPath() const;
 
     QString m_workerDir;
+    QList<QPointer<QProcess>> m_procs; // live worker processes (for stopAll)
 };
 
 #endif // CASEWORKERRUNNER_H
