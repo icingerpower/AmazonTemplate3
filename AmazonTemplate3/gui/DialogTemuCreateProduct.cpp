@@ -2888,6 +2888,34 @@ QCoro::Task<void> DialogTemuCreateProduct::_publish()
             continue;
         }
 
+        // Send THIS country's localized size chart as the store's detailImage
+        // instead of the shared one. Only when the shared chart is checked
+        // (sizeChartTemuUrl non-empty); falls back to the shared chart when the
+        // country has no localized chart or hosting fails.
+        QString storeChartUrl = sizeChartTemuUrl;
+        const QString ccChartPath =
+            m_draft.sizeChartByCountry.value(store.country.toUpper());
+        if (!sizeChartTemuUrl.isEmpty() && !ccChartPath.isEmpty()) {
+            QString url = m_imageUrlCache.value(_imageCacheKey(ccChartPath));
+            if (url.isEmpty()) {
+                m_logEdit->appendPlainText(tr("  hosting %1 size chart…").arg(store.country));
+                QString hostErr;
+                url = co_await _hostLocalImage(ccChartPath, &hostErr);
+                if (url.isEmpty())
+                    m_logEdit->appendPlainText(tr("  ! %1 size chart hosting failed (%2) — "
+                                                  "using the shared chart").arg(store.country, hostErr));
+                else {
+                    m_imageUrlCache.insert(_imageCacheKey(ccChartPath), url);
+                    _saveImageUrlCache();
+                }
+            }
+            if (!url.isEmpty()) {
+                storeChartUrl = url;
+                m_logEdit->appendPlainText(tr("  using the %1 localized size chart.")
+                                               .arg(store.country));
+            }
+        }
+
     QJsonArray skuArr;
     QStringList carouselUrls;
     for (int r = 0; r < m_skuTable->rowCount(); ++r) {
@@ -2992,8 +3020,8 @@ QCoro::Task<void> DialogTemuCreateProduct::_publish()
         for (const QString &u : (carouselUrls.isEmpty() ? anyGalleryUrls : carouselUrls))
             carousel.append(u);
         goodsBasic.insert(QStringLiteral("goodsCarouselImage"), carousel);
-        if (!sizeChartTemuUrl.isEmpty())
-            goodsBasic.insert(QStringLiteral("detailImage"), QJsonArray{sizeChartTemuUrl});
+        if (!storeChartUrl.isEmpty()) // per-country chart when available
+            goodsBasic.insert(QStringLiteral("detailImage"), QJsonArray{storeChartUrl});
 
         // --- UPDATE path: the product already exists on this store ---
         if (m_existing.found && m_existing.goodsId != 0) {

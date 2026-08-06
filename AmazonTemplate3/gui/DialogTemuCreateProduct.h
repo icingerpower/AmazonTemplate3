@@ -74,6 +74,10 @@ public:
         QStringList imagePaths;       // gallery images, checked by default
         QStringList extraImagePaths;  // A+ (mobile) images, unchecked by default
         QString     sizeChartImagePath; // generated size chart, if any
+        // Per-country localized size charts ("FR" → local path), from the A+
+        // size_chart_{cc} elements. When a store's country has one, publish
+        // sends it as that store's detailImage instead of the shared chart.
+        QMap<QString, QString> sizeChartByCountry;
         // Gallery images grouped by base colour (Sku.color) so the dialog can
         // offer per-colour image selection. Key "" = images tied to no colour
         // (main / shared). Every path here also appears in imagePaths.

@@ -4149,6 +4149,33 @@ QCoro::Task<void> PaneSizing::onTemuCreateOrUpdate()
         const QString chartPath = pdir.absoluteFilePath(QStringLiteral("size_chart_temu.jpg"));
         if (m_groupImages.at(0).save(chartPath, "JPEG", 90))
             draft.sizeChartImagePath = chartPath;
+
+        // Per-country localized size charts. The A+ content already holds one
+        // chart per language group ("size_chart_fr", …) — map each selected
+        // store country to its chart so the Temu dialog sends the country's
+        // own image as that store's detailImage.
+        if (m_aplusContent) {
+            const QDir aplusDir = m_aplusContent->dir();
+            for (const auto &sel : stores) {
+                const QString cc = sel.first.toUpper();
+                if (draft.sizeChartByCountry.contains(cc))
+                    continue;
+                const QString elemId = QStringLiteral("size_chart_") + cc.toLower();
+                for (const APlusElement &el : m_aplusContent->elements()) {
+                    if (el.id != elemId)
+                        continue;
+                    if (const APlusVersion *ver = el.current()) {
+                        const QString p = aplusDir.filePath(ver->desktopFile);
+                        if (!ver->desktopFile.isEmpty() && QFileInfo::exists(p))
+                            draft.sizeChartByCountry.insert(cc, p);
+                    }
+                    break;
+                }
+            }
+            if (!draft.sizeChartByCountry.isEmpty())
+                qDebug() << "PaneSizing: per-country size charts for"
+                         << draft.sizeChartByCountry.keys();
+        }
     }
 
     // A+ (mobile) images — offered unchecked so they can optionally be added.
