@@ -1017,53 +1017,80 @@ QCoro::Task<void> PaneMarketplaces::_onShipByAmazon()
 
     const auto orders = m_ordersModel->orders();
 
-    // --- Phase 1: build one candidate per selected order (address + payload) ---
+    // --- Phase 1: build one candidate per parent order (address + payload) ---
+    // Multiple selected rows sharing the same parentOrderSn belong to the same
+    // customer shipment and must be merged into one MCF fulfillment order.
     struct Candidate {
-        TableMarketplaceOrders::OrderRow order;
         FulfillmentRequest request;
         QJsonObject payload; // exact JSON the source would send (preview)
+        QStringList skus;    // display-only, all SKUs in this MCF order
+        bool hasTracking = false;
     };
     QList<Candidate> candidates;
 
+    // Group selected rows by parentOrderSn (preserving first-seen order).
+    QMap<QString, QList<TableMarketplaceOrders::OrderRow>> byParent;
+    QStringList parentOrder; // insertion order for byParent
     for (const QModelIndex &idx : selected) {
         if (idx.row() < 0 || idx.row() >= orders.size())
             continue;
         const auto &order = orders.at(idx.row());
+        if (!byParent.contains(order.parentOrderSn))
+            parentOrder.append(order.parentOrderSn);
+        byParent[order.parentOrderSn].append(order);
+    }
 
-        AbstractTargetMarketplace *mkt = _marketplaceById(order.marketplaceId);
-        if (!mkt) {
-            QMessageBox::warning(this, tr("Unknown marketplace"),
-                tr("Order %1 belongs to marketplace \"%2\" which is not configured anymore.")
-                    .arg(order.orderSn, order.marketplaceId));
-            continue;
+    for (const QString &parentSn : parentOrder) {
+        const QList<TableMarketplaceOrders::OrderRow> &group = byParent[parentSn];
+
+        // Validate all rows in the group share a known marketplace and have SKUs.
+        AbstractTargetMarketplace *mkt = nullptr;
+        bool groupValid = true;
+        for (const auto &order : group) {
+            if (!mkt) mkt = _marketplaceById(order.marketplaceId);
+            if (!mkt) {
+                QMessageBox::warning(this, tr("Unknown marketplace"),
+                    tr("Order %1 belongs to marketplace \"%2\" which is not configured anymore.")
+                        .arg(order.orderSn, order.marketplaceId));
+                groupValid = false;
+                break;
+            }
+            if (order.sku.isEmpty()) {
+                QMessageBox::warning(this, tr("Missing SKU"),
+                    tr("Order %1 has no SKU — reload orders first.").arg(order.orderSn));
+                groupValid = false;
+                break;
+            }
         }
-        if (order.sku.isEmpty()) {
-            QMessageBox::warning(this, tr("Missing SKU"),
-                tr("Order %1 has no SKU — reload orders first.").arg(order.orderSn));
+        if (!groupValid)
             continue;
-        }
 
         ShippingAddress address;
-        co_await mkt->fetchOrderAddress(order.parentOrderSn, &address);
+        co_await mkt->fetchOrderAddress(parentSn, &address);
         if (!mkt->lastError().isEmpty() || !address.isValid()) {
             QMessageBox::warning(this, tr("Address error"),
                 tr("Could not fetch the shipping address of order %1:\n%2")
-                    .arg(order.orderSn, mkt->lastError()));
+                    .arg(parentSn, mkt->lastError()));
             continue;
         }
 
         FulfillmentRequest request;
-        request.fulfillmentOrderId = mkt->orderIdPrefix() + QStringLiteral("-") + order.parentOrderSn;
-        request.comment = QStringLiteral("%1 order %2").arg(mkt->displayName(), order.parentOrderSn);
+        request.fulfillmentOrderId = mkt->orderIdPrefix() + QStringLiteral("-") + parentSn;
+        request.comment = QStringLiteral("%1 order %2").arg(mkt->displayName(), parentSn);
         request.address = address;
-        FulfillmentItem item;
-        item.sku      = order.sku;
-        item.itemId   = order.orderSn;
-        item.quantity = order.quantity;
-        request.items.append(item);
 
         Candidate c;
-        c.order   = order;
+        for (const auto &order : group) {
+            FulfillmentItem item;
+            item.sku      = order.sku;
+            item.itemId   = order.orderSn;
+            item.quantity = order.quantity;
+            request.items.append(item);
+            c.skus.append(order.sku);
+            if (!order.trackingNumber.isEmpty())
+                c.hasTracking = true;
+        }
+
         c.request = request;
         c.payload = _source()->previewFulfillmentOrder(request);
         candidates.append(c);
@@ -1089,24 +1116,25 @@ QCoro::Task<void> PaneMarketplaces::_onShipByAmazon()
     table->verticalHeader()->hide();
     for (int i = 0; i < candidates.size(); ++i) {
         const Candidate &c = candidates.at(i);
-        const bool hasTracking = !c.order.trackingNumber.isEmpty();
 
         auto *idItem = new QTableWidgetItem(c.request.fulfillmentOrderId);
         idItem->setFlags(idItem->flags() | Qt::ItemIsUserCheckable);
         // Orders that already have a tracking number probably already exist at
         // the source — leave them unchecked by default.
-        idItem->setCheckState(hasTracking ? Qt::Unchecked : Qt::Checked);
+        idItem->setCheckState(c.hasTracking ? Qt::Unchecked : Qt::Checked);
         table->setItem(i, 0, idItem);
-        table->setItem(i, 1, new QTableWidgetItem(c.order.sku));
-        table->setItem(i, 2, new QTableWidgetItem(QString::number(c.order.quantity)));
+        table->setItem(i, 1, new QTableWidgetItem(c.skus.join(QStringLiteral(", "))));
+        int totalQty = 0;
+        for (const FulfillmentItem &it : c.request.items) totalQty += it.quantity;
+        table->setItem(i, 2, new QTableWidgetItem(QString::number(totalQty)));
         table->setItem(i, 3, new QTableWidgetItem(c.request.address.name));
         table->setItem(i, 4, new QTableWidgetItem(QStringLiteral("%1, %2 %3 (%4)")
             .arg(c.request.address.addressLine1,
                  c.request.address.postalCode,
                  c.request.address.city,
                  c.request.address.countryCode)));
-        table->setItem(i, 5, new QTableWidgetItem(hasTracking
-            ? tr("⚠ already has tracking %1").arg(c.order.trackingNumber)
+        table->setItem(i, 5, new QTableWidgetItem(c.hasTracking
+            ? tr("⚠ already has tracking number")
             : QString()));
     }
     table->resizeColumnsToContents();
