@@ -355,8 +355,14 @@ private:
 
     // Temu store selection table (one selectable store per country).
     void _initTemuStoreTable();
-    // Green "Created in temu" / red "Not created in temu" label on the Temu
-    // page, driven by temu/publishedCountries in the product's settings.ini.
+    // Defaults the store-selection checks to every configured Temu store whose
+    // brand matches m_currentBrand (previously nothing was checked by
+    // default). Resets other rows first, so it reflects only the CURRENT
+    // product's brand — called whenever the product's brand becomes known.
+    void _checkDefaultTemuStoresForBrand();
+    // Green "Created in temu" / orange "Partially created in temu" (some but
+    // not all of the brand's stores) / red "Not created in temu" label on the
+    // Temu page, driven by temu/publishedCountries in the product's settings.ini.
     void _updateTemuCreatedLabel();
     QList<QPair<QString, QString>> _selectedTemuStores() const;
     QCoro::Task<void> onTemuCreateOrUpdate();

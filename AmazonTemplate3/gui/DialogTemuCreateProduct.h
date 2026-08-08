@@ -26,6 +26,7 @@ class QDoubleSpinBox;
 class QSplitter;
 class QTableWidget;
 class QTreeWidget;
+class QCheckBox;
 
 // Review-and-publish dialog for creating/updating a product page on Temu from
 // the data loaded in PaneSizing. One product, one or more target stores (one
@@ -143,6 +144,16 @@ private:
     QCoro::Task<void> _regenerateFieldAllLangs(int which);
     void    _reloadKeywordTemplates();       // fill the combo from storage
     QString _titleKeywordInstruction() const; // keyword clause for the current store
+    // Yes/No confirmation showing the currently selected keyword template,
+    // before any title regeneration — a wrong template is easy to forget to
+    // switch. Returns true (proceed) on Yes.
+    bool _confirmKeywordTemplate();
+    // True when `title` is actually the CLI explaining why it couldn't satisfy
+    // the length limit + mandatory-keywords instructions at once, instead of an
+    // actual title (happens when a keyword template's list is too long for a
+    // given language) — catches it before it gets published as the Temu
+    // product name (which then makes Temu's category classifier fail).
+    bool _looksLikeTitleRefusal(const QString &title) const;
     QString _variationInstruction() const;    // colour/size clause for the title
     QString _storeLanguage() const;           // language name for the current store
     QString _textCountry() const;             // country code whose language is shown
@@ -286,6 +297,8 @@ private:
     QPushButton    *m_completeVariantsBtn = nullptr;
     QPlainTextEdit *m_logEdit = nullptr;
     QPushButton    *m_publishBtn = nullptr;
+    // Unchecked by default — see the constructor comment where it's created.
+    QCheckBox      *m_replaceSizeChartCheck = nullptr;
     // Splitters kept as members so their positions persist across sessions
     // (restored in the ctor, saved in done()).
     QSplitter      *m_topSplit = nullptr;

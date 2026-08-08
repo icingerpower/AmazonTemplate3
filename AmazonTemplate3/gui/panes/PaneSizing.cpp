@@ -1063,6 +1063,11 @@ void PaneSizing::_ensureModel(const QDir &dir)
                 m_currentBrand = brand;
                 m_currentBulletPoints = bullets;
                 TreeTemuStoreBrands::cacheBrand(brand);
+                // Default-check every configured Temu store for this brand
+                // (previously nothing was checked, forcing a manual pick
+                // every time).
+                _checkDefaultTemuStoresForBrand();
+                _updateTemuCreatedLabel(); // depends on m_currentBrand too
                 QString text;
                 if (!bullets.isEmpty()) {
                     text += tr("Bullet points:\n");
@@ -3787,22 +3792,51 @@ void PaneSizing::_updateTemuCreatedLabel()
     }
     QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
                 QSettings::IniFormat);
-    QStringList countries =
+    QStringList done =
         s.value(QStringLiteral("temu/publishedCountries")).toStringList();
-    for (QString &c : countries) c = c.toUpper();
-    countries.removeDuplicates();
-    countries.sort();
-    if (countries.isEmpty()) {
+    for (QString &c : done) c = c.toUpper();
+    done.removeDuplicates();
+    done.sort();
+
+    if (done.isEmpty()) {
         ui->labelTemuCreated->setText(tr("Not created in temu"));
         ui->labelTemuCreated->setStyleSheet(
             QStringLiteral("color: red; font-weight: bold;"));
         ui->labelTemuCreated->setToolTip(QString{});
-    } else {
+        return;
+    }
+
+    // Total = every country this brand has a configured Temu store in, so we
+    // can tell "created everywhere" apart from "created in some countries but
+    // not all" (e.g. one store failed with a transient API error).
+    QStringList total;
+    if (!m_currentBrand.trimmed().isEmpty()) {
+        TemuStoreModel storeModel;
+        for (const TemuStore &store : storeModel.stores())
+            if (store.label.compare(m_currentBrand, Qt::CaseInsensitive) == 0)
+                total << store.country.toUpper();
+        total.removeDuplicates();
+    }
+
+    QStringList missing;
+    for (const QString &cc : total)
+        if (!done.contains(cc))
+            missing << cc;
+    missing.sort();
+
+    if (total.isEmpty() || missing.isEmpty()) {
         ui->labelTemuCreated->setText(tr("Created in temu"));
         ui->labelTemuCreated->setStyleSheet(
             QStringLiteral("color: green; font-weight: bold;"));
         ui->labelTemuCreated->setToolTip(
-            tr("Published countries: %1").arg(countries.join(QLatin1Char(' '))));
+            tr("Published countries: %1").arg(done.join(QLatin1Char(' '))));
+    } else {
+        ui->labelTemuCreated->setText(tr("Partially created in temu"));
+        ui->labelTemuCreated->setStyleSheet(
+            QStringLiteral("color: darkorange; font-weight: bold;"));
+        ui->labelTemuCreated->setToolTip(
+            tr("Done: %1\nMissing: %2").arg(done.join(QLatin1Char(' ')),
+                                            missing.join(QLatin1Char(' '))));
     }
 }
 
@@ -3878,6 +3912,27 @@ void PaneSizing::_initTemuStoreTable()
     }
     ui->tableViewTemuStores->resizeColumnToContents(0);
     ui->tableViewTemuStores->resizeColumnToContents(1);
+    m_temuStoreSelectGuard = false;
+
+    // Re-apply the brand-based default for whichever product is already
+    // loaded (e.g. after "Edit stores" rebuilt this table from scratch).
+    _checkDefaultTemuStoresForBrand();
+}
+
+void PaneSizing::_checkDefaultTemuStoresForBrand()
+{
+    if (!m_temuStoreSelectModel)
+        return;
+    const QString brand = m_currentBrand.trimmed();
+    m_temuStoreSelectGuard = true;
+    for (int r = 0; r < m_temuStoreSelectModel->rowCount(); ++r) {
+        QStandardItem *check = m_temuStoreSelectModel->item(r, 0);
+        if (!check)
+            continue;
+        const bool matches = !brand.isEmpty()
+            && check->data(Qt::UserRole + 2).toString().compare(brand, Qt::CaseInsensitive) == 0;
+        check->setCheckState(matches ? Qt::Checked : Qt::Unchecked);
+    }
     m_temuStoreSelectGuard = false;
 }
 

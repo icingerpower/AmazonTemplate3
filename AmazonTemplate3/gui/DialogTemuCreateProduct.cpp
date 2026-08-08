@@ -26,6 +26,7 @@
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QProgressDialog>
+#include <QCheckBox>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
@@ -544,6 +545,16 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     m_logEdit = new QPlainTextEdit(this);
     m_logEdit->setReadOnly(true);
 
+    // Unchecked by default: partial-update normally leaves an existing store's
+    // size chart alone (Temu rejects re-processing it every time). Check this
+    // when you've fixed a wrong size chart and need THIS update to push the
+    // corrected image (shared or per-country) to already-existing stores.
+    m_replaceSizeChartCheck = new QCheckBox(tr("Replace size chart image on update"), this);
+    m_replaceSizeChartCheck->setToolTip(
+        tr("On update, the size chart image is normally left unchanged.\n"
+           "Check this to push the current size chart (fixing a wrong one) to "
+           "stores that already have this product."));
+
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
     m_publishBtn = buttons->addButton(tr("Create / Update"), QDialogButtonBox::AcceptRole);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
@@ -553,7 +564,12 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     // enlarge the images/preview/attributes row when reordering images.
     m_mainSplit = new QSplitter(Qt::Vertical, this);
     QSplitter *mainSplit = m_mainSplit;
-    mainSplit->setChildrenCollapsible(false);
+    // Collapsible (default): with 5 stacked sections, forcing every one to keep
+    // its full minimumSizeHint (false) left almost no range to actually drag a
+    // handle. Collapsible lets a section be squeezed down — even to zero — so
+    // dragging is free across the whole splitter; each section's label/header
+    // stays visible in the handle area either way.
+    mainSplit->setChildrenCollapsible(true);
 
     mainSplit->addWidget(m_topSplit); // images | preview | attributes
 
@@ -630,6 +646,12 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     lay->addLayout(header);
     lay->addLayout(catRow);
     lay->addWidget(mainSplit, 1);
+    {
+        auto *bottomRow = new QHBoxLayout;
+        bottomRow->addWidget(m_replaceSizeChartCheck);
+        bottomRow->addStretch();
+        lay->addLayout(bottomRow);
+    }
     lay->addWidget(buttons);
 
     // --- Wiring ---
@@ -639,7 +661,8 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
     connect(m_suggestBtn, &QPushButton::clicked, this, [this]() { m_catTask = _suggestCategory(); });
     connect(m_aiPickBtn,  &QPushButton::clicked, this, [this]() { m_catTask = _aiPickCategory(); });
     connect(m_browseBtn,  &QPushButton::clicked, this, [this]() { m_catTask = _browseCategory(); });
-    connect(genBtn, &QPushButton::clicked, this, [this]() { m_textTask = _generateText(); });
+    connect(genBtn, &QPushButton::clicked, this,
+            [this]() { if (_confirmKeywordTemplate()) m_textTask = _generateText(); });
     connect(fetchPriceBtn, &QPushButton::clicked, this, [this]() { m_priceTask = _fetchAmazonData(); });
     connect(applyAllBtn, &QPushButton::clicked, this, [this]() { _applyRowToAll(); });
     connect(m_completeVariantsBtn, &QPushButton::clicked, this,
@@ -664,12 +687,19 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
                     QStringLiteral("TemuTitleKeywordTemplateId"),
                     m_keywordTemplateCombo->currentData().toString());
             });
-    connect(regenTitleBtn,   &QPushButton::clicked, this, [this]() { m_textTask = _regenerateField(0); });
+    // The keyword template only feeds the TITLE prompt (_titleKeywordInstruction()
+    // is only added for which==0), so the confirmation only fires for the entry
+    // points that regenerate the title — asking on a bullets/description-only
+    // regen would reference a setting that has no effect on it.
+    connect(regenTitleBtn,   &QPushButton::clicked, this,
+            [this]() { if (_confirmKeywordTemplate()) m_textTask = _regenerateField(0); });
     connect(regenBulletsBtn, &QPushButton::clicked, this, [this]() { m_textTask = _regenerateField(1); });
     connect(regenDescBtn,    &QPushButton::clicked, this, [this]() { m_textTask = _regenerateField(2); });
-    connect(regenAllBtn,     &QPushButton::clicked, this, [this]() { m_textAllTask = _regenerateAllText(); });
+    connect(regenAllBtn,     &QPushButton::clicked, this,
+            [this]() { if (_confirmKeywordTemplate()) m_textAllTask = _regenerateAllText(); });
     connect(resetTextBtn,    &QPushButton::clicked, this, [this]() { _resetText(); });
-    connect(allTitleBtn,     &QPushButton::clicked, this, [this]() { m_textAllTask = _regenerateFieldAllLangs(0); });
+    connect(allTitleBtn,     &QPushButton::clicked, this,
+            [this]() { if (_confirmKeywordTemplate()) m_textAllTask = _regenerateFieldAllLangs(0); });
     connect(allBulletsBtn,   &QPushButton::clicked, this, [this]() { m_textAllTask = _regenerateFieldAllLangs(1); });
     connect(allDescBtn,      &QPushButton::clicked, this, [this]() { m_textAllTask = _regenerateFieldAllLangs(2); });
     // Picking a language in the list swaps the editors to that country's text.
@@ -1531,8 +1561,60 @@ QString DialogTemuCreateProduct::_titleKeywordInstruction() const
     const QStringList kws = DialogKeywordTemplates::keywordsFor(id, _textCountry());
     if (kws.isEmpty())
         return {};
-    return tr("\n\nThe title MUST naturally include ALL of these keywords "
-              "(Temu ranks titles by keywords): %1").arg(kws.join(QStringLiteral(", ")));
+    // The character limit is a HARD requirement and always wins: a template
+    // whose keywords don't fit within it must never make you refuse or explain
+    // instead of writing a title — drop the keywords that don't fit and still
+    // produce a normal, valid product title.
+    return tr("\n\nThe title should naturally include these keywords, in this "
+              "order of priority (Temu ranks titles by keywords): %1. The "
+              "character limit above is a HARD requirement and takes priority "
+              "over including every keyword — include as many of these "
+              "keywords as fit within it (drop the lowest-priority ones first), "
+              "and ALWAYS output a normal, complete, valid product title. Never "
+              "output an explanation, apology, error or refusal in place of the "
+              "title, even if the keywords don't all fit.")
+        .arg(kws.join(QStringLiteral(", ")));
+}
+
+// Asks the user to confirm the currently selected title keyword template before
+// regenerating a title — the template is easy to forget to switch when moving
+// to a different product, and a wrong one silently poisons the whole title.
+bool DialogTemuCreateProduct::_confirmKeywordTemplate()
+{
+    const QString name = m_keywordTemplateCombo->currentText();
+    return QMessageBox::question(this, tr("Confirm keyword template"),
+        tr("Title keyword template selected: \"%1\".\n\n"
+           "Is this the right template for THIS product? "
+           "(Easy to forget to switch when moving to a new product.)")
+            .arg(name.isEmpty() ? tr("(none)") : name),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes) == QMessageBox::Yes;
+}
+
+bool DialogTemuCreateProduct::_looksLikeTitleRefusal(const QString &title) const
+{
+    const QString t = title.trimmed();
+    if (t.isEmpty())
+        return true;
+    if (t.size() > 130) // a real title never runs this long — an explanation does
+        return true;
+    // Best-effort, language-agnostic-ish: phrases a refusal/explanation is
+    // likely to contain, across the marketplace languages we generate in.
+    static const QStringList markers = {
+        QStringLiteral("not possible"), QStringLiteral("cannot"), QStringLiteral("unable to"),
+        QStringLiteral("impossible"), QStringLiteral("exceeds"), QStringLiteral("characters long"),
+        QStringLiteral("pas possible"), QStringLiteral("caractères"),
+        QStringLiteral("nicht möglich"), QStringLiteral("zeichen"), QStringLiteral("benötig"),
+        QStringLiteral("erforderlich"),
+        QStringLiteral("non è possibile"), QStringLiteral("caratteri"),
+        QStringLiteral("no es posible"), QStringLiteral("caracteres"),
+        QStringLiteral("niet mogelijk"), QStringLiteral("tekens"),
+        QStringLiteral("fehler"), QStringLiteral("erreur"), QStringLiteral("errore"),
+    };
+    const QString lower = t.toLower();
+    for (const QString &m : markers)
+        if (lower.contains(m))
+            return true;
+    return false;
 }
 
 // Language of the current store's country, for CLI generation.
@@ -2091,8 +2173,32 @@ QCoro::Task<void> DialogTemuCreateProduct::_generateText()
         m_logEdit->appendPlainText(tr("CLI returned no parseable JSON; left text unchanged."));
         co_return;
     }
-    if (o.contains(QStringLiteral("title")))
-        _applyTextResult(target, 0, _finalizeTitle(o.value(QStringLiteral("title")).toString()));
+    if (o.contains(QStringLiteral("title"))) {
+        QString titleText = o.value(QStringLiteral("title")).toString();
+        if (_looksLikeTitleRefusal(titleText)) {
+            m_logEdit->appendPlainText(tr("  ⚠ title looked like a refusal, not a title (\"%1\") — "
+                "retrying without the keyword requirement…").arg(titleText.left(150)));
+            const QString retryPrompt = tr(
+                "Write a concise selling title for this product (max 100 chars, plain "
+                "text only, no quotes, no markdown).\n\nProduct: %1\nBrand: %2")
+                .arg(m_draft.title, m_draft.brand)
+                + _variationInstruction() + _titleGuidance() + _noBrandInstruction()
+                + _languageInstruction(tr("the title"));
+            const CliRunResult r2 = co_await _runCli(retryPrompt);
+            titleText = r2.output.trimmed();
+            if (titleText.size() >= 2 && titleText.startsWith(QLatin1Char('"'))
+                    && titleText.endsWith(QLatin1Char('"')))
+                titleText = titleText.mid(1, titleText.size() - 2).trimmed();
+            if (_looksLikeTitleRefusal(titleText)) {
+                m_logEdit->appendPlainText(tr("  ✗ retry also failed — title left unchanged. "
+                    "Shorten the \"%1\" keyword list for %2.")
+                    .arg(m_keywordTemplateCombo->currentText(), _storeLanguage()));
+                titleText.clear();
+            }
+        }
+        if (!titleText.isEmpty())
+            _applyTextResult(target, 0, _finalizeTitle(titleText));
+    }
     if (o.contains(QStringLiteral("bullets"))) {
         QStringList bl;
         for (const QJsonValue &v : o.value(QStringLiteral("bullets")).toArray())
@@ -2211,6 +2317,27 @@ QCoro::Task<void> DialogTemuCreateProduct::_regenerateField(int which)
         if (text.isEmpty()) {
             m_logEdit->appendPlainText(tr("  empty output; unchanged."));
             co_return;
+        }
+        if (which == 0 && _looksLikeTitleRefusal(text)) {
+            m_logEdit->appendPlainText(tr("  ⚠ title looked like a refusal, not a title (\"%1\") — "
+                "retrying without the keyword requirement…").arg(text.left(150)));
+            const QString retryPrompt = tr(
+                "You improve Temu product copy. Produce a BETTER title as plain text only "
+                "— a concise selling title, max 100 chars, no quotes, no markdown.\n\n"
+                "Product: %1\nBrand: %2\nCurrent title (improve on it):\n%3")
+                .arg(m_draft.title, m_draft.brand, current)
+                + _variationInstruction() + _titleGuidance()
+                + _noBrandInstruction() + _languageInstruction(field);
+            const CliRunResult r2 = co_await _runCli(retryPrompt);
+            text = stripFences(r2.output.trimmed());
+            if (text.size() >= 2 && text.startsWith(QLatin1Char('"')) && text.endsWith(QLatin1Char('"')))
+                text = text.mid(1, text.size() - 2).trimmed();
+            if (_looksLikeTitleRefusal(text)) {
+                m_logEdit->appendPlainText(tr("  ✗ retry also failed — title left unchanged. "
+                    "Shorten the \"%1\" keyword list for %2.")
+                    .arg(m_keywordTemplateCombo->currentText(), _storeLanguage()));
+                co_return;
+            }
         }
         _applyTextResult(target, which, which == 0 ? _finalizeTitle(text) : text);
     }
@@ -2868,6 +2995,9 @@ QCoro::Task<void> DialogTemuCreateProduct::_publish()
     const int originalStoreIndex = m_storeCombo->currentIndex();
     for (int si = 0; si < m_stores.size(); ++si) {
         const StorePick &store = m_stores.at(si);
+        // Country + brand, so the summary/failure messages identify WHICH store
+        // failed (several stores can share the same brand label, e.g. "Musuly").
+        const QString storeLabel = tr("%1 · %2").arg(store.country, store.label);
         { QSignalBlocker b(m_storeCombo); m_storeCombo->setCurrentIndex(si); }
         // Switch context WITHOUT rebuilding the attribute form (that would wipe
         // the values just filled): load this country's text, rebuild the API for
@@ -2884,7 +3014,7 @@ QCoro::Task<void> DialogTemuCreateProduct::_publish()
         co_await m_api->lookupGoods(sns, &m_existing);
         if (!m_api->lastError().isEmpty()) {
             m_logEdit->appendPlainText(tr("  lookup failed: %1").arg(m_api->lastError()));
-            summary << tr("%1: lookup FAILED (%2)").arg(store.label, m_api->lastError());
+            summary << tr("%1: lookup FAILED (%2)").arg(storeLabel, m_api->lastError());
             continue;
         }
 
@@ -3029,7 +3159,7 @@ QCoro::Task<void> DialogTemuCreateProduct::_publish()
             if (skipExisting) {
                 m_logEdit->appendPlainText(tr("  already exists — skipped."));
                 summary << tr("%1: skipped (already exists, goodsId %2)")
-                               .arg(store.label).arg(m_existing.goodsId);
+                               .arg(storeLabel).arg(m_existing.goodsId);
                 continue;
             }
             // partial.update edits text + images (prices/stock have dedicated
@@ -3039,6 +3169,14 @@ QCoro::Task<void> DialogTemuCreateProduct::_publish()
             if (!m_descEdit->toPlainText().trimmed().isEmpty())
                 upBasic.insert(QStringLiteral("goodsDesc"), m_descEdit->toPlainText().trimmed());
             upBasic.insert(QStringLiteral("goodsCarouselImage"), carousel);
+            // The size chart is normally left alone on update (Temu re-processes
+            // the product each time it changes) — only pushed when the user
+            // explicitly asks to fix a wrong one.
+            if (m_replaceSizeChartCheck && m_replaceSizeChartCheck->isChecked()
+                    && !storeChartUrl.isEmpty()) {
+                upBasic.insert(QStringLiteral("detailImage"), QJsonArray{storeChartUrl});
+                m_logEdit->appendPlainText(tr("  replacing size chart image."));
+            }
             QJsonObject upFields;
             upFields.insert(QStringLiteral("goodsBasic"), upBasic);
             QJsonArray bulletsUp;
@@ -3054,12 +3192,12 @@ QCoro::Task<void> DialogTemuCreateProduct::_publish()
                 m_logEdit->appendPlainText(tr("  update failed: %1").arg(err));
                 if (err.contains(QStringLiteral("150010205")))
                     m_logEdit->appendPlainText(tr("  (Temu still processing — wait ~10 min then retry.)"));
-                summary << tr("%1: update FAILED (%2)").arg(store.label, err);
+                summary << tr("%1: update FAILED (%2)").arg(storeLabel, err);
                 continue;
             }
             co_await _submitCompliance(m_existing.goodsId);
             m_logEdit->appendPlainText(tr("  updated goodsId %1.").arg(m_existing.goodsId));
-            summary << tr("%1: updated (goodsId %2)").arg(store.label).arg(m_existing.goodsId);
+            summary << tr("%1: updated (goodsId %2)").arg(storeLabel).arg(m_existing.goodsId);
             continue;
         }
 
@@ -3070,18 +3208,36 @@ QCoro::Task<void> DialogTemuCreateProduct::_publish()
             payload.insert(QStringLiteral("attributes"), attrsArr);
         payload.insert(QStringLiteral("skuList"), skuArr);
 
-        m_logEdit->appendPlainText(tr("  creating product (V3)…"));
-        qDebug().noquote() << "Temu V3 publish payload (" << store.country << "):"
-                           << QJsonDocument(payload).toJson(QJsonDocument::Compact);
+        // Retry on failure (e.g. a transient "System error, please try again
+        // later"): ask before giving up on this store, so a one-off backend
+        // hiccup doesn't force re-running the whole multi-store publish.
+        qint64 id = 0;
+        QString createErr;
+        for (;;) {
+            m_logEdit->appendPlainText(tr("  creating product (V3)…"));
+            qDebug().noquote() << "Temu V3 publish payload (" << store.country << "):"
+                               << QJsonDocument(payload).toJson(QJsonDocument::Compact);
 
-        const qint64 id = co_await m_api->publishGoodsV3(payload);
-        if (id == 0) {
-            const QString err = m_api->lastError();
-            m_logEdit->appendPlainText(tr("  FAILED: %1").arg(err));
-            if (err.contains(QStringLiteral("150010090"))) // SKU duplicated
+            id = co_await m_api->publishGoodsV3(payload);
+            if (id != 0)
+                break;
+
+            createErr = m_api->lastError();
+            m_logEdit->appendPlainText(tr("  FAILED: %1").arg(createErr));
+            if (createErr.contains(QStringLiteral("150010090"))) { // SKU duplicated
                 m_logEdit->appendPlainText(tr("  This SKU already exists on Temu — created earlier. "
                     "Wait ~10 min, then re-open: it will switch to Update mode."));
-            summary << tr("%1: create FAILED (%2)").arg(store.label, err);
+                break; // retrying can't fix this — no point asking
+            }
+            const bool retry = QMessageBox::question(this, tr("Create failed"),
+                tr("Creating the product on %1 failed:\n\n%2\n\nTry creating it again?")
+                    .arg(storeLabel, createErr),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes) == QMessageBox::Yes;
+            if (!retry)
+                break;
+        }
+        if (id == 0) {
+            summary << tr("%1: create FAILED (%2)").arg(storeLabel, createErr);
             continue;
         }
 
@@ -3090,7 +3246,7 @@ QCoro::Task<void> DialogTemuCreateProduct::_publish()
         const bool complianceOk = co_await _submitCompliance(id);
         publishedCountries.insert(store.country.toUpper());
         m_logEdit->appendPlainText(tr("  OK — goodsId %1.").arg(id));
-        summary << tr("%1: created (goodsId %2)%3").arg(store.label).arg(id)
+        summary << tr("%1: created (goodsId %2)%3").arg(storeLabel).arg(id)
                        .arg(complianceOk ? QString{} : tr(" — compliance needs manual entry"));
     } // end per-store loop
 

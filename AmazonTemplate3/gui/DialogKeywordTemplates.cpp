@@ -97,10 +97,13 @@ DialogKeywordTemplates::DialogKeywordTemplates(QWidget *parent)
     m_tree->setHeaderLabels({tr("Country / keyword")});
     auto *addCountryBtn = new QPushButton(tr("Add country"), this);
     auto *addKwBtn      = new QPushButton(tr("Add keyword"), this);
+    auto *addKwsBtn     = new QPushButton(tr("Add keywords…"), this);
+    addKwsBtn->setToolTip(tr("Enter several keywords at once, one per line."));
     auto *delItemBtn    = new QPushButton(tr("Remove"), this);
     auto *treeBtns = new QHBoxLayout;
     treeBtns->addWidget(addCountryBtn);
     treeBtns->addWidget(addKwBtn);
+    treeBtns->addWidget(addKwsBtn);
     treeBtns->addWidget(delItemBtn);
     auto *rightCol = new QVBoxLayout;
     rightCol->addWidget(new QLabel(tr("Countries → keywords to force into the title:"), this));
@@ -132,6 +135,7 @@ DialogKeywordTemplates::DialogKeywordTemplates(QWidget *parent)
     connect(delTplBtn, &QPushButton::clicked, this, &DialogKeywordTemplates::_removeTemplate);
     connect(addCountryBtn, &QPushButton::clicked, this, &DialogKeywordTemplates::_addCountry);
     connect(addKwBtn, &QPushButton::clicked, this, &DialogKeywordTemplates::_addKeyword);
+    connect(addKwsBtn, &QPushButton::clicked, this, &DialogKeywordTemplates::_addKeywords);
     connect(delItemBtn, &QPushButton::clicked, this, &DialogKeywordTemplates::_removeTreeItem);
 
     _reloadTemplateList();
@@ -270,6 +274,35 @@ void DialogKeywordTemplates::_addKeyword()
     country->setExpanded(true);
     m_tree->setCurrentItem(kw);
     m_tree->editItem(kw, 0);
+}
+
+void DialogKeywordTemplates::_addKeywords()
+{
+    QTreeWidgetItem *cur = m_tree->currentItem();
+    if (!cur) {
+        QMessageBox::information(this, tr("Add keywords"), tr("Select a country first."));
+        return;
+    }
+    QTreeWidgetItem *country = cur->parent() ? cur->parent() : cur;
+
+    bool ok = false;
+    const QString text = QInputDialog::getMultiLineText(this, tr("Add keywords"),
+        tr("One keyword per line:"), QString{}, &ok);
+    if (!ok)
+        return;
+
+    QTreeWidgetItem *lastAdded = nullptr;
+    for (const QString &line : text.split(QLatin1Char('\n'))) {
+        const QString kw = line.trimmed();
+        if (kw.isEmpty())
+            continue;
+        auto *kwItem = new QTreeWidgetItem(country, {kw});
+        kwItem->setFlags(kwItem->flags() | Qt::ItemIsEditable);
+        lastAdded = kwItem;
+    }
+    country->setExpanded(true);
+    if (lastAdded)
+        m_tree->setCurrentItem(lastAdded);
 }
 
 void DialogKeywordTemplates::_removeTreeItem()

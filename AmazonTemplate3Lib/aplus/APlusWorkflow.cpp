@@ -252,27 +252,33 @@ public:
                     "Save as desktop.png in the current directory.");
                 case 1: return QCoreApplication::translate("APlusWorkflow",
                     "Generate a professional Amazon A+ desktop image (970x600 px, landscape) "
-                    "of the shoe in %1. Show three complementary angles: "
-                    "a 3/4 front view, a side profile highlighting the heel height and silhouette, "
-                    "and a rear or detail view showing heel construction or toe shape. "
+                    "of the shoe, matching its exact color(s) and design from the reference "
+                    "photo — do not alter, simplify or rebalance the color. Show three "
+                    "complementary angles: a 3/4 front view, a side profile highlighting the "
+                    "heel height and silhouette, and a rear or detail view showing heel "
+                    "construction or toe shape. "
                     "Shoe is the clear hero — clean or minimally styled background, "
                     "aspirational, premium quality. No text overlays, no watermarks. "
                     "Save as desktop.png in the current directory.");
                 case 2: return QCoreApplication::translate("APlusWorkflow",
                     "Generate a professional Amazon A+ desktop image (970x600 px, landscape) "
-                    "featuring a close-up detail study of the shoe%1. "
+                    "featuring a close-up detail study of the shoe. "
                     "Focus on the most distinctive design elements: heel architecture, "
                     "sole construction, upper material texture, hardware (buckle, strap, "
                     "embellishment) or toe shape — whichever best conveys craftsmanship. "
-                    "%2 "
+                    "%1 "
                     "High-contrast lighting to reveal texture and finish. "
                     "No text overlays, no watermarks. "
                     "Save as desktop.png in the current directory.");
                 case 3: return QCoreApplication::translate("APlusWorkflow",
                     "Generate a professional Amazon A+ desktop image (970x600 px, landscape) "
                     "that sells the aspiration of wearing this shoe rather than documenting it. "
-                    "The shoe in %1 is the sole subject — no models, no faces, no competing props. "
-                    "Select one aspirational setting that matches the shoe's color and mood:\n"
+                    "The shoe — exact color(s) and design as shown in the reference photo, do "
+                    "not alter or rebalance the color — is the sole subject — no models, no "
+                    "faces, no competing props. "
+                    "Select one aspirational setting that matches the shoe's ACTUAL color and "
+                    "mood (use the reference photo as ground truth, especially for a two-tone "
+                    "or multi-color shoe — do not default to whichever color is named first):\n"
                     "  rose gold or blush → marble foyer of a gala or art opening at dusk;\n"
                     "  black → rooftop terrace, theater lobby or rain-slicked cobblestones at night;\n"
                     "  white or ivory → sun-drenched coastal terrace or garden event;\n"
@@ -297,23 +303,26 @@ public:
                     "Save as desktop.png in the current directory.");
                 case 1: return QCoreApplication::translate("APlusWorkflow",
                     "Generate a professional Amazon A+ desktop marketing image (970x600 px, landscape) "
-                    "showing 3 models all wearing the product in %1. "
-                    "Use 3 different angles or poses to highlight the cut and fit. "
+                    "showing 3 models all wearing the product, matching its exact color(s) and "
+                    "design from the reference photo — do not alter, simplify or rebalance the "
+                    "color. Use 3 different angles or poses to highlight the cut and fit. "
                     "Aspirational lifestyle scene, premium quality, raises perceived value and "
                     "desire to buy. No text overlays, no watermarks. "
                     "Save as desktop.png in the current directory.");
                 case 2: return QCoreApplication::translate("APlusWorkflow",
                     "Generate a professional Amazon A+ desktop image (970x600 px, landscape) "
-                    "showing one model wearing the product%1, paired with a prominent close-up "
+                    "showing one model wearing the product, paired with a prominent close-up "
                     "of the fabric texture or a key design feature (stitching, weave, hardware, "
                     "trim — whichever best highlights craftsmanship). "
-                    "%2 "
+                    "%1 "
                     "Goal: convey quality, craftsmanship and premium feel. "
                     "No text overlays, no watermarks. "
                     "Save as desktop.png in the current directory.");
                 case 3: return QCoreApplication::translate("APlusWorkflow",
                     "Generate a professional Amazon A+ desktop lifestyle image (970x600 px, landscape) "
-                    "that sells the aspiration of wearing this %1 garment rather than simply documenting it. "
+                    "that sells the aspiration of wearing this garment rather than simply "
+                    "documenting it — render its color(s) and design exactly as shown in the "
+                    "reference photo, do not alter or rebalance the color. "
                     "Show one model in an environment that matches the garment's occasion and elevates desire: "
                     "choose a setting that reflects the product's mood — outdoor market, rooftop, "
                     "hotel lobby, art gallery, garden event or similar — without clichés. "
@@ -341,22 +350,26 @@ public:
                     "Save as mobile.png in the current directory.");
                 case 1: return QCoreApplication::translate("APlusWorkflow",
                     "Generate a professional Amazon A+ mobile image (600x600 px, square) "
-                    "of the shoe in %1. Show two complementary angles — "
-                    "a 3/4 front view and a side profile highlighting the heel silhouette. "
+                    "of the shoe, matching its exact color(s) and design from the reference "
+                    "photo — do not alter, simplify or rebalance the color. Show two "
+                    "complementary angles — a 3/4 front view and a side profile highlighting "
+                    "the heel silhouette. "
                     "Clean background, shoe is the hero, aspirational. No text overlays. "
                     "Save as mobile.png in the current directory.");
                 case 2: return QCoreApplication::translate("APlusWorkflow",
                     "Generate a professional Amazon A+ mobile image (600x600 px, square) "
-                    "featuring a prominent close-up of a key design detail of the shoe%1 — "
+                    "featuring a prominent close-up of a key design detail of the shoe — "
                     "heel architecture, upper material texture, hardware or toe shape. "
-                    "%2 "
+                    "%1 "
                     "Convey craftsmanship and premium quality. No text overlays. "
                     "Save as mobile.png in the current directory.");
                 case 3: return QCoreApplication::translate("APlusWorkflow",
                     "Generate a professional Amazon A+ mobile image (600x600 px, square) "
-                    "that evokes the desire to wear this shoe in %1. "
+                    "that evokes the desire to wear this shoe — exact color(s) and design as "
+                    "shown in the reference photo, do not alter or rebalance the color. "
                     "The shoe is the sole subject — no models, no faces. "
-                    "Choose a setting that matches its color story: "
+                    "Choose a setting that matches its ACTUAL color story (use the reference "
+                    "photo as ground truth, especially for a two-tone or multi-color shoe): "
                     "rose gold / blush → marble or gallery floor at dusk; "
                     "black → cobblestone or polished dark floor at night; "
                     "white / ivory → sun-lit stone terrace; "
@@ -377,19 +390,23 @@ public:
                     "Save as mobile.png in the current directory.");
                 case 1: return QCoreApplication::translate("APlusWorkflow",
                     "Generate a professional Amazon A+ mobile marketing image (600x600 px, square) "
-                    "showing 2 models wearing the product in %1. "
+                    "showing 2 models wearing the product, matching its exact color(s) and "
+                    "design from the reference photo — do not alter, simplify or rebalance "
+                    "the color. "
                     "Aspirational lifestyle scene, premium quality, no text overlays. "
                     "Save as mobile.png in the current directory.");
                 case 2: return QCoreApplication::translate("APlusWorkflow",
                     "Generate a professional Amazon A+ mobile image (600x600 px, square) "
-                    "showing one model wearing the product%1 with a prominent close-up of "
+                    "showing one model wearing the product with a prominent close-up of "
                     "the fabric texture or key design feature. "
-                    "%2 "
+                    "%1 "
                     "Convey quality and craftsmanship, no text overlays. "
                     "Save as mobile.png in the current directory.");
                 case 3: return QCoreApplication::translate("APlusWorkflow",
                     "Generate a professional Amazon A+ mobile lifestyle image (600x600 px, square) "
-                    "that captures the aspiration of wearing this %1 garment. "
+                    "that captures the aspiration of wearing this garment — render its "
+                    "color(s) and design exactly as shown in the reference photo, do not "
+                    "alter or rebalance the color. "
                     "One model in a setting that elevates the product: outdoor, urban, hotel, "
                     "gallery or similar — chosen to match the garment's occasion and mood. "
                     "The garment is the clear hero, editorial framing, aspirational atmosphere. "
@@ -468,14 +485,19 @@ public:
             result << spec;
         }
 
-        // 2. Per-color images — focus color first, then alphabetical
+        // 2. Per-color images — focus color first, then alphabetical. The color
+        // name is NOT interpolated into the prompt text: a compound/two-tone
+        // color (e.g. "Black/Beige") made the AI over-render the second color
+        // when told about it in prose. The reference photo (in mainImageHint /
+        // injectColorImageHints) is the sole source of truth for the real color
+        // balance.
         for (const QString &color : orderedColors) {
             ImageSlotSpec spec;
             spec.elementId   = QStringLiteral("image_color_") + colorSafeId(color);
             spec.displayName = QCoreApplication::translate("APlusWorkflow", "Color — %1").arg(color);
 
-            const QString desktopSpec = defaultDesktopPrompt(1).arg(color);
-            const QString mobileSpec = defaultMobilePrompt(1).arg(color);
+            const QString desktopSpec = defaultDesktopPrompt(1);
+            const QString mobileSpec = defaultMobilePrompt(1);
 
             spec.desktopPrompt = buildPreamble(productDesc, mainImageHint, colorInstr) + desktopSpec;
             spec.mobilePrompt  = buildPreamble(productDesc, mainImageHint, colorInstr) + mobileSpec;
@@ -483,19 +505,20 @@ public:
             result << spec;
         }
 
-        // 3. Aspirational / Cinematic — for any single-color product
+        // 3. Aspirational / Cinematic — for any single-color product. Same
+        // reasoning as above: the mood-matching list in the prompt reads the
+        // color from the reference photo itself, not from prose here.
         if (orderedColors.size() == 1) {
             ImageSlotSpec spec;
             spec.elementId   = QStringLiteral("image_aspirational");
             spec.displayName = QCoreApplication::translate("APlusWorkflow", "Aspirational Scene");
 
-            const QString color    = orderedColors.first();
             const QString aspInstr = stepInstructions.value(3);
 
             spec.desktopPrompt = buildPreamble(productDesc, mainImageHint, aspInstr)
-                               + defaultDesktopPrompt(3).arg(color);
+                               + defaultDesktopPrompt(3);
             spec.mobilePrompt  = buildPreamble(productDesc, mainImageHint, aspInstr)
-                               + defaultMobilePrompt(3).arg(color);
+                               + defaultMobilePrompt(3);
             spec.versionCount  = versionCount(3);
             result << spec;
         }
@@ -505,9 +528,6 @@ public:
             ImageSlotSpec spec;
             spec.elementId   = QStringLiteral("image_detail_") + colorSafeId(color);
             spec.displayName = QCoreApplication::translate("APlusWorkflow", "Detail / Fabric — %1").arg(color);
-
-            const QString colorMention =
-                QCoreApplication::translate("APlusWorkflow", " in %1").arg(color);
 
             const QString fabricAccuracy = mainImageHint.isEmpty()
                 ? QCoreApplication::translate("APlusWorkflow",
@@ -519,8 +539,8 @@ public:
                     "design details visible in the reference image — do not invent, add or "
                     "alter the fabric pattern, weave or stitching.");
 
-            const QString desktopSpec = defaultDesktopPrompt(2).arg(colorMention, fabricAccuracy);
-            const QString mobileSpec  = defaultMobilePrompt(2).arg(colorMention, fabricAccuracy);
+            const QString desktopSpec = defaultDesktopPrompt(2).arg(fabricAccuracy);
+            const QString mobileSpec  = defaultMobilePrompt(2).arg(fabricAccuracy);
 
             spec.desktopPrompt = buildPreamble(productDesc, mainImageHint, detailInstr) + desktopSpec;
             spec.mobilePrompt  = buildPreamble(productDesc, mainImageHint, detailInstr) + mobileSpec;
@@ -563,16 +583,18 @@ public:
             switch (step) {
             case 0: return QCoreApplication::translate("APlusWorkflow",
                 "Generate a professional Amazon A+ desktop image (970x600 px, landscape) "
-                "of the product%1 — a physical object, no people. "
+                "of the product — a physical object, no people. "
                 "Show it from a flattering 3/4 angle plus one complementary angle or detail, "
                 "on a clean minimal surface with soft studio lighting. "
                 "The product is the clear hero; colors, patterns and details must stay "
-                "faithful to the reference. Premium quality. "
+                "faithful to the reference — do not alter or rebalance the color(s), even "
+                "for a two-tone or multi-color product. Premium quality. "
                 "No text overlays, no watermarks. "
                 "Save as desktop.png in the current directory.");
             case 1: return QCoreApplication::translate("APlusWorkflow",
                 "Generate a professional Amazon A+ desktop infographic image (970x600 px, landscape) "
-                "presenting the exact dimensions and materials of the product%1. "
+                "presenting the exact dimensions and materials of the product, colors and "
+                "design faithful to the reference photo. "
                 "Show the product with clean dimension callout lines; label each measurement "
                 "in both inches and centimeters, inches first (use the dimensions from the "
                 "product description). Add one close-up inset of the material texture. "
@@ -581,7 +603,9 @@ public:
                 "Save as desktop.png in the current directory.");
             case 2: return QCoreApplication::translate("APlusWorkflow",
                 "Generate a professional Amazon A+ desktop lifestyle image (970x600 px, landscape) "
-                "showing the product%1 in a realistic, aspirational setting that matches its use "
+                "showing the product — colors and design faithful to the reference photo, do "
+                "not alter or rebalance the color(s) — in a realistic, aspirational setting "
+                "that matches its use "
                 "(e.g. a carpet styled in a bright modern living room, a book cover on a desk "
                 "or bedside table). Natural light, editorial framing, elevated atmosphere — "
                 "the product remains the clear hero. No faces, no text overlays, no watermarks. "
@@ -599,21 +623,25 @@ public:
             switch (step) {
             case 0: return QCoreApplication::translate("APlusWorkflow",
                 "Generate a professional Amazon A+ mobile image (600x600 px, square) "
-                "of the product%1 — a physical object, no people. "
+                "of the product — a physical object, no people. "
                 "Single flattering 3/4 angle on a clean minimal surface, soft studio lighting. "
-                "Colors and details faithful to the reference, premium quality. "
+                "Colors and details faithful to the reference — do not alter or rebalance "
+                "the color(s), even for a two-tone or multi-color product. Premium quality. "
                 "No text overlays, no watermarks. "
                 "Save as mobile.png in the current directory.");
             case 1: return QCoreApplication::translate("APlusWorkflow",
                 "Generate a professional Amazon A+ mobile infographic image (600x600 px, square) "
-                "presenting the exact dimensions of the product%1. "
+                "presenting the exact dimensions of the product, colors and design faithful "
+                "to the reference photo. "
                 "Clean dimension callout lines, each measurement labeled in both inches and "
                 "centimeters, inches first (use the dimensions from the product description). "
                 "Minimal infographic style — measurement labels are the only text allowed. "
                 "Save as mobile.png in the current directory.");
             case 2: return QCoreApplication::translate("APlusWorkflow",
                 "Generate a professional Amazon A+ mobile lifestyle image (600x600 px, square) "
-                "showing the product%1 in a realistic, aspirational setting matching its use. "
+                "showing the product — colors and design faithful to the reference photo, do "
+                "not alter or rebalance the color(s) — in a realistic, aspirational setting "
+                "matching its use. "
                 "Natural light, editorial framing, the product is the clear hero. "
                 "No faces, no text overlays. "
                 "Save as mobile.png in the current directory.");
@@ -665,10 +693,10 @@ public:
         const QString dimensionInstr = stepInstructions.value(1);
         const QString lifestyleInstr = stepInstructions.value(2);
 
-        auto colorMention = [](const QString &color) -> QString {
-            return color.isEmpty() ? QString{}
-                : QCoreApplication::translate("APlusWorkflow", " in %1").arg(color);
-        };
+        // The color name is NOT interpolated into these prompts — see the
+        // comment in ClothingAPlusWorkflow::buildSlots for why (compound/
+        // two-tone colors made the AI over-render the second color when told
+        // about it in prose). The reference photo is the sole source of truth.
 
         // 1. Hero shot — one per color (single "image_hero" when no variants)
         if (orderedColors.isEmpty()) {
@@ -676,9 +704,9 @@ public:
             spec.elementId     = QStringLiteral("image_hero");
             spec.displayName   = QCoreApplication::translate("APlusWorkflow", "Hero Shot");
             spec.desktopPrompt = buildPreamble(productDesc, mainImageHint, heroInstr)
-                               + defaultDesktopPrompt(0).arg(QString{});
+                               + defaultDesktopPrompt(0);
             spec.mobilePrompt  = buildPreamble(productDesc, mainImageHint, heroInstr)
-                               + defaultMobilePrompt(0).arg(QString{});
+                               + defaultMobilePrompt(0);
             spec.versionCount  = versionCount(0);
             result << spec;
         }
@@ -687,9 +715,9 @@ public:
             spec.elementId     = QStringLiteral("image_color_") + colorSafeId(color);
             spec.displayName   = QCoreApplication::translate("APlusWorkflow", "Hero — %1").arg(color);
             spec.desktopPrompt = buildPreamble(productDesc, mainImageHint, heroInstr)
-                               + defaultDesktopPrompt(0).arg(colorMention(color));
+                               + defaultDesktopPrompt(0);
             spec.mobilePrompt  = buildPreamble(productDesc, mainImageHint, heroInstr)
-                               + defaultMobilePrompt(0).arg(colorMention(color));
+                               + defaultMobilePrompt(0);
             spec.versionCount  = versionCount(0);
             result << spec;
         }
@@ -697,14 +725,13 @@ public:
         // 2. Dimensions & materials — one single slot (dimensions are shared
         // across colors; the focus color is used for rendering)
         {
-            const QString color = orderedColors.value(0);
             ImageSlotSpec spec;
             spec.elementId     = QStringLiteral("image_dimensions");
             spec.displayName   = QCoreApplication::translate("APlusWorkflow", "Dimensions / Materials");
             spec.desktopPrompt = buildPreamble(productDesc, mainImageHint, dimensionInstr)
-                               + defaultDesktopPrompt(1).arg(colorMention(color));
+                               + defaultDesktopPrompt(1);
             spec.mobilePrompt  = buildPreamble(productDesc, mainImageHint, dimensionInstr)
-                               + defaultMobilePrompt(1).arg(colorMention(color));
+                               + defaultMobilePrompt(1);
             spec.versionCount  = versionCount(1);
             result << spec;
         }
@@ -715,9 +742,9 @@ public:
             spec.elementId     = QStringLiteral("image_lifestyle_") + colorSafeId(color);
             spec.displayName   = QCoreApplication::translate("APlusWorkflow", "Lifestyle — %1").arg(color);
             spec.desktopPrompt = buildPreamble(productDesc, mainImageHint, lifestyleInstr)
-                               + defaultDesktopPrompt(2).arg(colorMention(color));
+                               + defaultDesktopPrompt(2);
             spec.mobilePrompt  = buildPreamble(productDesc, mainImageHint, lifestyleInstr)
-                               + defaultMobilePrompt(2).arg(colorMention(color));
+                               + defaultMobilePrompt(2);
             spec.versionCount  = versionCount(2);
             result << spec;
         }
@@ -726,9 +753,9 @@ public:
             spec.elementId     = QStringLiteral("image_lifestyle");
             spec.displayName   = QCoreApplication::translate("APlusWorkflow", "Lifestyle Scene");
             spec.desktopPrompt = buildPreamble(productDesc, mainImageHint, lifestyleInstr)
-                               + defaultDesktopPrompt(2).arg(QString{});
+                               + defaultDesktopPrompt(2);
             spec.mobilePrompt  = buildPreamble(productDesc, mainImageHint, lifestyleInstr)
-                               + defaultMobilePrompt(2).arg(QString{});
+                               + defaultMobilePrompt(2);
             spec.versionCount  = versionCount(2);
             result << spec;
         }

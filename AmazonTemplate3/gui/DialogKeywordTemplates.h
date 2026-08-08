@@ -47,6 +47,9 @@ private:
     void _removeTemplate();
     void _addCountry();
     void _addKeyword();
+    // Adds several keywords at once under the selected country, one per line
+    // of a multi-line text entry (blank lines ignored).
+    void _addKeywords();
     void _removeTreeItem();
 
     QList<KeywordTemplate> m_templates;
