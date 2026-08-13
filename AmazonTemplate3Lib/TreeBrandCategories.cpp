@@ -1,11 +1,59 @@
 #include "TreeBrandCategories.h"
 
+#include <QRegularExpression>
+
 TreeBrandCategories::TreeBrandCategories(QObject *parent)
     : QAbstractItemModel(parent)
 {
 }
 
 TreeBrandCategories::~TreeBrandCategories() = default;
+
+QString TreeBrandCategories::colorGroupKey(const AmazonCatalogApi::StoreItem &item)
+{
+    // Derive a per-product "family" key from the SKU so that size/color variants
+    // of the SAME product collapse together, without merging unrelated products
+    // that happen to share a generic color word (many different robes are all
+    // "White", for instance). Two SKU conventions are in use across the catalog:
+    //   - "<FAMILY>-<COLOR>-<SIZE>" (color/size spelled out, hyphen-separated)
+    //   - "<FAMILY><NN><LL>" (opaque 2-digit + 2-letter dropship variant code)
+    // Strip the dropship code first (it never collides with hyphen-separated SKUs),
+    // then strip a trailing "-<size>" / "-<color>" if literally present, so what's
+    // left identifies the product regardless of which convention it follows.
+    static const QRegularExpression dropshipSuffixRe(QStringLiteral(R"(\d{2}[A-Za-z]{2}$)"));
+    auto stripTrailingLiteral = [](QString s, const QString &value) {
+        if (value.isEmpty()) return s;
+        const QRegularExpression re(QStringLiteral("[-_]") + QRegularExpression::escape(value) + QLatin1Char('$'),
+                                     QRegularExpression::CaseInsensitiveOption);
+        s.remove(re);
+        return s;
+    };
+    // Fallback for SKUs whose embedded size token doesn't literally match
+    // sizeValue (e.g. SKU says "-M"/"-XL" while sizeValue is the EU size number
+    // "10"/"14") — strip the trailing hyphen segment positionally when it's
+    // unambiguously size-shaped, so these still collapse to one family+color.
+    static const QRegularExpression sizeTokenRe(
+        QStringLiteral(R"(^(?:\d{1,3}|X{0,3}S|[SML]|\d{0,2}X{1,3}L|ONE ?SIZE|OS)$)"),
+        QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression trailingSegmentRe(QStringLiteral(R"([-_]([^-_]+)$)"));
+
+    QString fam = item.sku;
+    fam.remove(dropshipSuffixRe);
+    const QString beforeSizeStrip = fam;
+    fam = stripTrailingLiteral(fam, item.sizeValue);
+    if (fam == beforeSizeStrip) {
+        const auto m = trailingSegmentRe.match(fam);
+        if (m.hasMatch() && sizeTokenRe.match(m.captured(1)).hasMatch())
+            fam.chop(m.captured(1).size() + 1);
+    }
+    fam = stripTrailingLiteral(fam, item.color);
+    while (fam.endsWith(QLatin1Char('-')) || fam.endsWith(QLatin1Char('_')))
+        fam.chop(1);
+    if (fam.isEmpty()) fam = item.sku;
+
+    const QString colorPart = item.color.isEmpty() ? item.asin : item.color;
+    return fam + QLatin1Char('\x1f') + colorPart;
+}
 
 void TreeBrandCategories::setItems(const QList<AmazonCatalogApi::StoreItem> &items,
                                     const QList<QStringList> &customPaths)
@@ -20,8 +68,7 @@ void TreeBrandCategories::setItems(const QList<AmazonCatalogApi::StoreItem> &ite
         const QString gender   = item.gender.isEmpty()   ? tr("(unknown gender)")   : item.gender;
         const QString age      = item.age.isEmpty()      ? tr("(unknown age)")      : item.age;
 
-        // Color key: use color name when available, otherwise ASIN (standalone product).
-        const QString colorKey = item.color.isEmpty() ? item.asin : item.color;
+        const QString colorKey = colorGroupKey(item);
 
         TreeNode *brandNode    = _findOrCreate(&m_root,      brand);
         TreeNode *categoryNode = _findOrCreate(brandNode,    category);

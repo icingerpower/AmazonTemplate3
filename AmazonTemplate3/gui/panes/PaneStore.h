@@ -23,6 +23,7 @@ QT_END_NAMESPACE
 class TableStoreAsin;
 class TreeBrandCategories;
 class QStandardItemModel;
+class AbstractInventorySource;
 
 class PaneStore : public QWidget
 {
@@ -56,6 +57,14 @@ private:
 
     QCoro::Task<void> m_retrieveTask;
     QCoro::Task<void> m_imageTask;
+    QCoro::Task<void> m_stockRefreshTask;
+
+    // Sales/stock cache (per SKU, lowercased), shared 24h-TTL/partial-refetch
+    // convention with PaneMarketplaces' AmazonCache — see _loadStockCache/_saveStockCache.
+    QHash<QString, int> m_stockAvailableBySkuLower; // -1 = unknown
+    QHash<QString, int> m_stockSales90BySkuLower;   // units sold in the last 90 days, -1 = unknown
+    QHash<QString, int> m_stockSales365BySkuLower;  // units sold in the last 365 days, -1 = unknown
+    qint64               m_stockCacheTimestampUtc = 0; // 0 = never loaded
 
     AmazonCatalogApi *_catalogApi();
     QString           _marketplaceId() const;
@@ -79,6 +88,11 @@ private:
     void _onRemoveCategory();
     void _onCopyAsins();
 
+    // Maps every ASIN in visibleAsins to the full (product,color) group it
+    // belongs to — same grouping key _buildTable() uses to build rows, so
+    // Move/Remove/Copy always act on exactly what a selected row represents.
+    QHash<QString, QStringList> _buildAsinGroups(const QStringList &visibleAsins) const;
+
     bool            _isCurrentNodeCustom() const;
     void            _loadCustomPaths();
     void            _saveCustomPaths();
@@ -88,6 +102,11 @@ private:
     void _onMoveToBottom();
     void _loadOrder();
     void _saveOrder();
+    // Replaces ONLY the currently-visible node's entries in the global
+    // m_savedOrder with their new on-screen order — other categories' saved
+    // order must survive a reorder made while viewing a different node.
+    void _syncSavedOrderFromVisibleRows();
+    void _onSortBySales();
 
     QStringList _currentNodePath() const;
 
@@ -99,6 +118,14 @@ private:
 
     QCoro::Task<void> _onRetrieve();
     QCoro::Task<void> _loadImages(QStringList asins);
+
+    void _loadStockCache();
+    void _saveStockCache() const;
+    // Aggregated (available, sales90d, sales365d) across every SKU in groupAsins;
+    // component is -1 when nothing in the group has cached data for it.
+    void _aggregateStock(const QStringList &groupAsins,
+                         int *availableOut, int *sales90Out, int *sales365Out) const;
+    QCoro::Task<void> _onRefreshSalesStock();
 };
 
 #endif // PANESTORE_H

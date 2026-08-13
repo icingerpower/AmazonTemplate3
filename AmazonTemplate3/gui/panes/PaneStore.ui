@@ -200,6 +200,26 @@
           </widget>
          </item>
          <item>
+          <widget class="QPushButton" name="buttonRefreshSalesStock">
+           <property name="toolTip">
+            <string>Fetch Amazon FBA qty + 90d/365d sales for the currently selected node, and recompute the Sales (12mo) / Stock (days) columns</string>
+           </property>
+           <property name="text">
+            <string>Refresh sales &amp; stock</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="buttonSortBySales">
+           <property name="toolTip">
+            <string>Sort the currently selected category by Sales (12mo), highest first, and save it as the manual display order</string>
+           </property>
+           <property name="text">
+            <string>Sort by sales</string>
+           </property>
+          </widget>
+         </item>
+         <item>
           <spacer name="horizontalSpacer_2">
            <property name="orientation">
             <enum>Qt::Orientation::Horizontal</enum>

@@ -7,10 +7,49 @@
 
 #include <QList>
 #include <QString>
+#include <QtGlobal>
 #include <functional>
 
 // Progress/log callback used by long-running platform operations.
 using ProgressFn = std::function<void(const QString &)>;
+
+// Sentinel returned by estimatedDaysOfSupply() when there were no sales in the
+// window (stock won't run out on current trend) — displayed as "∞".
+constexpr int kInfiniteDaysOfSupply = 999;
+
+// Estimated days until stock runs out, from available units and units sold
+// over the last `windowDays` days. -1 when unavailable/unsold are unknown (<0).
+// Single source of truth for this math — used by both the marketplace-sync
+// "days of supply" column and any other pane that needs the same estimate, so
+// they never silently disagree with each other.
+inline int estimatedDaysOfSupply(int available, int unitsSoldInWindow, int windowDays)
+{
+    if (available < 0) return -1;
+    if (available == 0) return 0;
+    if (unitsSoldInWindow < 0) return -1;
+    if (unitsSoldInWindow == 0) return kInfiniteDaysOfSupply;
+    const double perDay = double(unitsSoldInWindow) / double(windowDays);
+    return qRound(available / perDay);
+}
+
+// Default inventory-coverage target used across the app's stock-health UI
+// (Store tab's Stock/Recommended columns): ~4 months. A seller-chosen policy,
+// not an Amazon-published figure — see recommendedInventoryForDays() below.
+constexpr int kFourMonthCoverageDays = 120;
+
+// Units needed on hand to cover `targetDays` of sales, given units sold over
+// the last `windowDays` days. The mathematical inverse of estimatedDaysOfSupply()
+// — same sales-rate math, so the two stay consistent with each other. There is
+// no official Amazon constant for this: "targetDays" is a coverage policy the
+// caller chooses (e.g. 120 days ≈ 4 months), not a value Amazon publishes.
+// -1 when unitsSoldInWindow is unknown (<0); 0 when there were no sales at all.
+inline int recommendedInventoryForDays(int unitsSoldInWindow, int windowDays, int targetDays)
+{
+    if (unitsSoldInWindow < 0) return -1;
+    if (unitsSoldInWindow == 0) return 0;
+    const double perDay = double(unitsSoldInWindow) / double(windowDays);
+    return qRound(perDay * targetDays);
+}
 
 // Consignee address of a marketplace order.
 struct ShippingAddress {

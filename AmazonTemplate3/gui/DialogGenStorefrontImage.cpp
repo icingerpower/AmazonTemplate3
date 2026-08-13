@@ -31,6 +31,42 @@
 
 namespace {
 constexpr int kIconSizePx = 72;
+
+// Whether this productType is normally shown worn/used by a model (clothing,
+// footwear) as opposed to a flat product shot (rugs, carpets, bags, wallets…).
+// Same keyword-matching style as PaneStore's isShoes/isWomen category checks,
+// but matched per underscore-separated TOKEN, not substring — Amazon productType
+// values are already whole tokens (e.g. "WOUND_DRESSING"), and a substring check
+// would wrongly match "DRESS" inside "DRESSING".
+bool categoryHasModel(const QString &category)
+{
+    const QString catUp = category.toUpper();
+
+    // Accessories that share a token with real apparel/footwear but are never
+    // modeled themselves (an insert INSIDE a shoe, not worn on a body).
+    static const QStringList kExcluded = {
+        QStringLiteral("SHOE_TREE"), QStringLiteral("SHOE_INSERT"),
+    };
+    if (kExcluded.contains(catUp)) return false;
+
+    static const QStringList kModeledTokens = {
+        QStringLiteral("DRESS"),      QStringLiteral("ROBE"),       QStringLiteral("SWIMWEAR"),
+        QStringLiteral("KAFTAN"),     QStringLiteral("APPAREL"),    QStringLiteral("SHIRT"),
+        QStringLiteral("SWEATER"),    QStringLiteral("COAT"),       QStringLiteral("SUIT"),
+        QStringLiteral("UNDERWEAR"),  QStringLiteral("UNDERPANTS"), QStringLiteral("SHOE"),
+        QStringLiteral("SHOES"),      QStringLiteral("BOOT"),       QStringLiteral("SANDAL"),
+        QStringLiteral("FOOTWEAR"),   QStringLiteral("SKIRT"),      QStringLiteral("PANTS"),
+        QStringLiteral("JACKET"),     QStringLiteral("COVERING"),   QStringLiteral("LINGERIE"),
+        QStringLiteral("JUMPSUIT"),   QStringLiteral("LEGGING"),    QStringLiteral("NIGHTGOWN"),
+        QStringLiteral("NIGHTSHIRT"), QStringLiteral("CORSET"),     QStringLiteral("OUTFIT"),
+        QStringLiteral("HAT"),        QStringLiteral("LEOTARD"),    QStringLiteral("OVERALLS"),
+        QStringLiteral("SCARF"),      QStringLiteral("SHORTS"),     QStringLiteral("TIGHTS"),
+    };
+    const QStringList tokens = catUp.split(QLatin1Char('_'), Qt::SkipEmptyParts);
+    for (const QString &token : tokens)
+        if (kModeledTokens.contains(token)) return true;
+    return false;
+}
 } // namespace
 
 DialogGenStorefrontImage::DialogGenStorefrontImage(
@@ -201,19 +237,68 @@ void DialogGenStorefrontImage::_populateProductList()
     }
 }
 
+QString DialogGenStorefrontImage::_referenceImagePath(const QString &asin) const
+{
+    // Same resolution order PaneStore uses for its own thumbnails — see
+    // PaneStore::_applyItems: sizing/{ASIN}-*/{ASIN}_main.jpg first (full-res
+    // source photo), then stores/thumbs/{ASIN}.jpg (cached thumbnail).
+    const QDir sizingDir(m_workingDir.filePath(QStringLiteral("sizing")));
+    const QStringList dirs = sizingDir.entryList({asin + QStringLiteral("-*")}, QDir::Dirs);
+    for (const QString &d : dirs) {
+        const QString path = sizingDir.filePath(
+            d + QLatin1Char('/') + asin + QStringLiteral("_main.jpg"));
+        if (QFile::exists(path)) return path;
+    }
+    const QString thumb = m_workingDir.filePath(
+        QStringLiteral("stores/thumbs/%1.jpg").arg(asin));
+    return QFile::exists(thumb) ? thumb : QString();
+}
+
 void DialogGenStorefrontImage::_autoFillPrompt()
 {
-    QStringList titles;
-    titles.reserve(m_items.size());
-    for (const AmazonCatalogApi::StoreItem &item : std::as_const(m_items))
-        if (!item.title.isEmpty())
-            titles << item.title;
+    // Deliberately does NOT describe color/pattern/material/size in text — an
+    // image model asked to "generate a black burkini" from a caption invents
+    // its own idea of black and ignores what the real product looks like.
+    // Instead, point it at the actual product photos already on disk and tell
+    // it to reproduce them faithfully. This is category-agnostic by design:
+    // the same instruction works for clothing, shoes, or carpets, since none
+    // of it depends on textual attributes specific to any one product type.
+    // The title is deliberately left out here too — it's exactly the same
+    // color/size-laden text the instruction above tells the model to ignore;
+    // the ASIN is enough to keep each reference line traceable in the log.
+    QStringList refLines;
+    int missing = 0;
+    bool anyModeled = false;
+    for (const AmazonCatalogApi::StoreItem &item : std::as_const(m_items)) {
+        if (categoryHasModel(item.category)) anyModeled = true;
+        const QString path = _referenceImagePath(item.asin);
+        if (path.isEmpty()) { ++missing; continue; }
+        refLines << tr("- %1: %2").arg(item.asin, path);
+    }
 
-    const QString prompt = tr(
-        "Professional horizontal lifestyle banner for Amazon storefront. "
-        "Products: %1. Clean modern photography, high quality, no text, "
-        "no watermarks. Horizontal composition.")
-        .arg(titles.join(QStringLiteral(", ")));
+    QString prompt = tr(
+        "Professional horizontal banner for an Amazon storefront, composed from "
+        "the exact products shown in the reference photos listed below — one "
+        "photo per product. Reproduce each product exactly as it appears in its "
+        "own reference photo: same color, pattern, material, and shape. Do not "
+        "invent, guess, or reinterpret any product's appearance from its name — "
+        "the photos are the only source of truth for that. You may design the "
+        "arrangement, background, lighting, and composition freely, with a "
+        "background that matches the product's occasion.\n\n"
+        "Reference photos:\n%1\n\n"
+        "Clean modern photography, high quality, no text, no watermarks, "
+        "horizontal composition.")
+        .arg(refLines.join(QLatin1Char('\n')));
+
+    if (anyModeled)
+        prompt += QLatin1Char('\n') + tr("Improve model positions.");
+
+    if (missing > 0) {
+        prompt += QLatin1Char('\n') + tr(
+            "Note: %1 selected product(s) have no photo on disk and are omitted above.")
+            .arg(missing);
+    }
+
     m_promptEdit->setPlainText(prompt);
 }
 

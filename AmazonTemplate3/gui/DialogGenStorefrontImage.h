@@ -60,6 +60,9 @@ private:
 
     void _populateProductList();
     void _autoFillPrompt();
+    // Absolute path to this ASIN's real product photo (sizing/{ASIN}-*/{ASIN}_main.jpg,
+    // falling back to stores/thumbs/{ASIN}.jpg), or {} if neither exists on disk.
+    QString _referenceImagePath(const QString &asin) const;
     void _loadVersions();          // (re)reads versions.json, repopulates m_versionsList
     void _onGenerateClicked();
     void _viewImage();

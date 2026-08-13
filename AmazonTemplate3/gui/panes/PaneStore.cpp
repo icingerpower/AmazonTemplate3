@@ -6,7 +6,14 @@
 #include "TreeBrandCategories.h"
 #include "AmazonMarketplace.h"
 #include "AbstractCli.h"
+#include "AbstractInventorySource.h"
+#include "AbstractInventorySourceFactory.h"
+#include "MarketplaceTypes.h"
 
+#include "../../common/workingdirectory/WorkingDirectoryManager.h"
+#include <QScopeGuard>
+
+#include <algorithm>
 #include <climits>
 
 #include <QClipboard>
@@ -81,7 +88,9 @@ PaneStore::PaneStore(QWidget *parent)
     ui->tableViewAsins->horizontalHeader()->setStretchLastSection(true);
     ui->tableViewAsins->verticalHeader()->hide();
     ui->tableViewAsins->setSelectionBehavior(QAbstractItemView::SelectRows);
-    ui->tableViewAsins->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    // Only the ASIN column is flagged Qt::ItemIsEditable (see TableStoreAsin::flags),
+    // so this only opens a text editor there — double-click to select/copy the ASIN.
+    ui->tableViewAsins->setEditTriggers(QAbstractItemView::DoubleClicked);
     ui->tableViewAsins->setAlternatingRowColors(true);
     ui->tableViewAsins->setSortingEnabled(false);
     ui->tableViewAsins->verticalHeader()->setDefaultSectionSize(58);
@@ -92,6 +101,10 @@ PaneStore::PaneStore(QWidget *parent)
     connect(ui->buttonRetrieve, &QPushButton::clicked, this, [this]() {
         m_retrieveTask = _onRetrieve();
     });
+    connect(ui->buttonRefreshSalesStock, &QPushButton::clicked, this, [this]() {
+        m_stockRefreshTask = _onRefreshSalesStock();
+    });
+    connect(ui->buttonSortBySales, &QPushButton::clicked, this, &PaneStore::_onSortBySales);
     connect(ui->buttonMerge, &QPushButton::clicked, this, &PaneStore::_onMerge);
     connect(ui->buttonCopyAsins,      &QPushButton::clicked, this, &PaneStore::_onCopyAsins);
     connect(ui->buttonMoveToTop,  &QPushButton::clicked, this, &PaneStore::_onMoveToTop);
@@ -169,6 +182,7 @@ void PaneStore::setWorkingDir(const QDir &workingDir)
     m_workingDir = workingDir;
     m_workingDir.mkpath(QStringLiteral("stores"));
     _loadCustomPaths();
+    _loadStockCache();
     _loadFromDisk(_marketplaceId());
     _loadStorefrontVersions();
 }
@@ -239,8 +253,20 @@ void PaneStore::_loadOrder()
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) return;
     m_savedOrder.clear();
-    for (const QJsonValue &v : QJsonDocument::fromJson(f.readAll()).array())
-        m_savedOrder.append(v.toString());
+    for (const QJsonValue &v : QJsonDocument::fromJson(f.readAll()).array()) {
+        QString entry = v.toString();
+        // Migrate legacy entries (a representative ASIN) to the stable group
+        // key. Group keys always contain the \x1f separator; a bare ASIN
+        // never does. Old entries are converted on first load so upgrading
+        // doesn't reset everyone's custom order — only entries for ASINs no
+        // longer in the catalog are left as unmatched (harmless) leftovers.
+        if (!entry.contains(QLatin1Char('\x1f'))) {
+            const AmazonCatalogApi::StoreItem &it = m_asinToItem.value(entry);
+            if (!it.asin.isEmpty())
+                entry = TreeBrandCategories::colorGroupKey(it);
+        }
+        m_savedOrder.append(entry);
+    }
 }
 
 void PaneStore::_saveOrder()
@@ -558,7 +584,9 @@ void PaneStore::_onMerge()
     const QString rawLoser  = kPlaceholders.value(loser,  loser);
     const QString rawWinner = kPlaceholders.value(winner, winner);
 
-    // Remap: change loser value → winner for the relevant field.
+    // Remap: change loser value → winner for the relevant field. Same as Move,
+    // this must be flagged manuallyMoved or the next Retrieve will silently
+    // revert it back to whatever Amazon's API returns for that field.
     for (AmazonCatalogApi::StoreItem &item : m_items) {
         QString *field = nullptr;
         switch (depth) {
@@ -567,8 +595,10 @@ void PaneStore::_onMerge()
         case 2: field = &item.gender;   break;
         case 3: field = &item.age;      break;
         }
-        if (field && *field == rawLoser)
+        if (field && *field == rawLoser) {
             *field = rawWinner;
+            item.manuallyMoved = true;
+        }
     }
 
     // Rebuild (sales cache preserved intentionally).
@@ -609,6 +639,29 @@ void PaneStore::_onMerge()
     ui->buttonMerge->setEnabled(false);
 }
 
+// ---------------------------------------------------------------------------
+// _buildAsinGroups — maps every ASIN in visibleAsins to the full (product,color)
+// group it belongs to (same key _buildTable() groups rows by), so Move/Remove/
+// Copy expand a selected representative ASIN to ALL its sibling sizes/ASINs
+// instead of just the one shown in the table.
+// ---------------------------------------------------------------------------
+
+QHash<QString, QStringList> PaneStore::_buildAsinGroups(const QStringList &visibleAsins) const
+{
+    QHash<QString, QStringList> groupsByKey;
+    QHash<QString, QString> keyByAsin;
+    for (const QString &asin : visibleAsins) {
+        const QString key = TreeBrandCategories::colorGroupKey(m_asinToItem.value(asin));
+        groupsByKey[key].append(asin);
+        keyByAsin.insert(asin, key);
+    }
+
+    QHash<QString, QStringList> asinToGroup;
+    for (const QString &asin : visibleAsins)
+        asinToGroup.insert(asin, groupsByKey.value(keyByAsin.value(asin)));
+    return asinToGroup;
+}
+
 void PaneStore::_onMoveProducts()
 {
     // Collect selected representative ASINs from the table.
@@ -621,22 +674,15 @@ void PaneStore::_onMoveProducts()
         repAsins << m_storeModel->data(
             m_storeModel->index(idx.row(), TableStoreAsin::ColAsin)).toString();
 
-    // Expand each rep ASIN to its full color group within the current visible ASIN list.
+    // Expand each rep ASIN to its full (product,color) group within the current
+    // visible ASIN list — a selected row can represent several sibling ASINs.
     const QModelIndex treeIdx    = ui->treeViewBrandCategory->currentIndex();
     const QStringList visibleAsins = m_treeModel->asinsForIndex(treeIdx);
-
-    QHash<QString, QStringList> colorGroups;
-    for (const QString &asin : visibleAsins) {
-        const AmazonCatalogApi::StoreItem &it = m_asinToItem.value(asin);
-        const QString key = it.color.isEmpty() ? asin : it.color;
-        colorGroups[key].append(asin);
-    }
+    const QHash<QString, QStringList> groups = _buildAsinGroups(visibleAsins);
 
     QSet<QString> asinsToMove;
     for (const QString &repAsin : std::as_const(repAsins)) {
-        const AmazonCatalogApi::StoreItem &it = m_asinToItem.value(repAsin);
-        const QString key = it.color.isEmpty() ? repAsin : it.color;
-        const QStringList &group = colorGroups.value(key);
+        const QStringList group = groups.value(repAsin);
         if (group.isEmpty())
             asinsToMove.insert(repAsin);
         else
@@ -750,22 +796,15 @@ void PaneStore::_onRemoveProducts()
         repAsins << m_storeModel->data(
             m_storeModel->index(idx.row(), TableStoreAsin::ColAsin)).toString();
 
-    // Expand each rep ASIN to its full color group within the current visible ASIN list.
+    // Expand each rep ASIN to its full (product,color) group within the current
+    // visible ASIN list — a selected row can represent several sibling ASINs.
     const QStringList visibleAsins =
         m_treeModel->asinsForIndex(ui->treeViewBrandCategory->currentIndex());
-
-    QHash<QString, QStringList> colorGroups;
-    for (const QString &asin : visibleAsins) {
-        const AmazonCatalogApi::StoreItem &it = m_asinToItem.value(asin);
-        const QString key = it.color.isEmpty() ? asin : it.color;
-        colorGroups[key].append(asin);
-    }
+    const QHash<QString, QStringList> groups = _buildAsinGroups(visibleAsins);
 
     QSet<QString> asinsToRemove;
     for (const QString &repAsin : std::as_const(repAsins)) {
-        const AmazonCatalogApi::StoreItem &it = m_asinToItem.value(repAsin);
-        const QString key = it.color.isEmpty() ? repAsin : it.color;
-        const QStringList &group = colorGroups.value(key);
+        const QStringList group = groups.value(repAsin);
         if (group.isEmpty())
             asinsToRemove.insert(repAsin);
         else
@@ -955,9 +994,61 @@ void PaneStore::_onRemoveCategory()
 
 void PaneStore::_onCopyAsins()
 {
-    const QModelIndex treeIdx = ui->treeViewBrandCategory->currentIndex();
-    const QStringList asins   = m_treeModel->asinsForIndex(treeIdx);
+    const QModelIndexList sel = ui->tableViewAsins->selectionModel()->selectedRows();
+
+    QStringList repAsins;
+    for (const QModelIndex &idx : sel)
+        repAsins << m_storeModel->data(
+            m_storeModel->index(idx.row(), TableStoreAsin::ColAsin)).toString();
+
+    // Expand each selected row to its full (product,color) group — copying a
+    // row should copy every size/ASIN it represents, not just the representative.
+    const QStringList visibleAsins =
+        m_treeModel->asinsForIndex(ui->treeViewBrandCategory->currentIndex());
+    const QHash<QString, QStringList> groups = _buildAsinGroups(visibleAsins);
+
+    QStringList asins;
+    for (const QString &repAsin : std::as_const(repAsins)) {
+        const QStringList group = groups.value(repAsin);
+        if (group.isEmpty()) asins << repAsin;
+        else asins << group;
+    }
+
     QGuiApplication::clipboard()->setText(asins.join(QLatin1Char(',')));
+}
+
+// ---------------------------------------------------------------------------
+// _syncSavedOrderFromVisibleRows — after reordering rows in the currently
+// selected node, update the GLOBAL m_savedOrder to match. m_savedOrder covers
+// every category, not just the one on screen, so this must only replace the
+// entries belonging to the visible node — wiping and rebuilding the whole
+// list from m_storeModel (which only ever holds one node's rows) would erase
+// every other category's saved order the moment you reorder anything.
+// Entries are keyed by the stable (product,color) group key rather than by
+// the representative ASIN shown in the table — which ASIN gets picked to
+// represent a group depends on its category/gender (shoe-size / women's-size
+// heuristics in _buildTable), so that identity is not stable across a
+// category Move; the group key is, since it only depends on sku/color.
+// ---------------------------------------------------------------------------
+
+void PaneStore::_syncSavedOrderFromVisibleRows()
+{
+    QStringList visibleKeysInOrder;
+    QSet<QString> visibleKeySet;
+    for (int i = 0; i < m_storeModel->rowCount(); ++i) {
+        const QString asin = m_storeModel->data(m_storeModel->index(i, TableStoreAsin::ColAsin)).toString();
+        const QString key  = TreeBrandCategories::colorGroupKey(m_asinToItem.value(asin));
+        visibleKeysInOrder << key;
+        visibleKeySet.insert(key);
+    }
+
+    QStringList newOrder;
+    for (const QString &key : std::as_const(m_savedOrder))
+        if (!visibleKeySet.contains(key)) newOrder << key;
+    newOrder << visibleKeysInOrder;
+
+    m_savedOrder = newOrder;
+    _saveOrder();
 }
 
 void PaneStore::_onMoveToTop()
@@ -967,10 +1058,7 @@ void PaneStore::_onMoveToTop()
     const int row = sel.first().row();
     if (!m_storeModel->moveRowToTop(row)) return;
 
-    m_savedOrder.clear();
-    for (int i = 0; i < m_storeModel->rowCount(); ++i)
-        m_savedOrder.append(m_storeModel->data(m_storeModel->index(i, TableStoreAsin::ColAsin)).toString());
-    _saveOrder();
+    _syncSavedOrderFromVisibleRows();
 
     ui->tableViewAsins->selectionModel()->setCurrentIndex(
         m_storeModel->index(0, 0), QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
@@ -983,11 +1071,7 @@ void PaneStore::_onMoveUp()
     const int row = sel.first().row();
     if (!m_storeModel->moveRowUp(row)) return;
 
-    // Sync m_savedOrder to the new table order
-    m_savedOrder.clear();
-    for (int i = 0; i < m_storeModel->rowCount(); ++i)
-        m_savedOrder.append(m_storeModel->data(m_storeModel->index(i, TableStoreAsin::ColAsin)).toString());
-    _saveOrder();
+    _syncSavedOrderFromVisibleRows();
 
     // Keep selection on the moved row
     ui->tableViewAsins->selectionModel()->setCurrentIndex(
@@ -1001,10 +1085,7 @@ void PaneStore::_onMoveDown()
     const int row = sel.first().row();
     if (!m_storeModel->moveRowDown(row)) return;
 
-    m_savedOrder.clear();
-    for (int i = 0; i < m_storeModel->rowCount(); ++i)
-        m_savedOrder.append(m_storeModel->data(m_storeModel->index(i, TableStoreAsin::ColAsin)).toString());
-    _saveOrder();
+    _syncSavedOrderFromVisibleRows();
 
     ui->tableViewAsins->selectionModel()->setCurrentIndex(
         m_storeModel->index(row + 1, 0), QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
@@ -1017,10 +1098,7 @@ void PaneStore::_onMoveToBottom()
     const int row = sel.first().row();
     if (!m_storeModel->moveRowToBottom(row)) return;
 
-    m_savedOrder.clear();
-    for (int i = 0; i < m_storeModel->rowCount(); ++i)
-        m_savedOrder.append(m_storeModel->data(m_storeModel->index(i, TableStoreAsin::ColAsin)).toString());
-    _saveOrder();
+    _syncSavedOrderFromVisibleRows();
 
     ui->tableViewAsins->selectionModel()->setCurrentIndex(
         m_storeModel->index(m_storeModel->rowCount() - 1, 0),
@@ -1225,11 +1303,14 @@ void PaneStore::_buildTable(const QStringList &asins)
         return m.hasMatch() ? m.captured(1).toInt() : 0;
     };
 
+    // Grouping key: shared with TreeBrandCategories (whose tree counts must match
+    // these table rows) and with _expandToGroup() (used by Move/Remove/Copy) —
+    // see TreeBrandCategories::colorGroupKey for why color alone isn't enough.
     QHash<QString, QStringList> colorGroups;
     QStringList colorOrder;
     for (const QString &asin : std::as_const(asins)) {
         const AmazonCatalogApi::StoreItem &it = m_asinToItem.value(asin);
-        const QString key = it.color.isEmpty() ? asin : it.color;
+        const QString key = TreeBrandCategories::colorGroupKey(it);
         if (!colorGroups.contains(key)) colorOrder.append(key);
         colorGroups[key].append(asin);
     }
@@ -1284,10 +1365,21 @@ void PaneStore::_buildTable(const QStringList &asins)
         row.image                 = m_asinToPixmap.value(picked);
         row.createdDate           = si.createdDate;
         row.existsInMarketplaces  = si.existsInMarketplaces;
+
+        int available = -1, sales90 = -1, sales365 = -1;
+        _aggregateStock(group, &available, &sales90, &sales365);
+        row.salesYear      = sales365;
+        row.stockDays      = estimatedDaysOfSupply(available, sales90, 90);
+        row.recommended4mo = recommendedInventoryForDays(sales90, 90, kFourMonthCoverageDays);
+
         unsortedRows.append(row);
     }
 
     // Apply saved order: new rows (not in m_savedOrder) go first, then known order.
+    // Matched by the stable (product,color) group key, not the representative
+    // ASIN — see _syncSavedOrderFromVisibleRows for why ASIN identity isn't
+    // stable across a category Move (shoe/gender size-picking can change which
+    // ASIN represents a group), while the group key always is.
     const QSet<QString> savedSet(m_savedOrder.cbegin(), m_savedOrder.cend());
     QList<TableStoreAsin::Row> newRows, orderedRows;
     newRows.reserve(unsortedRows.size());
@@ -1298,8 +1390,9 @@ void PaneStore::_buildTable(const QStringList &asins)
         savedPos.insert(m_savedOrder.at(i), i);
 
     for (const TableStoreAsin::Row &r : std::as_const(unsortedRows)) {
-        if (savedSet.contains(r.asin))
-            orderedRows[savedPos.value(r.asin)] = r;
+        const QString key = TreeBrandCategories::colorGroupKey(m_asinToItem.value(r.asin));
+        if (savedSet.contains(key))
+            orderedRows[savedPos.value(key)] = r;
         else
             newRows.append(r);
     }
@@ -1324,6 +1417,228 @@ void PaneStore::_buildTable(const QStringList &asins)
             needImages.append(r.asin);
     if (!needImages.isEmpty())
         m_imageTask = _loadImages(needImages);
+}
+
+// ---------------------------------------------------------------------------
+// Sales/stock cache — mirrors PaneMarketplaces' AmazonCache convention (24h
+// TTL, partial refetch of whatever's missing/failed) under its own key prefix
+// so the two caches never collide (PaneMarketplaces' universe is target-store
+// SKUs; this one is the catalog SKUs currently visible in the Store tab).
+// ---------------------------------------------------------------------------
+
+void PaneStore::_aggregateStock(const QStringList &groupAsins,
+                                 int *availableOut, int *sales90Out, int *sales365Out) const
+{
+    int available = -1, sales90 = -1, sales365 = -1;
+    for (const QString &asin : groupAsins) {
+        const QString sku = m_asinToItem.value(asin).sku.toLower();
+        if (sku.isEmpty()) continue;
+
+        const int a = m_stockAvailableBySkuLower.value(sku, -1);
+        if (a >= 0) available = (available < 0 ? 0 : available) + a;
+        const int s90 = m_stockSales90BySkuLower.value(sku, -1);
+        if (s90 >= 0) sales90 = (sales90 < 0 ? 0 : sales90) + s90;
+        const int s365 = m_stockSales365BySkuLower.value(sku, -1);
+        if (s365 >= 0) sales365 = (sales365 < 0 ? 0 : sales365) + s365;
+    }
+    if (availableOut) *availableOut = available;
+    if (sales90Out)   *sales90Out   = sales90;
+    if (sales365Out)  *sales365Out  = sales365;
+}
+
+void PaneStore::_loadStockCache()
+{
+    auto s = WorkingDirectoryManager::instance()->settings();
+    m_stockCacheTimestampUtc = s->value(QStringLiteral("PaneStoreStockCache/timestamp")).toLongLong();
+
+    auto loadIntMap = [&](const QString &key, QHash<QString, int> *out) {
+        out->clear();
+        const QJsonObject obj = QJsonDocument::fromJson(
+            s->value(key).toString().toUtf8()).object();
+        for (auto it = obj.begin(); it != obj.end(); ++it)
+            out->insert(it.key(), it.value().toInt(-1));
+    };
+    loadIntMap(QStringLiteral("PaneStoreStockCache/available"), &m_stockAvailableBySkuLower);
+    loadIntMap(QStringLiteral("PaneStoreStockCache/sales90"),   &m_stockSales90BySkuLower);
+    loadIntMap(QStringLiteral("PaneStoreStockCache/sales365"),  &m_stockSales365BySkuLower);
+}
+
+void PaneStore::_saveStockCache() const
+{
+    auto s = WorkingDirectoryManager::instance()->settings();
+    s->setValue(QStringLiteral("PaneStoreStockCache/timestamp"), m_stockCacheTimestampUtc);
+
+    auto saveIntMap = [&](const QString &key, const QHash<QString, int> &map) {
+        QJsonObject obj;
+        for (auto it = map.begin(); it != map.end(); ++it)
+            obj.insert(it.key(), it.value());
+        s->setValue(key, QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Compact)));
+    };
+    saveIntMap(QStringLiteral("PaneStoreStockCache/available"), m_stockAvailableBySkuLower);
+    saveIntMap(QStringLiteral("PaneStoreStockCache/sales90"),   m_stockSales90BySkuLower);
+    saveIntMap(QStringLiteral("PaneStoreStockCache/sales365"),  m_stockSales365BySkuLower);
+}
+
+// ---------------------------------------------------------------------------
+// _onRefreshSalesStock — fetches Amazon FBA qty + 90d/365d sales for every SKU
+// in the currently selected tree node, via the same AbstractInventorySource
+// abstraction PaneMarketplaces uses (so "days of supply" here can never
+// silently disagree with the number driving the Temu sync there — both call
+// estimatedDaysOfSupply() in MarketplaceTypes.h). Scoped to the current
+// selection rather than the whole catalog: fetchSalesUnits is one Orders-API
+// call per SKU, too slow/rate-limited to run against thousands of ASINs.
+// ---------------------------------------------------------------------------
+
+QCoro::Task<void> PaneStore::_onRefreshSalesStock()
+{
+    const QModelIndex treeIdx = ui->treeViewBrandCategory->currentIndex();
+    const QStringList asins   = m_treeModel->asinsForIndex(treeIdx);
+    if (asins.isEmpty()) {
+        QMessageBox::information(this, tr("Refresh sales & stock"),
+            tr("Select a node in the Brand/Category tree first — refresh is scoped "
+               "to what's currently shown (fetching sales for the whole catalog would "
+               "be far too slow)."));
+        co_return;
+    }
+
+    QStringList skus;
+    QSet<QString> seenLower;
+    for (const QString &asin : asins) {
+        const QString sku = m_asinToItem.value(asin).sku;
+        if (sku.isEmpty() || seenLower.contains(sku.toLower())) continue;
+        seenLower.insert(sku.toLower());
+        skus << sku;
+    }
+    if (skus.isEmpty()) co_return;
+
+    auto *progressDlg = new QDialog(parentWidget());
+    progressDlg->setAttribute(Qt::WA_DeleteOnClose);
+    progressDlg->setWindowTitle(tr("Refreshing sales & stock…"));
+    progressDlg->resize(560, 400);
+    auto *pLayout = new QVBoxLayout(progressDlg);
+
+    auto *statusLabel = new QLabel(tr("Starting…"), progressDlg);
+    QFont boldFont = statusLabel->font(); boldFont.setBold(true);
+    statusLabel->setFont(boldFont);
+    pLayout->addWidget(statusLabel);
+
+    auto *progressBar = new QProgressBar(progressDlg);
+    progressBar->setRange(0, skus.size());
+    pLayout->addWidget(progressBar);
+
+    auto *logEdit = new QTextEdit(progressDlg);
+    logEdit->setReadOnly(true);
+    logEdit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    pLayout->addWidget(logEdit);
+
+    auto *closeBtns = new QDialogButtonBox(QDialogButtonBox::Close, progressDlg);
+    QPushButton *closeBtn = closeBtns->button(QDialogButtonBox::Close);
+    if (closeBtn) closeBtn->setEnabled(false);
+    pLayout->addWidget(closeBtns);
+
+    QPointer<QLabel>       statusLabelPtr(statusLabel);
+    QPointer<QProgressBar> progressBarPtr(progressBar);
+    QPointer<QTextEdit>    logEditPtr(logEdit);
+    QPointer<QPushButton>  closeBtnPtr(closeBtn);
+    QPointer<QDialog>      dlgPtr(progressDlg);
+
+    auto appendLog = [logEditPtr](const QString &line) {
+        if (!logEditPtr) return;
+        const QString ts = QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss"));
+        logEditPtr->append(QStringLiteral("[%1] %2").arg(ts, line));
+    };
+    connect(closeBtns, &QDialogButtonBox::rejected, progressDlg, &QDialog::close);
+    progressDlg->show();
+    setEnabled(false);
+
+    QList<AbstractInventorySource *> sources =
+        AbstractInventorySourceFactory::buildAllInstances(
+            WorkingDirectoryManager::instance()->settings().data());
+    auto sourcesGuard = qScopeGuard([&sources]() { qDeleteAll(sources); });
+    AbstractInventorySource *source = sources.isEmpty() ? nullptr : sources.first();
+
+    if (!source) {
+        appendLog(tr("✗ No fulfillment source configured — check API credentials in Settings."));
+        if (statusLabelPtr) statusLabelPtr->setText(tr("Failed — no source configured."));
+        if (closeBtnPtr)    closeBtnPtr->setEnabled(true);
+        setEnabled(true);
+        co_return;
+    }
+
+    // 24h TTL on the whole cache, like PaneMarketplaces' AmazonCache: once stale,
+    // every SKU is treated as missing and re-fetched.
+    const qint64 nowUtc = QDateTime::currentDateTimeUtc().toSecsSinceEpoch();
+    const bool cacheStale = (nowUtc - m_stockCacheTimestampUtc) > 24 * 3600;
+
+    appendLog(tr("→ %1: fetching inventory for %2 SKU(s)").arg(source->displayName()).arg(skus.size()));
+    if (statusLabelPtr) statusLabelPtr->setText(tr("Fetching inventory…"));
+    QList<StockRecord> records;
+    co_await source->fetchAllInventory(skus, &records, appendLog);
+    if (!dlgPtr) { setEnabled(true); co_return; }
+
+    for (const StockRecord &r : std::as_const(records))
+        m_stockAvailableBySkuLower.insert(r.sku.toLower(), r.available);
+
+    for (int i = 0; i < skus.size(); ++i) {
+        if (!dlgPtr) { setEnabled(true); co_return; }
+        const QString sku      = skus.at(i);
+        const QString skuLower = sku.toLower();
+        if (progressBarPtr) progressBarPtr->setValue(i + 1);
+
+        const bool needSales90  = cacheStale || m_stockSales90BySkuLower.value(skuLower, -1) < 0;
+        const bool needSales365 = cacheStale || m_stockSales365BySkuLower.value(skuLower, -1) < 0;
+        if (!needSales90 && !needSales365) continue;
+
+        if (statusLabelPtr)
+            statusLabelPtr->setText(tr("SKU %1/%2: %3 — fetching sales…").arg(i + 1).arg(skus.size()).arg(sku));
+
+        if (needSales90) {
+            int units = -1;
+            co_await source->fetchSalesUnits(sku, 90, &units);
+            if (!dlgPtr) { setEnabled(true); co_return; }
+            m_stockSales90BySkuLower.insert(skuLower, units);
+        }
+        if (needSales365) {
+            int units = -1;
+            co_await source->fetchSalesUnits(sku, 365, &units);
+            if (!dlgPtr) { setEnabled(true); co_return; }
+            m_stockSales365BySkuLower.insert(skuLower, units);
+        }
+        appendLog(tr("  ✓ %1: 90d=%2 365d=%3").arg(sku)
+                  .arg(m_stockSales90BySkuLower.value(skuLower, -1))
+                  .arg(m_stockSales365BySkuLower.value(skuLower, -1)));
+    }
+
+    m_stockCacheTimestampUtc = nowUtc;
+    _saveStockCache();
+
+    _updateTableForCurrentSelection();
+
+    appendLog(tr("Done."));
+    if (statusLabelPtr) statusLabelPtr->setText(tr("Done."));
+    if (closeBtnPtr)    closeBtnPtr->setEnabled(true);
+    setEnabled(true);
+}
+
+// ---------------------------------------------------------------------------
+// _onSortBySales — reorders the currently visible node's rows by Sales (12mo),
+// highest first, and persists it as the manual display order (same mechanism
+// as drag/move-up-down) so it sticks and feeds the storefront ordering.
+// Rows with no fetched sales data (-1) sort last, not first.
+// ---------------------------------------------------------------------------
+
+void PaneStore::_onSortBySales()
+{
+    QList<TableStoreAsin::Row> rows = m_storeModel->rows();
+    if (rows.isEmpty()) return;
+
+    std::stable_sort(rows.begin(), rows.end(),
+                     [](const TableStoreAsin::Row &a, const TableStoreAsin::Row &b) {
+        return a.salesYear > b.salesYear;
+    });
+
+    m_storeModel->setRows(rows);
+    _syncSavedOrderFromVisibleRows();
 }
 
 // ---------------------------------------------------------------------------

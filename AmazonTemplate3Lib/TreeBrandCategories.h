@@ -29,6 +29,14 @@ public:
     // Returns the number of unique color groups under this node (what the tree displays).
     int colorCountForIndex(const QModelIndex &index) const;
 
+    // Groups an item by (product family derived from its SKU) + color, so that
+    // size variants of ONE product collapse together without merging different
+    // products that happen to share a generic color word ("White", "Black"…).
+    // Single source of truth for this grouping — used by this tree's own counts
+    // AND by PaneStore's table-row grouping and Move/Remove ASIN-set expansion,
+    // so they can never drift apart from each other again.
+    static QString colorGroupKey(const AmazonCatalogApi::StoreItem &item);
+
     // Returns the raw node name (without count suffix).
     QString nodeNameForIndex(const QModelIndex &index) const;
 

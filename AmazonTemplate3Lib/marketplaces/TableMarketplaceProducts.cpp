@@ -3,10 +3,6 @@
 #include <QBrush>
 #include <QColor>
 
-namespace {
-constexpr int kInfiniteDays = 999;
-}
-
 TableMarketplaceProducts::TableMarketplaceProducts(const QStringList &skus,
                                                    const QList<MarketplaceStore> &stores,
                                                    QObject *parent)
@@ -75,9 +71,9 @@ int TableMarketplaceProducts::_targetQty(const Row &r) const
     if (r.available < 0)
         return -1;
     double corrected = r.available;
-    // estDays == kInfiniteDays means no sales: the correction factor
+    // estDays == kInfiniteDaysOfSupply means no sales: the correction factor
     // (estDays − minDays) / estDays tends to 1, so leave the stock uncorrected.
-    if (m_minDays > 0 && r.estDays >= 0 && r.estDays < kInfiniteDays) {
+    if (m_minDays > 0 && r.estDays >= 0 && r.estDays < kInfiniteDaysOfSupply) {
         if (r.estDays <= m_minDays)
             corrected = 0;
         else
@@ -97,16 +93,7 @@ int TableMarketplaceProducts::targetQtyForSku(const QString &sku) const
 
 void TableMarketplaceProducts::_recalcEstDays(Row &row) const
 {
-    if (row.available == 0) {
-        row.estDays = 0;
-    } else if (row.available > 0 && row.sales90d > 0) {
-        const double perDay = row.sales90d / 90.0;
-        row.estDays = qRound(row.available / perDay);
-    } else if (row.available > 0 && row.sales90d == 0) {
-        row.estDays = kInfiniteDays;
-    } else {
-        row.estDays = -1;
-    }
+    row.estDays = estimatedDaysOfSupply(row.available, row.sales90d, 90);
 }
 
 void TableMarketplaceProducts::applyInventory(const QList<StockRecord> &records)
@@ -217,7 +204,7 @@ QVariant TableMarketplaceProducts::data(const QModelIndex &index, int role) cons
     case ColAsin:  return r.asin.isEmpty() ? QStringLiteral("-") : r.asin;
     case ColEstDays:
         if (r.estDays < 0)        return QStringLiteral("-");
-        if (r.estDays >= kInfiniteDays) return QString::fromUtf8("\xE2\x88\x9E");
+        if (r.estDays >= kInfiniteDaysOfSupply) return QString::fromUtf8("\xE2\x88\x9E");
         return QString::number(r.estDays);
     case ColAmazonQty:      return numOrDash(r.available);
     case ColInbound:        return numOrDash(r.inbound);

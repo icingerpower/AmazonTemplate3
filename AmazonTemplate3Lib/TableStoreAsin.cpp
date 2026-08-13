@@ -1,4 +1,7 @@
 #include "TableStoreAsin.h"
+#include "MarketplaceTypes.h"
+#include <QBrush>
+#include <QColor>
 #include <QDate>
 
 TableStoreAsin::TableStoreAsin(QObject *parent)
@@ -112,6 +115,14 @@ QVariant TableStoreAsin::data(const QModelIndex &index, int role) const
             return row.createdDate.isValid()
                 ? row.createdDate.toString(QStringLiteral("MMM yyyy"))
                 : QVariant{};
+        case ColSalesYear:
+            return row.salesYear < 0 ? QVariant{} : QVariant(row.salesYear);
+        case ColStockDays:
+            if (row.stockDays < 0) return QVariant{};
+            if (row.stockDays >= kInfiniteDaysOfSupply) return QString::fromUtf8("\xE2\x88\x9E");
+            return QVariant(row.stockDays);
+        case ColRecommended4mo:
+            return row.recommended4mo < 0 ? QVariant{} : QVariant(row.recommended4mo);
         default:
             if (col >= ColExistsStart && col < ColExistsStart + m_mpIds.size()) {
                 const QString &mpId = m_mpIds.at(col - ColExistsStart);
@@ -121,6 +132,11 @@ QVariant TableStoreAsin::data(const QModelIndex &index, int role) const
         }
     }
 
+    // Flag rows estimated to run out before kFourMonthCoverageDays.
+    if (role == Qt::ForegroundRole && col == ColStockDays
+        && row.stockDays >= 0 && row.stockDays < kFourMonthCoverageDays)
+        return QBrush(QColor(0xd9, 0x3c, 0x3c));
+
     // Tooltip: full date + days ago
     if (role == Qt::ToolTipRole && col == ColCreatedDate && row.createdDate.isValid()) {
         const int days = row.createdDate.daysTo(QDate::currentDate());
@@ -128,6 +144,14 @@ QVariant TableStoreAsin::data(const QModelIndex &index, int role) const
             .arg(row.createdDate.toString(Qt::ISODate))
             .arg(days);
     }
+    if (role == Qt::ToolTipRole && col == ColStockDays && row.stockDays >= 0
+        && row.stockDays < kFourMonthCoverageDays)
+        return tr("Estimated to run out in %1 days — below the %2-day (~4mo) threshold")
+            .arg(row.stockDays).arg(kFourMonthCoverageDays);
+    if (role == Qt::ToolTipRole && col == ColRecommended4mo && row.recommended4mo >= 0)
+        return tr("Units needed on hand to cover %1 days at the current sales rate — "
+                   "not an Amazon-published figure, derived from your own trailing sales.")
+            .arg(kFourMonthCoverageDays);
 
     return {};
 }
@@ -140,6 +164,9 @@ QVariant TableStoreAsin::headerData(int section, Qt::Orientation orientation, in
     case ColAsin:        return tr("ASIN");
     case ColTitle:       return tr("Title");
     case ColCreatedDate: return tr("Created");
+    case ColSalesYear:        return tr("Sales (12mo)");
+    case ColStockDays:        return tr("Stock (days)");
+    case ColRecommended4mo:   return tr("Recommended (4mo)");
     default:
         if (section >= ColExistsStart && section < ColExistsStart + m_mpLabels.size())
             return m_mpLabels.at(section - ColExistsStart);
@@ -149,5 +176,12 @@ QVariant TableStoreAsin::headerData(int section, Qt::Orientation orientation, in
 
 Qt::ItemFlags TableStoreAsin::flags(const QModelIndex &index) const
 {
-    return index.isValid() ? Qt::ItemIsEnabled | Qt::ItemIsSelectable : Qt::NoItemFlags;
+    if (!index.isValid()) return Qt::NoItemFlags;
+    Qt::ItemFlags f = Qt::ItemIsEnabled | Qt::ItemIsSelectable;
+    // Editable so double-click opens the default text editor for text
+    // selection/copy — setData() is intentionally left unimplemented (base
+    // class no-op), so no edit ever actually commits back into the model.
+    if (index.column() == ColAsin)
+        f |= Qt::ItemIsEditable;
+    return f;
 }

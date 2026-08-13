@@ -19,6 +19,9 @@ public:
         ColAsin,
         ColTitle,
         ColCreatedDate,
+        ColSalesYear,
+        ColStockDays,
+        ColRecommended4mo,
         ColExistsStart  // per-marketplace existence columns begin here (one per configured mp)
     };
 
@@ -28,12 +31,16 @@ public:
         QPixmap image;
         QDate   createdDate;
         QSet<QString> existsInMarketplaces; // marketplaceIds where this color-group rep exists
+        int salesYear       = -1; // units sold in the last 365 days, summed across the row's SKUs (-1 = not fetched)
+        int stockDays       = -1; // estimatedDaysOfSupply(), summed across the row's SKUs (-1 = not fetched)
+        int recommended4mo  = -1; // recommendedInventoryForDays(…, 120), summed across the row's SKUs (-1 = not fetched)
     };
 
     explicit TableStoreAsin(QObject *parent = nullptr);
 
     void setMarketplaces(const QStringList &mpIds, const QStringList &mpLabels);
     void setRows(const QList<Row> &rows);
+    const QList<Row> &rows() const { return m_rows; }
     void clear();
 
     void updateImage(const QString &asin, const QPixmap &px);
