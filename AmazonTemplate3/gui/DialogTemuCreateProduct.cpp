@@ -531,13 +531,17 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
                                                                  : m_draft.originCountry, this);
     m_originEdit->setMaximumWidth(160);
     auto *fetchPriceBtn = new QPushButton(tr("Fetch Amazon prices + stock"), this);
-    auto *applyAllBtn   = new QPushButton(tr("Apply selected row to all"), this);
+    auto *applyAllBtn   = new QPushButton(tr("Apply selected row's prices to all"), this);
+    auto *samePriceBtn  = new QPushButton(tr("Same price (no markup)"), this);
+    samePriceBtn->setToolTip(tr("Sets Reference = Base for every variation in one click "
+                                "(no +20% markup)."));
     auto *priceRow = new QHBoxLayout;
     priceRow->addWidget(new QLabel(tr("Country of origin:"), this));
     priceRow->addWidget(m_originEdit);
     priceRow->addSpacing(16);
     priceRow->addWidget(fetchPriceBtn);
     priceRow->addWidget(applyAllBtn);
+    priceRow->addWidget(samePriceBtn);
     priceRow->addStretch();
     priceRow->addWidget(genBtn);
 
@@ -665,6 +669,7 @@ DialogTemuCreateProduct::DialogTemuCreateProduct(
             [this]() { if (_confirmKeywordTemplate()) m_textTask = _generateText(); });
     connect(fetchPriceBtn, &QPushButton::clicked, this, [this]() { m_priceTask = _fetchAmazonData(); });
     connect(applyAllBtn, &QPushButton::clicked, this, [this]() { _applyRowToAll(); });
+    connect(samePriceBtn, &QPushButton::clicked, this, [this]() { _applySamePrice(); });
     connect(m_completeVariantsBtn, &QPushButton::clicked, this,
             [this]() { m_completeTask = _completeVariantNames(); });
     connect(editKwBtn, &QPushButton::clicked, this, [this]() {
@@ -887,14 +892,27 @@ void DialogTemuCreateProduct::_applySavedCategory()
     auto settings = WorkingDirectoryManager::instance()->settings();
 
     // 2. Per-Amazon-type mapping (exact same Amazon product type).
-    if (!m_draft.amazonProductType.isEmpty()
-        && apply(settings->value(catMapKey(m_draft.amazonProductType)).toString(),
-                 tr("Amazon type \"%1\"").arg(m_draft.amazonProductType)))
+    if (!m_draft.amazonProductType.isEmpty()) {
+        if (apply(settings->value(catMapKey(m_draft.amazonProductType)).toString(),
+                   tr("Amazon type \"%1\"").arg(m_draft.amazonProductType)))
+            return;
+        // Known type, but never mapped to a Temu category before (e.g. the
+        // first shoe product created through this dialog) — do NOT fall back
+        // to the last-used category: it was picked for a DIFFERENT, possibly
+        // unrelated type (e.g. it suggested "Plus Size Kimonos" for a shoe)
+        // and is too easy to publish unnoticed. Leave it blank instead — this
+        // also blocks Create/Update until a real category is set — and nudge
+        // towards Suggest / Auto-pick (AI), which do look at THIS product.
+        m_logEdit->appendPlainText(tr("No saved category for Amazon type \"%1\" yet — "
+            "category left blank. Click Suggest or Auto-pick (AI) to set one "
+            "(it will be remembered for this type from now on).")
+            .arg(m_draft.amazonProductType));
         return;
+    }
 
-    // 3. Fall back to the LAST category you used — Amazon product types are
-    // inconsistent for similar items (e.g. FILE_FOLDER vs BOOK_COVER), so this
-    // offers your previous pick as an editable default.
+    // 3. Amazon product type is unknown (not just unmapped) — nothing product-
+    // specific to go on, so fall back to the LAST category you used as an
+    // editable default (better than nothing when we truly have no signal).
     apply(settings->value(QStringLiteral("TemuCategoryLastUsed")).toString(),
           tr("your last used category (change if wrong)"));
 }
@@ -1841,7 +1859,7 @@ QCoro::Task<void> DialogTemuCreateProduct::_fetchAmazonPrices()
             .arg(sku).arg(price, 0, 'f', 2).arg(base, 0, 'f', 2).arg(base * 1.20, 0, 'f', 2));
     }
     api->deleteLater();
-    m_logEdit->appendPlainText(tr("Prices ready. Edit any cell, or 'Apply selected row to all'."));
+    m_logEdit->appendPlainText(tr("Prices ready. Edit any cell, or 'Apply selected row's prices to all'."));
 }
 
 // Fetches the Amazon on-hand quantity per SKU via the shared inventory source
@@ -1920,14 +1938,25 @@ void DialogTemuCreateProduct::_applyRowToAll()
         QMessageBox::information(this, tr("Apply to all"), tr("Select a row first."));
         return;
     }
-    // Copy the editable columns (base, reference, packaging) to every other row.
-    for (int c : {kColBase, kColRef, kColStock, kColWeight, kColL, kColW, kColH}) {
+    // Copy only the price columns (base, reference) to every other row.
+    for (int c : {kColBase, kColRef}) {
         const QString v = m_skuTable->item(src, c)->text();
         for (int r = 0; r < m_skuTable->rowCount(); ++r)
             if (r != src)
                 m_skuTable->item(r, c)->setText(v);
     }
-    m_logEdit->appendPlainText(tr("Applied row %1's price + packaging to all variations.").arg(src + 1));
+    m_logEdit->appendPlainText(tr("Applied row %1's prices to all variations.").arg(src + 1));
+}
+
+// Sets Reference = Base for every variation in one click, instead of typing
+// the same value into both columns for every row (or leaving Reference blank,
+// which defaults to base +20% at publish time).
+void DialogTemuCreateProduct::_applySamePrice()
+{
+    for (int r = 0; r < m_skuTable->rowCount(); ++r)
+        m_skuTable->item(r, kColRef)->setText(m_skuTable->item(r, kColBase)->text());
+    m_logEdit->appendPlainText(tr("Set reference price = base price for every variation "
+                                  "(no markup)."));
 }
 
 // "Complete" on the per-country tree: fill only what's missing. Sizes convert

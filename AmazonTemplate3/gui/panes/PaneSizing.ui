@@ -287,7 +287,7 @@
           </sizepolicy>
          </property>
          <property name="currentIndex">
-          <number>5</number>
+          <number>6</number>
          </property>
          <widget class="QWidget" name="pageImages">
           <property name="geometry">
@@ -527,6 +527,63 @@
               <bool>true</bool>
              </attribute>
             </widget>
+           </item>
+          </layout>
+         </widget>
+         <widget class="QWidget" name="pageSearchTerms">
+          <attribute name="label">
+           <string>Search terms</string>
+          </attribute>
+          <layout class="QVBoxLayout" name="verticalLayout_searchTerms">
+           <item>
+            <layout class="QHBoxLayout" name="horizontalLayout_searchTerms">
+             <item>
+              <widget class="QPushButton" name="buttonRetrieveSearchTerms">
+               <property name="toolTip">
+                <string>For each country, scans this product's child ASINs until one returns search terms (Amazon's generic_keyword attribute).</string>
+               </property>
+               <property name="text">
+                <string>Retrieve search terms</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QPushButton" name="buttonUploadSearchTerms">
+               <property name="toolTip">
+                <string>PATCHes the current search terms of each row back to Amazon for that country.</string>
+               </property>
+               <property name="text">
+                <string>Upload search terms</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QPushButton" name="buttonCopySearchTerms">
+               <property name="toolTip">
+                <string>Cleans the selected row's search terms (sorted alphabetically, duplicates removed), writes the result back, and copies it to the clipboard.</string>
+               </property>
+               <property name="text">
+                <string>Copy search terms</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <spacer name="horizontalSpacer_searchTerms">
+               <property name="orientation">
+                <enum>Qt::Orientation::Horizontal</enum>
+               </property>
+               <property name="sizeHint" stdset="0">
+                <size>
+                 <width>40</width>
+                 <height>20</height>
+                </size>
+               </property>
+              </spacer>
+             </item>
+            </layout>
+           </item>
+           <item>
+            <widget class="QTableView" name="tableViewSearchTerms"/>
            </item>
           </layout>
          </widget>

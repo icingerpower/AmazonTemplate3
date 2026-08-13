@@ -67,6 +67,8 @@ add_library(AmazonTemplate3Lib STATIC
   ClassificationTypeMap.cpp
   BrokenChildTable.h
   BrokenChildTable.cpp
+  SearchTermsTable.h
+  SearchTermsTable.cpp
   TableUnresolvedAsins.h
   TableUnresolvedAsins.cpp
   CaseGroup.h
@@ -189,6 +191,8 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   ClassificationTypeMap.cpp
   BrokenChildTable.h
   BrokenChildTable.cpp
+  SearchTermsTable.h
+  SearchTermsTable.cpp
   TableUnresolvedAsins.h
   TableUnresolvedAsins.cpp
   CaseGroup.h

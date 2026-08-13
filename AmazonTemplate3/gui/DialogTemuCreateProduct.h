@@ -187,7 +187,8 @@ private:
     // it to avoid shipping the default quantity 0 when the async fetch hasn't
     // finished (or failed) yet.
     bool m_stockFetched = false;
-    void _applyRowToAll();                   // copy current row's price+packaging to all
+    void _applyRowToAll();                   // copy current row's Base/Reference prices to all
+    void _applySamePrice();                  // Reference = Base for every row (no markup)
     // Persist / restore the image selection+order and the filled attributes to
     // the product's settings.ini, so a failed upload doesn't cost the ~3 min of
     // manual setup when re-opening the dialog.

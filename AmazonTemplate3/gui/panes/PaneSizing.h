@@ -24,6 +24,7 @@
 #include "SizeRangeWidget.h"
 #include "sizecategories/SizingTableTemplateModel.h"
 #include "BrokenChildTable.h"
+#include "SearchTermsTable.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class PaneSizing; }
@@ -193,6 +194,11 @@ private:
     BrokenChildTable             *m_brokenChildTable = nullptr;
     QString                       m_sizeTableTemplatePath;
 
+    SearchTermsTable  *m_searchTermsTable = nullptr;
+    // Pinned coroutine frame for the fire-and-forget Retrieve/Upload search
+    // terms runs (a QCoro Task freed mid-flight crashes — see project memory).
+    QCoro::Task<void>  m_searchTermsTask;
+
     void _ensureModel(const QDir &dir);
     void _refreshApi();
     QCoro::Task<void> _loadBrokenChildData(bool forceRefresh = false);
@@ -252,6 +258,20 @@ private:
     // the AI runs once per (marketplace, color) and the result is uploaded to every
     // size's child SKU. Resilient: a failed SKU/marketplace is logged, never aborts.
     QCoro::Task<void> _fixBulletPoints();
+    // For each country (from listWidgetCountries), scans this product's child
+    // ASINs — trying each in turn — until one returns Amazon's "generic_keyword"
+    // (search terms) listing attribute, and records that child's title +
+    // search terms + SKU/productType (needed later to re-PATCH). A country
+    // with no listed child at all is left marked "not found" (greyed out).
+    QCoro::Task<void> _retrieveSearchTerms();
+    // PATCHes each row's current search-terms text back to Amazon, for every
+    // row that has a representative SKU (i.e. was found on a previous
+    // Retrieve). Rows never retrieved are skipped with a log warning.
+    QCoro::Task<void> _uploadSearchTerms();
+    // Cleans the selected row's search terms (split on whitespace, dedupe
+    // case-insensitively, sort alphabetically), writes the result back into
+    // the table, and copies it to the clipboard.
+    void _copySearchTerms();
     // Runs one CLI prompt via the async→QFuture bridge (co_await on runPrompt()
     // itself crashes). Trims stdout into *out.
     QCoro::Task<void> _runCliText(AbstractCli *cli, QString prompt,

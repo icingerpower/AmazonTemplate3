@@ -26,6 +26,7 @@
 #include "TemuStoreModel.h"
 #include "apis/TemuInventoryApi.h"
 #include "BrokenChildTable.h"
+#include "SearchTermsTable.h"
 #include "AmazonMarketplace.h"
 #include "fillers/FillerSize.h"
 #include <QTableView>
@@ -322,6 +323,13 @@ PaneSizing::PaneSizing(QWidget *parent)
     connect(ui->comboBoxBrokenAttrMarket,
             QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &PaneSizing::onBrokenAttrMarketChanged);
+
+    connect(ui->buttonRetrieveSearchTerms, &QPushButton::clicked,
+            this, [this]() { m_searchTermsTask = _retrieveSearchTerms(); });
+    connect(ui->buttonUploadSearchTerms, &QPushButton::clicked,
+            this, [this]() { m_searchTermsTask = _uploadSearchTerms(); });
+    connect(ui->buttonCopySearchTerms, &QPushButton::clicked,
+            this, &PaneSizing::_copySearchTerms);
 
     connect(ui->buttonTemuEditStores, &QPushButton::clicked,
             this, [this]() {
@@ -916,6 +924,20 @@ void PaneSizing::_ensureModel(const QDir &dir)
         ui->tableViewBrokenChild->horizontalHeader()->setStretchLastSection(true);
         ui->tableViewBrokenChild->verticalHeader()->hide();
         _refreshBrokenAttrCombo();
+    }
+
+    if (!m_searchTermsTable) {
+        m_searchTermsTable = new SearchTermsTable(this);
+        ui->tableViewSearchTerms->setModel(m_searchTermsTable);
+        ui->tableViewSearchTerms->verticalHeader()->hide();
+        ui->tableViewSearchTerms->setEditTriggers(QAbstractItemView::DoubleClicked
+                                                  | QAbstractItemView::EditKeyPressed);
+        ui->tableViewSearchTerms->setSelectionBehavior(QAbstractItemView::SelectRows);
+        auto *stHeader = ui->tableViewSearchTerms->horizontalHeader();
+        stHeader->setSectionResizeMode(SearchTermsTable::ColCountry, QHeaderView::ResizeToContents);
+        stHeader->setSectionResizeMode(SearchTermsTable::ColTitle, QHeaderView::Interactive);
+        stHeader->setSectionResizeMode(SearchTermsTable::ColSearchTerms, QHeaderView::Stretch);
+        stHeader->setSectionResizeMode(SearchTermsTable::ColBytes, QHeaderView::ResizeToContents);
     }
 
     connect(m_treeModel.get(), &TreeSizingAsins::marketplacesChecked,
@@ -3168,6 +3190,210 @@ QCoro::Task<void> PaneSizing::_fixBulletPoints()
     setAplusStatus(pui, tr("Done."), totalSteps);
     appendAplusLog(pui.logPtr, tr("Fix bullet points finished."));
     co_return;
+}
+
+QCoro::Task<void> PaneSizing::_retrieveSearchTerms()
+{
+    if (!m_treeModel || m_treeModel->rowCount() == 0) {
+        QMessageBox::information(this, tr("Retrieve search terms"),
+                                 tr("No product is loaded."));
+        co_return;
+    }
+    if (!m_searchTermsTable)
+        co_return;
+
+    // Flatten every child ASIN/SKU across all colors/sizes — search terms are
+    // shared at the listing level (not per-color), so any child that exists
+    // in the target marketplace can supply them.
+    struct Child { QString asin, sku; };
+    QList<Child> children;
+    for (int fi = 0; fi < m_treeModel->rowCount(); ++fi) {
+        const QModelIndex pi = m_treeModel->index(fi, 0);
+        for (int ci = 0; ci < m_treeModel->rowCount(pi); ++ci) {
+            const QString asin = m_treeModel->data(
+                m_treeModel->index(ci, TreeSizingAsins::ASIN, pi)).toString().trimmed();
+            const QString sku = m_treeModel->data(
+                m_treeModel->index(ci, TreeSizingAsins::SKU, pi)).toString().trimmed();
+            if (asin.isEmpty() || sku.isEmpty())
+                continue;
+            children.append({asin, sku});
+        }
+    }
+    if (children.isEmpty()) {
+        QMessageBox::information(this, tr("Retrieve search terms"),
+            tr("No child ASINs/SKUs available (load a product first)."));
+        co_return;
+    }
+
+    // buildAplusMarketplaceList already skips "(missing)" and dedupes.
+    const QList<QPair<QString, QString>> marketplaces =
+        buildAplusMarketplaceList(ui->listWidgetCountries);
+    m_searchTermsTable->setCountries(marketplaces);
+
+    AplusProgressUi pui = createAplusProgressDialog(this, marketplaces.size());
+    if (pui.statusPtr && pui.statusPtr->window())
+        pui.statusPtr->window()->setWindowTitle(tr("Retrieve search terms"));
+    int step = 0;
+
+    for (const auto &mp : marketplaces) {
+        const QString mpCode = mp.first;
+        const QString mpId   = mp.second;
+        ++step;
+        setAplusStatus(pui, tr("%1: scanning child ASINs…").arg(mpCode), step);
+
+        // "fr-FR" → "fr"; language_tag arrives as "fr_FR" or "fr-FR". An entry
+        // with no language_tag at all is accepted too (some categories omit it).
+        const QString lang = AmazonAplusApi::localeForMarketplace(mpId).left(2);
+        auto langOk = [&lang](const QJsonObject &o) {
+            const QString tag = o.value(QStringLiteral("language_tag")).toString();
+            return tag.isEmpty() || tag.startsWith(lang, Qt::CaseInsensitive);
+        };
+
+        QString title, searchTerms, foundAsin, foundSku, productType;
+        bool anyExists = false;
+
+        for (const Child &c : children) {
+            QJsonObject attrs;
+            co_await m_api->fetchListingAttributes(mpId, c.sku, &attrs);
+            if (attrs.isEmpty())
+                continue; // this child isn't listed on this marketplace
+            anyExists = true;
+            if (foundSku.isEmpty()) {
+                // Representative fallback so Upload has a target even when no
+                // child has search terms yet.
+                foundAsin = c.asin;
+                foundSku  = c.sku;
+                for (const QJsonValue &v : attrs.value(QStringLiteral("item_name")).toArray()) {
+                    const QJsonObject o = v.toObject();
+                    const QString val = o.value(QStringLiteral("value")).toString();
+                    if (!val.isEmpty() && langOk(o)) { title = val; break; }
+                }
+            }
+            QStringList terms;
+            for (const QJsonValue &v : attrs.value(QStringLiteral("generic_keyword")).toArray()) {
+                const QJsonObject o = v.toObject();
+                const QString val = o.value(QStringLiteral("value")).toString();
+                if (!val.isEmpty() && langOk(o))
+                    terms << val;
+            }
+            if (!terms.isEmpty()) {
+                searchTerms = terms.join(QLatin1Char(' '));
+                foundAsin = c.asin;
+                foundSku  = c.sku;
+                break; // found search terms — stop scanning this country
+            }
+        }
+
+        if (!foundSku.isEmpty()) {
+            co_await m_api->fetchListingProductType(mpId, foundSku, &productType);
+            if (productType.isEmpty())
+                productType = m_productType;
+        }
+        if (title.isEmpty())
+            title = m_productTitle;
+
+        m_searchTermsTable->setRowResult(mpCode, foundAsin, foundSku, productType,
+                                         title, searchTerms, anyExists);
+        appendAplusLog(pui.logPtr, !anyExists
+            ? tr("%1: not listed on this marketplace").arg(mpCode)
+            : (searchTerms.isEmpty()
+                   ? tr("%1: no search terms found").arg(mpCode)
+                   : tr("%1: %2 (%3 bytes)").arg(mpCode, searchTerms)
+                         .arg(searchTerms.toUtf8().size())));
+    }
+
+    setAplusStatus(pui, tr("Done."), marketplaces.size());
+    appendAplusLog(pui.logPtr, tr("Retrieve search terms finished."));
+}
+
+QCoro::Task<void> PaneSizing::_uploadSearchTerms()
+{
+    if (!m_searchTermsTable || m_searchTermsTable->rowCount() == 0) {
+        QMessageBox::information(this, tr("Upload search terms"),
+                                 tr("Retrieve search terms first."));
+        co_return;
+    }
+
+    AmazonWarningsApi *warnApi = _warningsApi();
+    const QList<SearchTermsTable::Row> rows = m_searchTermsTable->rows();
+
+    AplusProgressUi pui = createAplusProgressDialog(this, rows.size());
+    if (pui.statusPtr && pui.statusPtr->window())
+        pui.statusPtr->window()->setWindowTitle(tr("Upload search terms"));
+    int step = 0;
+
+    for (const auto &row : rows) {
+        ++step;
+        setAplusStatus(pui, tr("%1: uploading…").arg(row.countryCode), step);
+
+        if (row.sku.isEmpty()) {
+            appendAplusLog(pui.logPtr, tr("%1: skipped — no SKU (retrieve first).")
+                           .arg(row.countryCode));
+            continue;
+        }
+        if (row.searchTerms.trimmed().isEmpty()) {
+            appendAplusLog(pui.logPtr, tr("%1: skipped — empty (would clear existing "
+                                          "search terms on Amazon).").arg(row.countryCode));
+            continue;
+        }
+
+        QString productType = row.productType;
+        if (productType.isEmpty()) {
+            co_await m_api->fetchListingProductType(row.marketplaceId, row.sku, &productType);
+            if (productType.isEmpty())
+                productType = m_productType;
+        }
+
+        bool ok = false;
+        co_await warnApi->patchListingAttribute(
+            row.marketplaceId, row.sku, productType,
+            QStringLiteral("generic_keyword"), row.searchTerms, &ok);
+        appendAplusLog(pui.logPtr, ok
+            ? tr("%1: ✓ uploaded (%2 bytes)").arg(row.countryCode)
+                  .arg(row.searchTerms.toUtf8().size())
+            : tr("%1: ✗ FAILED: %2").arg(row.countryCode, warnApi->lastError()));
+    }
+
+    setAplusStatus(pui, tr("Done."), rows.size());
+    appendAplusLog(pui.logPtr, tr("Upload search terms finished."));
+}
+
+// Cleans the selected row's search terms (split on whitespace, dedupe
+// case-insensitively keeping first-seen casing, sort alphabetically), writes
+// the normalized text back into the table (so the Bytes column reflects it
+// too), and copies it to the clipboard for pasting elsewhere.
+void PaneSizing::_copySearchTerms()
+{
+    if (!m_searchTermsTable)
+        return;
+    auto *sel = ui->tableViewSearchTerms->selectionModel();
+    const QModelIndexList selRows = sel ? sel->selectedRows() : QModelIndexList{};
+    if (selRows.isEmpty()) {
+        QMessageBox::information(this, tr("Copy search terms"),
+                                 tr("Select a row first."));
+        return;
+    }
+    const int row = selRows.first().row();
+    const SearchTermsTable::Row r = m_searchTermsTable->rowAt(row);
+
+    static const QRegularExpression kWhitespace(QStringLiteral("\\s+"));
+    const QStringList rawTerms = r.searchTerms.split(kWhitespace, Qt::SkipEmptyParts);
+    QStringList cleaned;
+    QSet<QString> seen;
+    for (const QString &t : rawTerms) {
+        const QString key = t.toLower();
+        if (seen.contains(key))
+            continue;
+        seen.insert(key);
+        cleaned << t;
+    }
+    std::sort(cleaned.begin(), cleaned.end(), [](const QString &a, const QString &b) {
+        return a.compare(b, Qt::CaseInsensitive) < 0;
+    });
+    const QString result = cleaned.join(QLatin1Char(' '));
+
+    m_searchTermsTable->setSearchTerms(row, result);
+    QGuiApplication::clipboard()->setText(result);
 }
 
 // Helper: find element from flat list by type + exact id, with fallback to base id.
