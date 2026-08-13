@@ -144,15 +144,29 @@ async function main() {
       try { return JSON.parse(line) as AskReply; } catch { return { cmd: "stop" }; }
     };
 
-    const ctx = await launchContext(cfg, region);
+    // Deliberate user action (closing the Chromium window) — STOP, no retry.
+    const CLOSED_RE = /has been closed|Target (page|browser).*closed|browser has been closed/i;
+    // Chromium renderer died on its own (OOM, GPU fault, etc.) — RECOVERABLE:
+    // relaunch a fresh context/page and resume the SAME marketplace. Amazon's
+    // own row status (already-submitted rows read back as "under review")
+    // makes the retry naturally idempotent — nothing gets double-submitted.
+    const CRASHED_RE = /crashed/i;
+    const MAX_RELAUNCHES = 3; // per marketplace — a fresh country starts with a clean budget
+    let relaunches = 0;
+    let relaunchBudgetIndex = -1; // marketplace index the counter above applies to
+
+    let ctx = await launchContext(cfg, region);
+    let page = await firstPage(ctx);
     try {
-      const page = await firstPage(ctx);
       if (!(await ensureLoggedIn(page, cfg, region))) {
         for (const mp of marketplaces)
           results.push({ country: mp.country, ok: false,
                          error: "not logged in (login wait timed out)", sessionExpired: true });
       } else {
-        for (const mp of marketplaces) {
+        let i = 0;
+        while (i < marketplaces.length) {
+          const mp = marketplaces[i]!;
+          if (i !== relaunchBudgetIndex) { relaunches = 0; relaunchBudgetIndex = i; }
           const mpDumpDir = join(dumpDir, timestampSlug(now), mp.country);
           try {
             log(`[gspr:${mp.country}] opening compliance page…`);
@@ -197,6 +211,7 @@ async function main() {
               snap.error = `marketplace mismatch: wanted "${mp.countryName}" but page shows "${selected}" — see ${mpDumpDir}`;
             }
             results.push(snap);
+            i++; // this marketplace is done — advance
 
             // The user closing the browser means STOP — don't relaunch for
             // the remaining marketplaces.
@@ -206,10 +221,44 @@ async function main() {
             }
           } catch (e) {
             const msg = (e as Error).message ?? String(e);
+
+            if (CRASHED_RE.test(msg) && !CLOSED_RE.test(msg)) {
+              if (relaunches >= MAX_RELAUNCHES) {
+                log(`[gspr:${mp.country}] browser crashed again — giving up after ${MAX_RELAUNCHES} relaunches`);
+                results.push({ country: mp.country, ok: false,
+                               error: `browser crashed ${MAX_RELAUNCHES} times: ${msg}` });
+                i++;
+                continue;
+              }
+              relaunches++;
+              log(`[gspr:${mp.country}] browser crashed (${msg}) — relaunching`
+                  + ` (attempt ${relaunches}/${MAX_RELAUNCHES}) and resuming this marketplace…`);
+              await ctx.close().catch(() => {});
+              try {
+                ctx = await launchContext(cfg, region);
+                page = await firstPage(ctx);
+                if (!(await ensureLoggedIn(page, cfg, region))) {
+                  log(`[gspr:${mp.country}] re-login failed after crash recovery — giving up on this marketplace`);
+                  results.push({ country: mp.country, ok: false,
+                                 error: "re-login failed after crash recovery", sessionExpired: true });
+                  i++;
+                }
+                // else: retry the SAME marketplace (i unchanged) with the new page.
+              } catch (relaunchErr) {
+                const relaunchMsg = (relaunchErr as Error).message ?? String(relaunchErr);
+                log(`[gspr] could not relaunch the browser: ${relaunchMsg} — stopping run`);
+                results.push({ country: mp.country, ok: false,
+                               error: `could not relaunch after crash: ${relaunchMsg}` });
+                break;
+              }
+              continue;
+            }
+
             log(`[gspr:${mp.country}] FAILED: ${msg}`);
             results.push({ country: mp.country, ok: false, error: msg,
                            sessionExpired: e instanceof SessionExpiredError });
-            if (/has been closed|Target (page|browser).*closed|browser has been closed/i.test(msg)) {
+            i++;
+            if (CLOSED_RE.test(msg)) {
               log(`[gspr] browser/context closed — stopping run`);
               break;
             }

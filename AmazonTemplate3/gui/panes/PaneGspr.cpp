@@ -384,14 +384,18 @@ void PaneGspr::_handleWorkerAsk(const QString &json)
     const QString sku     = o.value(QStringLiteral("sku")).toString();
     const QString asin    = o.value(QStringLiteral("asin")).toString();
     const QString country = o.value(QStringLiteral("country")).toString();
+    // Set for BOTH "no entry matches this SKU" and "entry found but missing
+    // a field the form requires (email/URL, address)" — same dialog either way.
+    const QString issue   = o.value(QStringLiteral("issue")).toString();
 
     // The worker is paused on its stdin until we answer.
     QMessageBox box(this);
-    box.setWindowTitle(tr("GSPR — manufacturer missing"));
+    box.setWindowTitle(tr("GSPR — manufacturer missing or incomplete"));
     box.setIcon(QMessageBox::Question);
-    box.setText(tr("No manufacturer found for SKU \"%1\" (ASIN %2, %3).")
-                    .arg(sku, asin, country));
-    box.setInformativeText(tr("Add it to one of the supplier xlsx files in\n%1\n"
+    box.setText(tr("SKU \"%1\" (ASIN %2, %3): %4.")
+                    .arg(sku, asin, country,
+                         issue.isEmpty() ? tr("no manufacturer found") : issue));
+    box.setInformativeText(tr("Fix it in one of the supplier xlsx files in\n%1\n"
                               "save the file, then click Done. Only files saved "
                               "since the last read are re-parsed.\n\n"
                               "Skip excludes this product permanently (any "

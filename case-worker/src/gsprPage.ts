@@ -631,6 +631,20 @@ function findManufacturer(entries: ManufacturerEntry[], sku: string): Manufactur
   return best;
 }
 
+// Fields Amazon's add-new manufacturer form actually requires (see the
+// mfr-form dump): name (guaranteed by the xlsx parser), a primary contact
+// (email or URL) and an address. Missing either is just as much a "fix the
+// xlsx" situation as no entry at all — both go through the SAME ask() pause,
+// so the user is never left watching a silent wall of failures.
+function manufacturerIssue(e: ManufacturerEntry | null): string | null {
+  if (!e) return "no manufacturer entry matches this SKU";
+  if (!e.email && !e.url)
+    return `manufacturer "${e.name}" has no email or URL (required by Amazon's form)`;
+  if (!e.address?.trim())
+    return `manufacturer "${e.name}" has no address (required by Amazon's form)`;
+  return null;
+}
+
 /** Fill the inner input/textarea of a kat web component. */
 async function fillKatField(page: Page, sel: string, value: string): Promise<boolean> {
   const host = page.locator(sel).first();
@@ -751,19 +765,22 @@ export async function processManufacturer(
           continue;
         }
 
-        // Resolve the manufacturer BEFORE touching the page — no match pauses
-        // the run so the user can complete the xlsx files.
+        // Resolve the manufacturer BEFORE touching the page — missing OR
+        // incomplete data pauses the run the same way, so the user can
+        // complete the xlsx files instead of watching silent failures pile up.
         let entry = findManufacturer(manufacturers, sku);
+        let issue = manufacturerIssue(entry);
         let skippedByUser = false;
-        while (!entry && !skippedByUser) {
-          log(`[gspr:${mp.country}] MFR ${asin}: no manufacturer for SKU "${sku}" — waiting for the user…`);
-          const reply = await ask({ kind: "manufacturer", country: mp.country, asin, sku });
+        while (issue && !skippedByUser) {
+          log(`[gspr:${mp.country}] MFR ${asin}: ${issue} (SKU "${sku}") — waiting for the user…`);
+          const reply = await ask({ kind: "manufacturer", country: mp.country, asin, sku, issue });
           if (reply?.cmd === "done" && Array.isArray(reply.manufacturers)) {
             manufacturers.length = 0;
             manufacturers.push(...reply.manufacturers);
             entry = findManufacturer(manufacturers, sku);
-            if (!entry)
-              log(`[gspr:${mp.country}] MFR ${asin}: SKU "${sku}" still has no manufacturer — asking again`);
+            issue = manufacturerIssue(entry);
+            if (issue)
+              log(`[gspr:${mp.country}] MFR ${asin}: SKU "${sku}" still incomplete (${issue}) — asking again`);
           } else if (reply?.cmd === "skip") {
             skippedByUser = true;
           } else {
@@ -771,7 +788,7 @@ export async function processManufacturer(
             return out;
           }
         }
-        if (skippedByUser || !entry) {
+        if (skippedByUser || issue || !entry) {
           log(`[gspr:${mp.country}] MFR ${asin}: skipped by the user`);
           userSkip.add(asin); // also skips it in later phases/countries this run
           record({ asin, ok: true, status: "user-skipped", type: "mfr" });
@@ -837,16 +854,9 @@ export async function processManufacturer(
               firstForm = false;
             }
             // Field names observed in the mfr-form dump. "Primary email
-            // address or URL" is REQUIRED — email, else the supplier URL. In
-            // manual-save mode a missing one is fine: the user completes it.
+            // address or URL" is REQUIRED — the completeness check above
+            // guarantees entry.email or entry.url is set by this point.
             const primary = entry.email || entry.url || "";
-            if (!primary && !manualSave) {
-              log(`[gspr:${mp.country}] MFR ${asin}: "${entry.name}" has no email/URL (required) — fix the xlsx`);
-              record({ asin, ok: false, status: "failed", type: "mfr",
-                       reason: `manufacturer "${entry.name}" has no email or URL (required by the form)` });
-              await ensureDrawerClosed(page);
-              continue;
-            }
             const a = splitAddress(entry.address);
             const filledName = await fillKatField(page,
               `${FLYOUT} kat-input[name="name"]`, entry.name);

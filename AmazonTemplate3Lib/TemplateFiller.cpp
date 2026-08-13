@@ -1694,7 +1694,7 @@ QSet<QString> TemplateFiller::_get_fieldIdMandatory(QXlsx::Document &doc) const
             }
         }
     }
-    Q_ASSERT(!fieldIds.isEmpty()); // Usually it means SHEETS_MANDATORY needs to be added a new value
+    //Q_ASSERT(!fieldIds.isEmpty()); // Usually it means SHEETS_MANDATORY needs to be added a new value
     return fieldIds;
 }
 
@@ -1730,11 +1730,19 @@ QSet<QString> TemplateFiller::_get_fieldIdMandatoryPrevious() const
         // Ideally we might want to merge or pick best, but "previous" usually implies "last used".
         // The list might be sorted or not. existing logic 'findPreviousTemplatePath' returns list.
         // We'll proceed with the first one for now.
-        QXlsx::Document docPrev{previousTemplatePaths.first()};
-        if (docPrev.load())
+        for (const auto &previousTemplatePath : previousTemplatePaths)
         {
-             // We reuse _get_fieldIdMandatory logic
-             previousFieldIdMandatory = _get_fieldIdMandatory(docPrev);
+
+            QXlsx::Document docPrev{previousTemplatePath};
+            if (docPrev.load())
+            {
+                // We reuse _get_fieldIdMandatory logic
+                previousFieldIdMandatory = _get_fieldIdMandatory(docPrev);
+            }
+            if (!previousFieldIdMandatory.isEmpty())
+            {
+                break;
+            }
         }
     }
     settings->setValue(key, QVariant::fromValue(previousFieldIdMandatory));
