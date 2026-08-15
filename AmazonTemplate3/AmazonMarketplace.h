@@ -30,6 +30,38 @@ public:
     // AWS signing region (e.g. "eu-west-1")
     QString awsRegion()     const { return m_awsRegion; }
 
+    // Language spoken on this marketplace's Amazon storefront (for CLI
+    // translation instructions) — not the same as the country name; several
+    // English-speaking marketplaces (GB, US, CA, IE) share "English", and
+    // Belgium's marketplace serves French only (fr_BE, no nl_BE listings).
+    QString languageName() const {
+        static const QHash<QString,QString> s_map = {
+            {"GB", QStringLiteral("English")}, {"US", QStringLiteral("English")},
+            {"CA", QStringLiteral("English")}, {"IE", QStringLiteral("English")},
+            {"DE", QStringLiteral("German")},  {"FR", QStringLiteral("French")},
+            {"BE", QStringLiteral("French")},  {"ES", QStringLiteral("Spanish")},
+            {"MX", QStringLiteral("Spanish")}, {"IT", QStringLiteral("Italian")},
+            {"NL", QStringLiteral("Dutch")},   {"SE", QStringLiteral("Swedish")},
+            {"PL", QStringLiteral("Polish")},  {"JP", QStringLiteral("Japanese")},
+        };
+        return s_map.value(m_countryCode, m_countryCode);
+    }
+
+    // ISO 639-1 code for languageName() (e.g. "EN", "DE") — short label for
+    // CLI translation instructions, paired with the country codes that share it.
+    QString languageCode() const {
+        static const QHash<QString,QString> s_map = {
+            {"GB", QStringLiteral("EN")}, {"US", QStringLiteral("EN")},
+            {"CA", QStringLiteral("EN")}, {"IE", QStringLiteral("EN")},
+            {"DE", QStringLiteral("DE")}, {"FR", QStringLiteral("FR")},
+            {"BE", QStringLiteral("FR")}, {"ES", QStringLiteral("ES")},
+            {"MX", QStringLiteral("ES")}, {"IT", QStringLiteral("IT")},
+            {"NL", QStringLiteral("NL")}, {"SE", QStringLiteral("SV")},
+            {"PL", QStringLiteral("PL")}, {"JP", QStringLiteral("JA")},
+        };
+        return s_map.value(m_countryCode, m_countryCode);
+    }
+
     // Returns the "sales-channel" value used in Amazon order reports (e.g. "Amazon.de").
     QString salesChannelName() const {
         static const QHash<QString,QString> s_map = {

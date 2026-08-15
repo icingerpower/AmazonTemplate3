@@ -6,7 +6,7 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>800</width>
+    <width>1675</width>
     <height>600</height>
    </rect>
   </property>
@@ -82,12 +82,41 @@
         </layout>
        </item>
        <item>
-        <widget class="QTreeView" name="treeViewBrandCategory"/>
+        <widget class="QTreeView" name="treeViewBrandCategory">
+         <attribute name="headerDefaultSectionSize">
+          <number>200</number>
+         </attribute>
+        </widget>
        </item>
       </layout>
      </widget>
      <widget class="QWidget" name="layoutWidget">
       <layout class="QVBoxLayout" name="verticalLayout">
+       <item>
+        <layout class="QHBoxLayout" name="horizontalLayout_3">
+         <item>
+          <widget class="QLabel" name="label_4">
+           <property name="text">
+            <string>Export folder</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLineEdit" name="lineEditExportFolder">
+           <property name="readOnly">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="buttonExportFolder">
+           <property name="text">
+            <string>Browse</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
        <item>
         <layout class="QHBoxLayout" name="horizontalLayout_2">
          <item>
@@ -220,6 +249,29 @@
           </widget>
          </item>
          <item>
+          <widget class="QPushButton" name="buttonOpenStorefrontFolder">
+           <property name="toolTip">
+            <string>Open the stores/storefront folder in the file manager, to copy generated image paths</string>
+           </property>
+           <property name="text">
+            <string>Open folder</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="buttonExportProducts">
+           <property name="enabled">
+            <bool>false</bool>
+           </property>
+           <property name="toolTip">
+            <string>Export the selected products: copies the desktop image and an ASINS.txt (with the category name translated per marketplace) into a subfolder of the export folder</string>
+           </property>
+           <property name="text">
+            <string>Export</string>
+           </property>
+          </widget>
+         </item>
+         <item>
           <spacer name="horizontalSpacer_2">
            <property name="orientation">
             <enum>Qt::Orientation::Horizontal</enum>
@@ -271,29 +323,23 @@
              </property>
              <item>
               <widget class="QListWidget" name="listVersionStrip">
-               <property name="maximumSize">
-                <size>
-                 <width>16777215</width>
-                 <height>80</height>
-                </size>
-               </property>
                <property name="minimumSize">
                 <size>
                  <width>0</width>
                  <height>80</height>
                 </size>
                </property>
-               <property name="horizontalScrollBarPolicy">
-                <enum>Qt::ScrollBarPolicy::ScrollBarAlwaysOn</enum>
+               <property name="maximumSize">
+                <size>
+                 <width>16777215</width>
+                 <height>80</height>
+                </size>
                </property>
                <property name="verticalScrollBarPolicy">
                 <enum>Qt::ScrollBarPolicy::ScrollBarAlwaysOff</enum>
                </property>
-               <property name="movement">
-                <enum>QListView::Movement::Static</enum>
-               </property>
-               <property name="flow">
-                <enum>QListView::Flow::LeftToRight</enum>
+               <property name="horizontalScrollBarPolicy">
+                <enum>Qt::ScrollBarPolicy::ScrollBarAlwaysOn</enum>
                </property>
                <property name="iconSize">
                 <size>
@@ -301,11 +347,36 @@
                  <height>60</height>
                 </size>
                </property>
-               <property name="uniformItemSizes">
-                <bool>true</bool>
+               <property name="movement">
+                <enum>QListView::Movement::Static</enum>
+               </property>
+               <property name="flow">
+                <enum>QListView::Flow::LeftToRight</enum>
                </property>
                <property name="viewMode">
                 <enum>QListView::ViewMode::IconMode</enum>
+               </property>
+               <property name="uniformItemSizes">
+                <bool>true</bool>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QPushButton" name="buttonCopyVersionPath">
+               <property name="enabled">
+                <bool>false</bool>
+               </property>
+               <property name="sizePolicy">
+                <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                 <horstretch>0</horstretch>
+                 <verstretch>0</verstretch>
+                </sizepolicy>
+               </property>
+               <property name="toolTip">
+                <string>Copy the selected generated image's absolute file path to the clipboard</string>
+               </property>
+               <property name="text">
+                <string>Copy path</string>
                </property>
               </widget>
              </item>
@@ -329,11 +400,11 @@
            </item>
            <item>
             <widget class="QLabel" name="labelImage">
-             <property name="alignment">
-              <set>Qt::AlignmentFlag::AlignCenter</set>
-             </property>
              <property name="text">
               <string>(no image)</string>
+             </property>
+             <property name="alignment">
+              <set>Qt::AlignmentFlag::AlignCenter</set>
              </property>
             </widget>
            </item>

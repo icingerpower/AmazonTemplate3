@@ -88,6 +88,13 @@ private:
     void _onRemoveCategory();
     void _onCopyAsins();
 
+    // Row numbers with at least one selected cell in tableViewAsins, sorted
+    // ascending, no duplicates — built from selectedIndexes() (all columns)
+    // rather than selectionModel()->selectedRows() (column 0 only). Prefer
+    // this everywhere: selectedRows() missed the last row of a large
+    // selection in practice (reported for Copy ASINs and Export).
+    QList<int> _selectedTableRows() const;
+
     // Maps every ASIN in visibleAsins to the full (product,color) group it
     // belongs to — same grouping key _buildTable() uses to build rows, so
     // Move/Remove/Copy always act on exactly what a selected row represents.
@@ -126,6 +133,18 @@ private:
     void _aggregateStock(const QStringList &groupAsins,
                          int *availableOut, int *sales90Out, int *sales365Out) const;
     QCoro::Task<void> _onRefreshSalesStock();
+
+    // English category names (TreeBrandCategories::ColEnglishName), persisted
+    // separately from the catalog cache since they survive Retrieve/Merge/Move.
+    void _loadEnglishCategoryNames();
+    void _saveEnglishCategoryNames();
+
+    // One label per distinct language across every marketplace with
+    // credentials configured, e.g. "EN (GB, US, CA, IE)" — country codes
+    // sharing a language are grouped under it rather than repeated per code.
+    QStringList _configuredLanguageLabels();
+
+    void _onExportProducts();
 };
 
 #endif // PANESTORE_H

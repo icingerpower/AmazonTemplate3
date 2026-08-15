@@ -18,6 +18,7 @@
 
 #include <QClipboard>
 #include <QComboBox>
+#include <QDesktopServices>
 #include <QMessageBox>
 #include <QRadioButton>
 #include <QRegularExpression>
@@ -26,6 +27,9 @@
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QUrl>
 #include <QFontDatabase>
 #include <QGuiApplication>
 #include <QHBoxLayout>
@@ -72,6 +76,12 @@ PaneStore::PaneStore(QWidget *parent)
     ui->treeViewBrandCategory->setRootIsDecorated(true);
     ui->treeViewBrandCategory->setAlternatingRowColors(true);
     ui->treeViewBrandCategory->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    // Persist English-name edits (double-click the "English name" column) as
+    // soon as they're made — setData() is the only thing that ever emits
+    // dataChanged() on this model, so no filtering by column is needed here.
+    connect(m_treeModel, &QAbstractItemModel::dataChanged, this, [this]() {
+        _saveEnglishCategoryNames();
+    });
 
     // Right top: horizontal countries chip-bar
     m_countriesModel = new QStandardItemModel(this);
@@ -105,6 +115,20 @@ PaneStore::PaneStore(QWidget *parent)
         m_stockRefreshTask = _onRefreshSalesStock();
     });
     connect(ui->buttonSortBySales, &QPushButton::clicked, this, &PaneStore::_onSortBySales);
+    connect(ui->buttonOpenStorefrontFolder, &QPushButton::clicked, this, [this]() {
+        m_workingDir.mkpath(QStringLiteral("stores/storefront"));
+        QDesktopServices::openUrl(QUrl::fromLocalFile(
+            m_workingDir.filePath(QStringLiteral("stores/storefront"))));
+    });
+    connect(ui->buttonExportFolder, &QPushButton::clicked, this, [this]() {
+        const QString dir = QFileDialog::getExistingDirectory(
+            this, tr("Select export folder"), ui->lineEditExportFolder->text());
+        if (dir.isEmpty()) return;
+        ui->lineEditExportFolder->setText(dir);
+        WorkingDirectoryManager::instance()->settings()->setValue(
+            QStringLiteral("store/exportFolder"), dir);
+    });
+    connect(ui->buttonExportProducts, &QPushButton::clicked, this, &PaneStore::_onExportProducts);
     connect(ui->buttonMerge, &QPushButton::clicked, this, &PaneStore::_onMerge);
     connect(ui->buttonCopyAsins,      &QPushButton::clicked, this, &PaneStore::_onCopyAsins);
     connect(ui->buttonMoveToTop,  &QPushButton::clicked, this, &PaneStore::_onMoveToTop);
@@ -124,6 +148,7 @@ PaneStore::PaneStore(QWidget *parent)
             this, &PaneStore::_onRemoveCategory);
     connect(ui->listVersionStrip, &QListWidget::currentRowChanged, this, [this](int row) {
         ui->buttonDeleteVersion->setEnabled(row >= 0);
+        ui->buttonCopyVersionPath->setEnabled(row >= 0);
         if (row >= 0) {
             const QString path =
                 ui->listVersionStrip->item(row)->data(Qt::UserRole).toString();
@@ -133,19 +158,26 @@ PaneStore::PaneStore(QWidget *parent)
     connect(ui->buttonDeleteVersion, &QPushButton::clicked, this, [this]() {
         _deleteSelectedVersion();
     });
+    connect(ui->buttonCopyVersionPath, &QPushButton::clicked, this, [this]() {
+        const int row = ui->listVersionStrip->currentRow();
+        if (row < 0) return;
+        const QString path = ui->listVersionStrip->item(row)->data(Qt::UserRole).toString();
+        if (!path.isEmpty())
+            QGuiApplication::clipboard()->setText(path);
+    });
 
     // Enable Up/Down only when a table row is selected
     connect(ui->tableViewAsins->selectionModel(),
             &QItemSelectionModel::selectionChanged,
             this, [this]() {
-                const QModelIndexList sel =
-                    ui->tableViewAsins->selectionModel()->selectedRows();
-                ui->buttonMoveToTop->setEnabled(!sel.isEmpty());
-                ui->buttonMoveUp->setEnabled(!sel.isEmpty());
-                ui->buttonMoveDown->setEnabled(!sel.isEmpty());
-                ui->buttonMoveToBottom->setEnabled(!sel.isEmpty());
-                ui->buttonMoveProducts->setEnabled(!sel.isEmpty());
-                ui->buttonRemoveProducts->setEnabled(!sel.isEmpty());
+                const bool hasSel = !_selectedTableRows().isEmpty();
+                ui->buttonMoveToTop->setEnabled(hasSel);
+                ui->buttonMoveUp->setEnabled(hasSel);
+                ui->buttonMoveDown->setEnabled(hasSel);
+                ui->buttonMoveToBottom->setEnabled(hasSel);
+                ui->buttonMoveProducts->setEnabled(hasSel);
+                ui->buttonRemoveProducts->setEnabled(hasSel);
+                ui->buttonExportProducts->setEnabled(hasSel);
             });
 
     connect(ui->treeViewBrandCategory->selectionModel(),
@@ -183,8 +215,15 @@ void PaneStore::setWorkingDir(const QDir &workingDir)
     m_workingDir.mkpath(QStringLiteral("stores"));
     _loadCustomPaths();
     _loadStockCache();
+    // Must run before _loadFromDisk(), which triggers the first
+    // m_treeModel->setItems() — that's when nodes pick up their English name.
+    _loadEnglishCategoryNames();
     _loadFromDisk(_marketplaceId());
     _loadStorefrontVersions();
+
+    ui->lineEditExportFolder->setText(
+        WorkingDirectoryManager::instance()->settings()->value(
+            QStringLiteral("store/exportFolder")).toString());
 }
 
 void PaneStore::setAvailableClis(const QList<AbstractCli *> &clis)
@@ -305,6 +344,29 @@ void PaneStore::_populateCountriesList()
     m_storeModel->setMarketplaces(mpIds, mpLabels);
 
     _adjustCountriesHeight();
+}
+
+QStringList PaneStore::_configuredLanguageLabels()
+{
+    // Same "has a seller ID configured" filter _populateCountriesList() uses
+    // to build the table's per-marketplace existence columns — kept as a
+    // separate small pass rather than reading m_countriesModel back out,
+    // since that model's row order isn't guaranteed to match countryCode().
+    // Grouped by language code so e.g. GB/US/CA/IE (all English) produce one
+    // "EN (GB, US, CA, IE)" label instead of four identical translations.
+    QStringList langOrder;
+    QHash<QString, QStringList> countriesByLang;
+    for (const AmazonMarketplace &mp : AmazonMarketplace::all()) {
+        if (_catalogApi()->sellerIdForMarketplace(mp.marketplaceId()).isEmpty()) continue;
+        const QString code = mp.languageCode();
+        if (!countriesByLang.contains(code)) langOrder << code;
+        countriesByLang[code] << mp.countryCode();
+    }
+
+    QStringList labels;
+    for (const QString &code : std::as_const(langOrder))
+        labels << QStringLiteral("%1 (%2)").arg(code, countriesByLang.value(code).join(QStringLiteral(", ")));
+    return labels;
 }
 
 void PaneStore::_adjustCountriesHeight()
@@ -665,14 +727,13 @@ QHash<QString, QStringList> PaneStore::_buildAsinGroups(const QStringList &visib
 void PaneStore::_onMoveProducts()
 {
     // Collect selected representative ASINs from the table.
-    const QModelIndexList tableSel =
-        ui->tableViewAsins->selectionModel()->selectedRows();
+    const QList<int> tableSel = _selectedTableRows();
     if (tableSel.isEmpty()) return;
 
     QStringList repAsins;
-    for (const QModelIndex &idx : tableSel)
+    for (int row : tableSel)
         repAsins << m_storeModel->data(
-            m_storeModel->index(idx.row(), TableStoreAsin::ColAsin)).toString();
+            m_storeModel->index(row, TableStoreAsin::ColAsin)).toString();
 
     // Expand each rep ASIN to its full (product,color) group within the current
     // visible ASIN list — a selected row can represent several sibling ASINs.
@@ -787,14 +848,13 @@ void PaneStore::_onMoveProducts()
 
 void PaneStore::_onRemoveProducts()
 {
-    const QModelIndexList tableSel =
-        ui->tableViewAsins->selectionModel()->selectedRows();
+    const QList<int> tableSel = _selectedTableRows();
     if (tableSel.isEmpty()) return;
 
     QStringList repAsins;
-    for (const QModelIndex &idx : tableSel)
+    for (int row : tableSel)
         repAsins << m_storeModel->data(
-            m_storeModel->index(idx.row(), TableStoreAsin::ColAsin)).toString();
+            m_storeModel->index(row, TableStoreAsin::ColAsin)).toString();
 
     // Expand each rep ASIN to its full (product,color) group within the current
     // visible ASIN list — a selected row can represent several sibling ASINs.
@@ -858,6 +918,52 @@ void PaneStore::_saveCustomPaths()
         arr.append(pa);
     }
     QSaveFile sf(m_workingDir.filePath(QStringLiteral("stores/custom_paths.json")));
+    if (sf.open(QIODevice::WriteOnly)) {
+        sf.write(QJsonDocument(arr).toJson(QJsonDocument::Compact));
+        sf.commit();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// English category names (TreeBrandCategories::ColEnglishName) — stored as
+// {path:[...], name:"..."} entries rather than a flat map keyed by the
+// '\x1f'-joined path, so the file stays readable/editable outside the app.
+// ---------------------------------------------------------------------------
+
+void PaneStore::_loadEnglishCategoryNames()
+{
+    QHash<QString, QString> names;
+    QFile f(m_workingDir.filePath(QStringLiteral("stores/category_english_names.json")));
+    if (f.open(QIODevice::ReadOnly)) {
+        const QJsonArray arr = QJsonDocument::fromJson(f.readAll()).array();
+        for (const QJsonValue &v : arr) {
+            const QJsonObject obj = v.toObject();
+            QStringList path;
+            for (const QJsonValue &s : obj.value(QStringLiteral("path")).toArray())
+                path << s.toString();
+            const QString name = obj.value(QStringLiteral("name")).toString();
+            if (!path.isEmpty() && !name.isEmpty())
+                names.insert(path.join(QLatin1Char('\x1f')), name);
+        }
+    }
+    m_treeModel->setEnglishNames(names);
+}
+
+void PaneStore::_saveEnglishCategoryNames()
+{
+    QJsonArray arr;
+    const QHash<QString, QString> names = m_treeModel->englishNames();
+    for (auto it = names.cbegin(); it != names.cend(); ++it) {
+        if (it.value().isEmpty()) continue;
+        QJsonObject obj;
+        QJsonArray pathArr;
+        for (const QString &part : it.key().split(QLatin1Char('\x1f')))
+            pathArr.append(part);
+        obj[QStringLiteral("path")] = pathArr;
+        obj[QStringLiteral("name")] = it.value();
+        arr.append(obj);
+    }
+    QSaveFile sf(m_workingDir.filePath(QStringLiteral("stores/category_english_names.json")));
     if (sf.open(QIODevice::WriteOnly)) {
         sf.write(QJsonDocument(arr).toJson(QJsonDocument::Compact));
         sf.commit();
@@ -992,27 +1098,26 @@ void PaneStore::_onRemoveCategory()
     m_storeModel->clear();
 }
 
+QList<int> PaneStore::_selectedTableRows() const
+{
+    QSet<int> rows;
+    for (const QModelIndex &idx : ui->tableViewAsins->selectionModel()->selectedIndexes())
+        rows.insert(idx.row());
+    QList<int> sorted(rows.cbegin(), rows.cend());
+    std::sort(sorted.begin(), sorted.end());
+    return sorted;
+}
+
 void PaneStore::_onCopyAsins()
 {
-    const QModelIndexList sel = ui->tableViewAsins->selectionModel()->selectedRows();
-
-    QStringList repAsins;
-    for (const QModelIndex &idx : sel)
-        repAsins << m_storeModel->data(
-            m_storeModel->index(idx.row(), TableStoreAsin::ColAsin)).toString();
-
-    // Expand each selected row to its full (product,color) group — copying a
-    // row should copy every size/ASIN it represents, not just the representative.
-    const QStringList visibleAsins =
-        m_treeModel->asinsForIndex(ui->treeViewBrandCategory->currentIndex());
-    const QHash<QString, QStringList> groups = _buildAsinGroups(visibleAsins);
-
+    // One ASIN per selected row — each row already represents one (product,color)
+    // group, so copying its representative ASIN is exactly "one per color/design".
+    // Do NOT expand to the full group here (unlike Move/Remove): that would paste
+    // every sibling size too, which is not what this button is for.
     QStringList asins;
-    for (const QString &repAsin : std::as_const(repAsins)) {
-        const QStringList group = groups.value(repAsin);
-        if (group.isEmpty()) asins << repAsin;
-        else asins << group;
-    }
+    for (int row : _selectedTableRows())
+        asins << m_storeModel->data(
+            m_storeModel->index(row, TableStoreAsin::ColAsin)).toString();
 
     QGuiApplication::clipboard()->setText(asins.join(QLatin1Char(',')));
 }
@@ -1053,9 +1158,9 @@ void PaneStore::_syncSavedOrderFromVisibleRows()
 
 void PaneStore::_onMoveToTop()
 {
-    const QModelIndexList sel = ui->tableViewAsins->selectionModel()->selectedRows();
+    const QList<int> sel = _selectedTableRows();
     if (sel.isEmpty()) return;
-    const int row = sel.first().row();
+    const int row = sel.first();
     if (!m_storeModel->moveRowToTop(row)) return;
 
     _syncSavedOrderFromVisibleRows();
@@ -1066,9 +1171,9 @@ void PaneStore::_onMoveToTop()
 
 void PaneStore::_onMoveUp()
 {
-    const QModelIndexList sel = ui->tableViewAsins->selectionModel()->selectedRows();
+    const QList<int> sel = _selectedTableRows();
     if (sel.isEmpty()) return;
-    const int row = sel.first().row();
+    const int row = sel.first();
     if (!m_storeModel->moveRowUp(row)) return;
 
     _syncSavedOrderFromVisibleRows();
@@ -1080,9 +1185,9 @@ void PaneStore::_onMoveUp()
 
 void PaneStore::_onMoveDown()
 {
-    const QModelIndexList sel = ui->tableViewAsins->selectionModel()->selectedRows();
+    const QList<int> sel = _selectedTableRows();
     if (sel.isEmpty()) return;
-    const int row = sel.first().row();
+    const int row = sel.first();
     if (!m_storeModel->moveRowDown(row)) return;
 
     _syncSavedOrderFromVisibleRows();
@@ -1093,9 +1198,9 @@ void PaneStore::_onMoveDown()
 
 void PaneStore::_onMoveToBottom()
 {
-    const QModelIndexList sel = ui->tableViewAsins->selectionModel()->selectedRows();
+    const QList<int> sel = _selectedTableRows();
     if (sel.isEmpty()) return;
-    const int row = sel.first().row();
+    const int row = sel.first();
     if (!m_storeModel->moveRowToBottom(row)) return;
 
     _syncSavedOrderFromVisibleRows();
@@ -1699,11 +1804,11 @@ void PaneStore::_onGenStorefrontImage()
 {
     // Collect representative ASINs: selected rows, else all visible rows (up to 8).
     QStringList asins;
-    const QModelIndexList sel = ui->tableViewAsins->selectionModel()->selectedRows();
+    const QList<int> sel = _selectedTableRows();
     if (!sel.isEmpty()) {
-        for (const QModelIndex &idx : sel)
+        for (int row : sel)
             asins << m_storeModel->data(
-                m_storeModel->index(idx.row(), TableStoreAsin::ColAsin)).toString();
+                m_storeModel->index(row, TableStoreAsin::ColAsin)).toString();
     } else {
         const int n = qMin(m_storeModel->rowCount(), 8);
         for (int i = 0; i < n; ++i)
@@ -1887,4 +1992,204 @@ void PaneStore::_deleteSelectedVersion()
     }
 
     _loadStorefrontVersions();
+}
+
+// ---------------------------------------------------------------------------
+// _onExportProducts — copies the currently selected storefront desktop image
+// and an ASINS.txt (selected ASINs, preceded by the category name translated
+// per configured marketplace) into exportFolder/{brand}/{cat1_cat2_...}/.
+// ---------------------------------------------------------------------------
+
+void PaneStore::_onExportProducts()
+{
+    const QList<int> sel = _selectedTableRows();
+    if (sel.isEmpty()) {
+        QMessageBox::warning(this, tr("Export"), tr("Select at least one product first."));
+        return;
+    }
+    // One ASIN per row — same semantics as Copy ASINs (not the full size group).
+    QStringList asins;
+    for (int row : sel)
+        asins << m_storeModel->data(
+            m_storeModel->index(row, TableStoreAsin::ColAsin)).toString();
+
+    const QString exportRoot = ui->lineEditExportFolder->text();
+    if (exportRoot.isEmpty()) {
+        QMessageBox::warning(this, tr("Export"), tr("Pick an export folder first."));
+        return;
+    }
+
+    const QModelIndex treeIdx = ui->treeViewBrandCategory->currentIndex();
+    const QStringList nodePath = _currentNodePath();
+    if (nodePath.isEmpty()) {
+        QMessageBox::warning(this, tr("Export"), tr("Select a category in the tree first."));
+        return;
+    }
+    const QString englishName = m_treeModel->englishNameForIndex(treeIdx).trimmed();
+    if (englishName.isEmpty()) {
+        QMessageBox::warning(this, tr("Export"),
+            tr("Fill in the \"English name\" column for this category first "
+               "(double-click its cell in the tree)."));
+        return;
+    }
+
+    AbstractCli *cli = ui->comboBoxGenCli->currentData().value<AbstractCli *>();
+    if (!cli) {
+        QMessageBox::warning(this, tr("Export"),
+            tr("No CLI with image generation support is available."));
+        return;
+    }
+
+    const int verRow = ui->listVersionStrip->currentRow();
+    if (verRow < 0) {
+        QMessageBox::warning(this, tr("Export"),
+            tr("No generated image selected — generate or select one first."));
+        return;
+    }
+    const qint64 ts = ui->listVersionStrip->item(verRow)->data(Qt::UserRole + 1).toLongLong();
+    const QString versionsJsonPath =
+        m_workingDir.filePath(QStringLiteral("stores/storefront/versions.json"));
+    QString desktopFile;
+    {
+        QFile f(versionsJsonPath);
+        if (f.open(QIODevice::ReadOnly)) {
+            for (const QJsonValue &v : QJsonDocument::fromJson(f.readAll()).array()) {
+                const QJsonObject o = v.toObject();
+                if (o.value(QStringLiteral("ts")).toVariant().toLongLong() == ts) {
+                    desktopFile = o.value(QStringLiteral("desktop")).toString();
+                    break;
+                }
+            }
+        }
+    }
+    if (desktopFile.isEmpty()) {
+        QMessageBox::warning(this, tr("Export"),
+            tr("No desktop image available for the selected generated version "
+               "(only a mobile image was generated)."));
+        return;
+    }
+    const QString desktopAbs = m_workingDir.filePath(
+        QStringLiteral("stores/storefront/%1").arg(desktopFile));
+    if (!QFile::exists(desktopAbs)) {
+        QMessageBox::warning(this, tr("Export"),
+            tr("Desktop image file is missing on disk: %1").arg(desktopAbs));
+        return;
+    }
+
+    // Destination: exportRoot/{brand}/{cat1_cat2_...} (skip the second level
+    // when the tree selection is just the brand, with nothing underneath it).
+    QDir dest(exportRoot);
+    if (!dest.mkpath(nodePath.first()) || !dest.cd(nodePath.first())) {
+        QMessageBox::warning(this, tr("Export"),
+            tr("Could not create folder: %1").arg(dest.filePath(nodePath.first())));
+        return;
+    }
+    if (nodePath.size() > 1) {
+        const QString subName = nodePath.mid(1).join(QLatin1Char('_'));
+        if (!dest.mkpath(subName) || !dest.cd(subName)) {
+            QMessageBox::warning(this, tr("Export"),
+                tr("Could not create folder: %1").arg(dest.filePath(subName)));
+            return;
+        }
+    }
+
+    const QString destImagePath = dest.filePath(QFileInfo(desktopAbs).fileName());
+    QFile::remove(destImagePath); // QFile::copy refuses to overwrite an existing file
+    if (!QFile::copy(desktopAbs, destImagePath)) {
+        QMessageBox::warning(this, tr("Export"),
+            tr("Failed to copy the image to %1").arg(destImagePath));
+        return;
+    }
+
+    const QStringList languageLabels = _configuredLanguageLabels();
+    const QString asinsPath = dest.filePath(QStringLiteral("ASINS.txt"));
+    QFile::remove(asinsPath); // guarantee a clean write, same reasoning as the image above
+
+    QString prompt = tr(
+        "Write a UTF-8 text file at the exact absolute path below. Do not create "
+        "any other files, and do not print anything else.\n\n"
+        "Path: %1\n\n"
+        "For each of the following language entries, in this exact order, translate "
+        "the category name \"%2\" into that language, phrased as a PLURAL collection "
+        "of several products, not a single item (for EN, keep the name unchanged but "
+        "still plural). Each entry is labeled \"<language code> (<country codes that "
+        "use it>)\" — use the language code/country codes to decide the language, "
+        "but write ONLY the entry's exact label text as given (do not translate or "
+        "alter the label itself). Then, in that SAME language, write a one-sentence "
+        "meta-description, ALSO phrased for the plural collection (not one product): "
+        "naturally work in 3-4 relevant SEO keywords for this category, and end the "
+        "sentence with a plain, neutral invitation to browse/shop the collection "
+        "(e.g. \"discover the full range\", \"available in several sizes and "
+        "colors\", \"explore the collection\") — an invitation only, not a claim. "
+        "Avoid ANY claim, promise, or subjective/performance adjective that Amazon's "
+        "content policies could prohibit or flag: no quality, comfort, durability, "
+        "performance, craftsmanship, or superiority adjectives; no price/discount/"
+        "deal/value-for-money claims; no medical or health claims; no "
+        "unsubstantiated superlatives (\"best\", \"#1\", \"guaranteed\"); no false "
+        "urgency or scarcity claims; no comparisons to other sellers or brands; and "
+        "no other trust- or desirability-building assertion of any kind — in any "
+        "language. Stick to the category itself, its typical occasions/uses, and "
+        "the neutral browse invitation. Write each entry as four lines: the label, "
+        "the translated (plural) category name, the meta-description sentence, then "
+        "a blank line. Entries, in order: %3. Write NOTHING else in the file — no "
+        "ASINs, no extra commentary, nothing after the last entry's blank line.")
+        .arg(asinsPath, englishName, languageLabels.join(QStringLiteral("; ")));
+
+    ui->buttonExportProducts->setEnabled(false);
+    const QString origText = ui->buttonExportProducts->text();
+    ui->buttonExportProducts->setText(tr("Exporting…"));
+
+    // The ASIN line is appended by US, never by the CLI: reproducing a long
+    // exact token list verbatim is exactly the kind of task LLMs sometimes
+    // corrupt (drop/reorder/substitute one ASIN), which is why the file's
+    // last ASIN could end up not matching the actual selection. Writing it
+    // ourselves from the `asins` QStringList we already built guarantees it's
+    // always correct, regardless of what the CLI did with the translations.
+    // Two trailing blank lines are added after the ASIN line, so it's easy to
+    // select/copy without also grabbing the end of the file.
+    const QString asinsLine = asins.join(QLatin1Char(','));
+    auto appendAsinsLine = [asinsPath, asinsLine]() {
+        QString existing;
+        QFile f(asinsPath);
+        if (f.exists() && f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            existing = QString::fromUtf8(f.readAll());
+            f.close();
+        }
+        while (existing.endsWith(QLatin1Char('\n')) || existing.endsWith(QLatin1Char('\r')))
+            existing.chop(1);
+        if (!existing.isEmpty()) existing += QStringLiteral("\n\n");
+        existing += asinsLine + QStringLiteral("\n\n\n");
+
+        QSaveFile sf(asinsPath);
+        if (sf.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            sf.write(existing.toUtf8());
+            sf.commit();
+        }
+    };
+
+    cli->runPromptAsync(prompt, dest.absolutePath(), this,
+        [this, asinsPath, destImagePath, origText, cli, appendAsinsLine](CliRunResult result)
+    {
+        ui->buttonExportProducts->setText(origText);
+        ui->buttonExportProducts->setEnabled(!_selectedTableRows().isEmpty());
+
+        // ASINs are guaranteed regardless of translation success — a translation
+        // failure shouldn't cost the user the (already-correct) ASIN export.
+        appendAsinsLine();
+
+        if (!result.processStarted) {
+            QMessageBox::warning(this, tr("Export"),
+                tr("Category translations failed — CLI not found: %1.\n"
+                   "ASINs were still saved to %2.").arg(cli->getExecutable(), asinsPath));
+            return;
+        }
+        if (result.exitCode != 0) {
+            QMessageBox::warning(this, tr("Export"),
+                tr("Category translations failed (ASINs were still saved).\n\n%1")
+                    .arg(result.errorOutput.trimmed()));
+            return;
+        }
+        QMessageBox::information(this, tr("Export"),
+            tr("Exported image and ASINS.txt to:\n%1").arg(QFileInfo(destImagePath).absolutePath()));
+    });
 }

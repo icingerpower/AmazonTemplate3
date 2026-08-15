@@ -80,13 +80,23 @@ void TreeBrandCategories::setItems(const QList<AmazonCatalogApi::StoreItem> &ite
         genderNode->asins.append(item.asin);   genderNode->colorKeys.insert(colorKey);
         categoryNode->asins.append(item.asin); categoryNode->colorKeys.insert(colorKey);
         brandNode->asins.append(item.asin);    brandNode->colorKeys.insert(colorKey);
+
+        // Re-apply the persisted English name to each level — nodes are
+        // recreated by qDeleteAll() above on every rebuild, so this has to be
+        // redone every time rather than surviving on the TreeNode itself.
+        brandNode->englishName    = m_englishNames.value(_pathKeyFor(brandNode));
+        categoryNode->englishName = m_englishNames.value(_pathKeyFor(categoryNode));
+        genderNode->englishName   = m_englishNames.value(_pathKeyFor(genderNode));
+        ageNode->englishName      = m_englishNames.value(_pathKeyFor(ageNode));
     }
 
     // Ensure custom paths exist even if no items currently reside there.
     for (const QStringList &path : customPaths) {
         TreeNode *node = &m_root;
-        for (const QString &name : path)
+        for (const QString &name : path) {
             node = _findOrCreate(node, name);
+            node->englishName = m_englishNames.value(_pathKeyFor(node));
+        }
     }
 
     endResetModel();
@@ -116,6 +126,25 @@ QString TreeBrandCategories::nodeNameForIndex(const QModelIndex &index) const
 {
     if (!index.isValid()) return {};
     return static_cast<const TreeNode *>(index.internalPointer())->name;
+}
+
+QString TreeBrandCategories::englishNameForIndex(const QModelIndex &index) const
+{
+    if (!index.isValid()) return {};
+    return static_cast<const TreeNode *>(index.internalPointer())->englishName;
+}
+
+void TreeBrandCategories::setEnglishNames(const QHash<QString, QString> &names)
+{
+    m_englishNames = names;
+}
+
+QString TreeBrandCategories::_pathKeyFor(const TreeNode *node) const
+{
+    QStringList parts;
+    for (const TreeNode *n = node; n && n != &m_root; n = n->parent)
+        parts.prepend(n->name);
+    return parts.join(QLatin1Char('\x1f'));
 }
 
 int TreeBrandCategories::depthOfIndex(const QModelIndex &index)
@@ -167,9 +196,14 @@ int TreeBrandCategories::columnCount(const QModelIndex &) const
 
 QVariant TreeBrandCategories::data(const QModelIndex &index, int role) const
 {
-    if (!index.isValid() || index.column() != ColName) return {};
-
+    if (!index.isValid()) return {};
     const TreeNode *node = static_cast<const TreeNode *>(index.internalPointer());
+
+    if (index.column() == ColEnglishName) {
+        if (role == Qt::DisplayRole || role == Qt::EditRole) return node->englishName;
+        return {};
+    }
+    if (index.column() != ColName) return {};
 
     if (role == Qt::DisplayRole)
         return QStringLiteral("%1  (%2)").arg(node->name).arg(node->colorKeys.size());
@@ -181,11 +215,32 @@ QVariant TreeBrandCategories::data(const QModelIndex &index, int role) const
     return {};
 }
 
+bool TreeBrandCategories::setData(const QModelIndex &index, const QVariant &value, int role)
+{
+    if (!index.isValid() || index.column() != ColEnglishName) return false;
+    if (role != Qt::EditRole && role != Qt::DisplayRole) return false;
+
+    auto *node = static_cast<TreeNode *>(index.internalPointer());
+    node->englishName = value.toString().trimmed();
+    m_englishNames[_pathKeyFor(node)] = node->englishName;
+    emit dataChanged(index, index, {Qt::DisplayRole, Qt::EditRole});
+    return true;
+}
+
 QVariant TreeBrandCategories::headerData(int section, Qt::Orientation orientation, int role) const
 {
     if (orientation != Qt::Horizontal || role != Qt::DisplayRole) return {};
     if (section == ColName) return tr("Brand / Category / Gender / Age");
+    if (section == ColEnglishName) return tr("English name");
     return {};
+}
+
+Qt::ItemFlags TreeBrandCategories::flags(const QModelIndex &index) const
+{
+    if (!index.isValid()) return Qt::NoItemFlags;
+    Qt::ItemFlags f = Qt::ItemIsEnabled | Qt::ItemIsSelectable;
+    if (index.column() == ColEnglishName) f |= Qt::ItemIsEditable;
+    return f;
 }
 
 TreeBrandCategories::TreeNode *TreeBrandCategories::_findOrCreate(
