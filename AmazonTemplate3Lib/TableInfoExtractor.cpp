@@ -211,8 +211,9 @@ QString TableInfoExtractor::pasteTitles()
                                 sizeToTryConvertNum.append(sizeElements[j]);
                             }
                         }
-                        for (auto &sizeToConvert : sizeToTryConvertNum)
+                        for (auto it = sizeToTryConvertNum.rbegin(); it != sizeToTryConvertNum.rend(); ++it)
                         {
+                            auto &sizeToConvert = *it;
                             if (sizeToConvert.contains("-"))
                             {
                                 sizeToConvert = sizeToConvert.split("-").last().trimmed();
