@@ -167,21 +167,30 @@ const ATTEST_CHECKBOX = `${FLYOUT} kat-checkbox[label*="warning and safety infor
 const SAVE_BUTTON   = `${FLYOUT} kat-button[label="Save"], ${FLYOUT} kat-button[label="Submit"], `
                     + `${FLYOUT} kat-button:has-text("Save"), ${FLYOUT} kat-button:has-text("Submit"), `
                     + `${FLYOUT} button:has-text("Save"), ${FLYOUT} button:has-text("Submit")`;
-const CLOSE_BUTTON  = `${FLYOUT} kat-button[label="Close"], ${FLYOUT} kat-button:has-text("Close"), `
-                    + `${FLYOUT} button:has-text("Close")`;
+const CLOSE_BUTTON  = `${FLYOUT} kat-button:has-text("Close"), ${FLYOUT} kat-button:has-text("Fermer"), `
+                    + `${FLYOUT} button:has-text("Close"), ${FLYOUT} button:has-text("Fermer"), `
+                    + `${FLYOUT} kat-button[label="Close"], ${FLYOUT} kat-button[label="Fermer"]`;
 
 /** Close the side pane if it is open; true when it ended up closed. */
 async function ensureDrawerClosed(page: Page): Promise<boolean> {
   const panel = page.locator(FLYOUT_PANEL);
-  if (!(await panel.isVisible().catch(() => false)))
+  const overlay = page.locator(`${FLYOUT} .flyoutOverlay`);
+  if (!(await panel.isVisible().catch(() => false))) {
+    if (await overlay.isVisible().catch(() => false)) {
+      await overlay.click({ force: true }).catch(() => {});
+      await overlay.waitFor({ state: "hidden", timeout: 1_000 }).catch(() => {});
+    }
     return true;
+  }
 
   // 1. Click the '×' close control (instant & most reliable)
   const closeSpan = page.locator(FLYOUT_CLOSE).first();
   if (await closeSpan.isVisible().catch(() => false)) {
     await closeSpan.click({ force: true }).catch(() => {});
-    if (await panel.waitFor({ state: "hidden", timeout: 2_000 }).then(() => true).catch(() => false))
+    if (await panel.waitFor({ state: "hidden", timeout: 2_000 }).then(() => true).catch(() => false)) {
+      await overlay.waitFor({ state: "hidden", timeout: 1_000 }).catch(() => {});
       return true;
+    }
   }
 
   // 2. Click Close button if present (both inner shadow button and host)
@@ -189,18 +198,26 @@ async function ensureDrawerClosed(page: Page): Promise<boolean> {
   if (await closeBtn.isVisible().catch(() => false)) {
     await closeBtn.locator("button").first().click({ force: true }).catch(() => {});
     await closeBtn.click({ force: true }).catch(() => {});
-    if (await panel.waitFor({ state: "hidden", timeout: 2_000 }).then(() => true).catch(() => false))
+    if (await panel.waitFor({ state: "hidden", timeout: 2_000 }).then(() => true).catch(() => false)) {
+      await overlay.waitFor({ state: "hidden", timeout: 1_000 }).catch(() => {});
       return true;
+    }
   }
 
   // 3. Try Escape key
   await page.keyboard.press("Escape").catch(() => {});
-  if (await panel.waitFor({ state: "hidden", timeout: 2_000 }).then(() => true).catch(() => false))
+  if (await panel.waitFor({ state: "hidden", timeout: 2_000 }).then(() => true).catch(() => false)) {
+    await overlay.waitFor({ state: "hidden", timeout: 1_000 }).catch(() => {});
     return true;
+  }
 
   // 4. Click the overlay backdrop
-  await page.locator(`${FLYOUT} .flyoutOverlay`).first().click({ force: true }).catch(() => {});
-  return panel.waitFor({ state: "hidden", timeout: 2_000 }).then(() => true).catch(() => false);
+  await overlay.first().click({ force: true }).catch(() => {});
+  const ok = await panel.waitFor({ state: "hidden", timeout: 2_000 }).then(() => true).catch(() => false);
+  if (ok) {
+    await overlay.waitFor({ state: "hidden", timeout: 1_000 }).catch(() => {});
+  }
+  return ok;
 }
 
 /** Whether the attestation kat-checkbox reports being ticked. */
@@ -482,7 +499,12 @@ async function processOneRpRow(
     .locator('a[data-testid="ahd-listing-url-product-policy-desktop"]').first();
   const href = (await link.count())
     ? await link.getAttribute("href").catch(() => null) : null;
-  const asin = href?.match(/[?&]asin=([A-Z0-9]{10})/)?.[1] ?? "";
+  let asin = href?.match(/[?&]asin=([A-Z0-9]{10})/)?.[1] ?? "";
+  if (!asin) {
+    const text = await rowEl.innerText().catch(() => "");
+    const m = text.match(/\b(B0[A-Z0-9]{8})\b/);
+    if (m?.[1]) asin = m[1];
+  }
   if (!asin) {
     return "ok"; // not an ASIN row (or malformed link)
   }
@@ -853,9 +875,19 @@ async function processOneMfrRow(
     .locator('a[data-testid="ahd-listing-url-product-policy-desktop"]').first();
   const href = (await link.count())
     ? await link.getAttribute("href").catch(() => null) : null;
-  const asin = href?.match(/[?&]asin=([A-Z0-9]{10})/)?.[1] ?? "";
+  let asin = href?.match(/[?&]asin=([A-Z0-9]{10})/)?.[1] ?? "";
+  if (!asin) {
+    const text = await rowEl.innerText().catch(() => "");
+    const m = text.match(/\b(B0[A-Z0-9]{8})\b/);
+    if (m?.[1]) asin = m[1];
+  }
   const rawSku = href?.match(/[?&]sku=([^&]+)/)?.[1] ?? "";
-  const sku = decodeURIComponent(rawSku.replace(/\+/g, "%20"));
+  let sku = decodeURIComponent(rawSku.replace(/\+/g, "%20"));
+  if (!sku) {
+    const text = await rowEl.innerText().catch(() => "");
+    const m = text.match(/SKU:\s*([^\s\n]+)/);
+    if (m?.[1]) sku = m[1].trim();
+  }
   if (!asin) {
     return "ok";
   }
