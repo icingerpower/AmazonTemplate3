@@ -6,6 +6,7 @@
 #include <QJsonDocument>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QTimer>
 
@@ -48,6 +49,136 @@ CaseWorkerThread CaseWorkerThread::parse(const QJsonObject &o)
         });
     }
     return t;
+}
+
+// ---------------------------------------------------------------------------
+// ReviewItem
+// ---------------------------------------------------------------------------
+
+ReviewItem ReviewItem::parse(const QJsonObject &o)
+{
+    ReviewItem r;
+    r.id           = o.value(QStringLiteral("id")).toString();
+    r.country      = o.value(QStringLiteral("country")).toString();
+    r.asin         = o.value(QStringLiteral("asin")).toString();
+    r.productTitle = o.value(QStringLiteral("productTitle")).toString();
+    r.imageUrl     = o.value(QStringLiteral("imageUrl")).toString();
+    r.stars        = o.value(QStringLiteral("stars")).toInt();
+    r.date         = o.value(QStringLiteral("date")).toString();
+    r.link         = o.value(QStringLiteral("link")).toString();
+    r.title        = o.value(QStringLiteral("title")).toString();
+    r.text         = o.value(QStringLiteral("text")).toString();
+    r.translation  = o.value(QStringLiteral("translation")).toString();
+    if (r.translation.contains(QLatin1String("Original is"), Qt::CaseInsensitive)) {
+        r.translation.clear();
+        r.translationChecked = true;
+    } else {
+        r.translationChecked = o.value(QStringLiteral("translationChecked")).toBool(!r.translation.isEmpty());
+    }
+    return r;
+}
+
+QJsonObject ReviewItem::toJson() const
+{
+    return QJsonObject{
+        {QStringLiteral("id"), id},
+        {QStringLiteral("country"), country},
+        {QStringLiteral("asin"), asin},
+        {QStringLiteral("productTitle"), productTitle},
+        {QStringLiteral("imageUrl"), imageUrl},
+        {QStringLiteral("stars"), stars},
+        {QStringLiteral("date"), date},
+        {QStringLiteral("link"), link},
+        {QStringLiteral("title"), title},
+        {QStringLiteral("text"), text},
+        {QStringLiteral("translation"), translation},
+        {QStringLiteral("translationChecked"), translationChecked}
+    };
+}
+
+static int monthNameToNumber(const QString &monthStr)
+{
+    const QString m = monthStr.toLower();
+    if (m.startsWith(QLatin1String("janv")) || m.startsWith(QLatin1String("janu")) || m.startsWith(QLatin1String("jan")) || m.startsWith(QLatin1String("ene")) || m.startsWith(QLatin1String("genn")))
+        return 1;
+    if (m.startsWith(QLatin1String("fév")) || m.startsWith(QLatin1String("fev")) || m.startsWith(QLatin1String("feb")))
+        return 2;
+    if (m.startsWith(QLatin1String("mar")) || m.startsWith(QLatin1String("mrt")) || m.startsWith(QLatin1String("mär")))
+        return 3;
+    if (m.startsWith(QLatin1String("avr")) || m.startsWith(QLatin1String("apr")) || m.startsWith(QLatin1String("abr")))
+        return 4;
+    if (m.startsWith(QLatin1String("mai")) || m.startsWith(QLatin1String("may")) || m.startsWith(QLatin1String("mag")) || m.startsWith(QLatin1String("mei")))
+        return 5;
+    if (m.startsWith(QLatin1String("juin")) || m.startsWith(QLatin1String("jun")) || m.startsWith(QLatin1String("giu")))
+        return 6;
+    if (m.startsWith(QLatin1String("juil")) || m.startsWith(QLatin1String("jul")) || m.startsWith(QLatin1String("lug")))
+        return 7;
+    if (m.startsWith(QLatin1String("ao")) || m.startsWith(QLatin1String("au")) || m.startsWith(QLatin1String("ag")))
+        return 8;
+    if (m.startsWith(QLatin1String("sep")) || m.startsWith(QLatin1String("set")))
+        return 9;
+    if (m.startsWith(QLatin1String("oct")) || m.startsWith(QLatin1String("okt")) || m.startsWith(QLatin1String("ott")))
+        return 10;
+    if (m.startsWith(QLatin1String("nov")))
+        return 11;
+    if (m.startsWith(QLatin1String("déc")) || m.startsWith(QLatin1String("dec")) || m.startsWith(QLatin1String("dez")) || m.startsWith(QLatin1String("dic")))
+        return 12;
+    return 0;
+}
+
+QDate ReviewItem::parsedDate() const
+{
+    if (date.isEmpty()) return {};
+
+    // 1. Japanese format: 2026年9月6日
+    static const QRegularExpression reJp(QStringLiteral("(\\d{4})\\s*年\\s*(\\d{1,2})\\s*月\\s*(\\d{1,2})\\s*日"));
+    auto mJp = reJp.match(date);
+    if (mJp.hasMatch()) {
+        int y = mJp.captured(1).toInt();
+        int m = mJp.captured(2).toInt();
+        int d = mJp.captured(3).toInt();
+        QDate res(y, m, d);
+        if (res.isValid()) return res;
+    }
+
+    // 2. ISO format: 2026-09-06 or 2026/09/06
+    static const QRegularExpression reIso(QStringLiteral("(\\d{4})[-/](\\d{1,2})[-/](\\d{1,2})"));
+    auto mIso = reIso.match(date);
+    if (mIso.hasMatch()) {
+        int y = mIso.captured(1).toInt();
+        int m = mIso.captured(2).toInt();
+        int d = mIso.captured(3).toInt();
+        QDate res(y, m, d);
+        if (res.isValid()) return res;
+    }
+
+    // 3. Day Month Year: e.g. "6 September 2026", "6. September 2026", "28 July 2026", "15 août 2026", "6 de septiembre de 2026"
+    static const QRegularExpression reDmy(QStringLiteral("(\\b\\d{1,2})\\.?\\s+(?:de\\s+)?([A-Za-zÀ-ÿ]+)\\s+(?:de\\s+)?(\\d{4}\\b)"));
+    auto mDmy = reDmy.match(date);
+    if (mDmy.hasMatch()) {
+        int d = mDmy.captured(1).toInt();
+        int m = monthNameToNumber(mDmy.captured(2));
+        int y = mDmy.captured(3).toInt();
+        if (m > 0) {
+            QDate res(y, m, d);
+            if (res.isValid()) return res;
+        }
+    }
+
+    // 4. Month Day Year (US style): e.g. "September 6, 2026"
+    static const QRegularExpression reMdy(QStringLiteral("([A-Za-zÀ-ÿ]+)\\s+(\\d{1,2}),?\\s+(\\d{4}\\b)"));
+    auto mMdy = reMdy.match(date);
+    if (mMdy.hasMatch()) {
+        int m = monthNameToNumber(mMdy.captured(1));
+        int d = mMdy.captured(2).toInt();
+        int y = mMdy.captured(3).toInt();
+        if (m > 0) {
+            QDate res(y, m, d);
+            if (res.isValid()) return res;
+        }
+    }
+
+    return {};
 }
 
 // ---------------------------------------------------------------------------
@@ -335,3 +466,44 @@ void CaseWorkerRunner::login(const QString &region,
         callback(result.value(QStringLiteral("ok")).toBool(), {});
     });
 }
+
+void CaseWorkerRunner::reviews(const QList<ReviewTarget> &targets, const QString &dumpDir,
+                               QObject *context, std::function<void(QList<ReviewsResult>)> callback)
+{
+    QJsonArray targetArr;
+    for (const ReviewTarget &t : targets) {
+        targetArr.append(QJsonObject{
+            {QStringLiteral("region"), t.region},
+            {QStringLiteral("country"), t.countryCode},
+            {QStringLiteral("countryName"), t.countryName}
+        });
+    }
+
+    const QJsonObject job{
+        {QStringLiteral("action"), QStringLiteral("reviews")},
+        {QStringLiteral("dumpDir"), dumpDir},
+        {QStringLiteral("reviewMarketplaces"), targetArr}
+    };
+
+    _run(job, context, [callback](QJsonObject result, QString error) {
+        QList<ReviewsResult> out;
+        if (!error.isEmpty() && !result.contains(QStringLiteral("results"))) {
+            callback(out);
+            return;
+        }
+        for (const QJsonValue &v : result.value(QStringLiteral("results")).toArray()) {
+            const QJsonObject o = v.toObject();
+            ReviewsResult r;
+            r.country = o.value(QStringLiteral("country")).toString();
+            r.ok = o.value(QStringLiteral("ok")).toBool();
+            r.error = o.value(QStringLiteral("error")).toString();
+            r.sessionExpired = o.value(QStringLiteral("sessionExpired")).toBool();
+            for (const QJsonValue &rv : o.value(QStringLiteral("reviews")).toArray()) {
+                r.reviews.append(ReviewItem::parse(rv.toObject()));
+            }
+            out.append(r);
+        }
+        callback(out);
+    });
+}
+

@@ -28,11 +28,12 @@ import { openComplianceFor, snapshotCompliance, processSafetyWarnings,
          processResponsiblePerson, processManufacturer,
          type GsprMarketplace, type GsprSnapshotResult,
          type ManufacturerEntry, type AskReply } from "./gsprPage.js";
-import type { Config, Region } from "./types.js";
+import { scrapeReviewsFor } from "./reviewsPage.js";
+import type { Config, Region, ReviewMarketplace, ReviewsResult } from "./types.js";
 
 interface CaseJob { region?: Region; caseId: string; text?: string; account?: string; files?: string[]; }
 interface Job {
-  action: "scrape" | "reply" | "login" | "gspr";
+  action: "scrape" | "reply" | "login" | "gspr" | "reviews";
   cases?: CaseJob[];
   region?: Region;
   manualSend?: boolean;
@@ -44,6 +45,8 @@ interface Job {
   userSkipAsins?: string[]; // products excluded by the user — skip everywhere
   manualManufacturerSave?: boolean; // pause for the user to Save new manufacturers
   manufacturers?: ManufacturerEntry[]; // SKU-prefix → manufacturer contact map
+  // reviews-only:
+  reviewMarketplaces?: ReviewMarketplace[];
 }
 
 // Line-based stdin: the first line is the job; later lines are interactive
@@ -78,21 +81,27 @@ function log(msg: string) { process.stderr.write(msg + "\n"); }
 // until the user logs in (in the same window) — up to ~10 min. Returns whether
 // we ended up logged in. This runs once per region, before any case is opened,
 // so we never flip through case pages while signed out.
-async function ensureLoggedIn(page: Page, cfg: Config, region: Region): Promise<boolean> {
-  await page.goto(caseListUrl(cfg, region), { waitUntil: "domcontentloaded" });
-  await passAccountSwitcher(page, cfg, region);
-  if (await isLoggedIn(page, cfg)) return true;
-  log(`[${region}] NOT LOGGED IN — waiting for you to log in via the browser window…`);
-  for (let i = 0; i < 300; i++) {          // ~10 min at 2s intervals
-    await page.waitForTimeout(2000);
-    await passAccountSwitcher(page, cfg, region); // clear the switcher if it shows
-    if (await isLoggedIn(page, cfg)) {
-      log(`[${region}] logged in — continuing.`);
-      return true;
+async function ensureLoggedIn(page: Page, cfg: Config, region: Region, targetUrl?: string): Promise<boolean> {
+  try {
+    await page.goto(targetUrl ?? caseListUrl(cfg, region), { waitUntil: "domcontentloaded" });
+    await passAccountSwitcher(page, cfg, region);
+    if (await isLoggedIn(page, cfg)) return true;
+    log(`[${region}] NOT LOGGED IN — waiting for you to log in via the browser window…`);
+    for (let i = 0; i < 300; i++) {          // ~10 min at 2s intervals
+      await page.waitForTimeout(2000);
+      await passAccountSwitcher(page, cfg, region); // clear the switcher if it shows
+      if (await isLoggedIn(page, cfg)) {
+        log(`[${region}] logged in — continuing.`);
+        return true;
+      }
     }
+    log(`[${region}] login wait timed out.`);
+    return false;
+  } catch (e) {
+    const msg = (e as Error).message ?? String(e);
+    log(`[${region}] login check aborted: ${msg}`);
+    return false;
   }
-  log(`[${region}] login wait timed out.`);
-  return false;
 }
 
 async function main() {
@@ -268,6 +277,78 @@ async function main() {
     } finally {
       await ctx.close().catch(() => {});
     }
+    process.stdout.write(JSON.stringify({ results }) + "\n");
+    return;
+  }
+
+  // -- reviews: customer brand reviews across regions/marketplaces --------
+  if (job.action === "reviews") {
+    const dumpDir = job.dumpDir ?? "/tmp/reviews";
+    const targets = job.reviewMarketplaces ?? [];
+    const byRegion = new Map<Region, ReviewMarketplace[]>();
+    for (const t of targets) {
+      const r = (t.region ?? "eu") as Region;
+      let list = byRegion.get(r);
+      if (!list) { list = []; byRegion.set(r, list); }
+      list.push(t);
+    }
+
+    const results: ReviewsResult[] = [];
+    for (const [region, mps] of byRegion) {
+      let ctx;
+      try {
+        ctx = await launchContext(cfg, region);
+      } catch (e) {
+        const msg = (e as Error).message ?? String(e);
+        log(`[reviews:${region}] failed to launch browser: ${msg}`);
+        for (const mp of mps) {
+          results.push({ country: mp.country, ok: false, error: msg, reviews: [] });
+        }
+        continue;
+      }
+
+      try {
+        const page = await firstPage(ctx);
+        const loginTarget = region === "jp"
+          ? "https://sellercentral-japan.amazon.com/brand-customer-reviews/ref=xx_crvws_dnav_xx"
+          : `https://${cfg.regions[region]?.domain ?? "sellercentral.amazon.co.uk"}/brand-customer-reviews/ref=xx_crvws_dnav_xx`;
+
+        if (!(await ensureLoggedIn(page, cfg, region, loginTarget))) {
+          for (const mp of mps) {
+            results.push({
+              country: mp.country,
+              ok: false,
+              error: "not logged in (login wait timed out)",
+              sessionExpired: true,
+              reviews: []
+            });
+          }
+          continue;
+        }
+
+        for (const mp of mps) {
+          try {
+            const reviews = await scrapeReviewsFor(ctx, cfg, region, mp, dumpDir);
+            results.push({ country: mp.country, ok: true, reviews });
+          } catch (e) {
+            const msg = (e as Error).message ?? String(e);
+            log(`[reviews:${mp.country}] failed: ${msg}`);
+            results.push({ country: mp.country, ok: false, error: msg, reviews: [] });
+          }
+        }
+      } catch (e) {
+        const msg = (e as Error).message ?? String(e);
+        log(`[reviews:${region}] error in region processing: ${msg}`);
+        for (const mp of mps) {
+          if (!results.some(r => r.country === mp.country)) {
+            results.push({ country: mp.country, ok: false, error: msg, reviews: [] });
+          }
+        }
+      } finally {
+        await ctx.close().catch(() => {});
+      }
+    }
+
     process.stdout.write(JSON.stringify({ results }) + "\n");
     return;
   }

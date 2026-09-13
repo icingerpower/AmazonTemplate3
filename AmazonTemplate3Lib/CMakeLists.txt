@@ -63,6 +63,8 @@ add_library(AmazonTemplate3Lib STATIC
   TreeBrandCategories.cpp
   TableStoreAsin.h
   TableStoreAsin.cpp
+  TableReviews.h
+  TableReviews.cpp
   ClassificationTypeMap.h
   ClassificationTypeMap.cpp
   BrokenChildTable.h
@@ -187,6 +189,8 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   TreeBrandCategories.cpp
   TableStoreAsin.h
   TableStoreAsin.cpp
+  TableReviews.h
+  TableReviews.cpp
   ClassificationTypeMap.h
   ClassificationTypeMap.cpp
   BrokenChildTable.h

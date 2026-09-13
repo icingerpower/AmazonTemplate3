@@ -27,6 +27,9 @@ SET(GUI_FILES
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneGspr.cpp
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneGspr.h
     ${CMAKE_CURRENT_LIST_DIR}/panes/PaneGspr.ui
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneReviews.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneReviews.h
+    ${CMAKE_CURRENT_LIST_DIR}/panes/PaneReviews.ui
     ${CMAKE_CURRENT_LIST_DIR}/panes/CaseDraft.h
     ${CMAKE_CURRENT_LIST_DIR}/panes/DialogReviewReplies.cpp
     ${CMAKE_CURRENT_LIST_DIR}/panes/DialogReviewReplies.h

@@ -114,7 +114,14 @@ target_link_libraries(TreeSizingAsinsTests PRIVATE
     QCoro6::Core)
 add_test(NAME TreeSizingAsinsTests COMMAND TreeSizingAsinsTests)
 
+add_executable(TableReviewsTests tst_tablereviews.cpp)
+target_link_libraries(TableReviewsTests PRIVATE AmazonTemplate3Lib_Tests)
+target_include_directories(TableReviewsTests PRIVATE ../AmazonTemplate3Lib)
+target_link_libraries(TableReviewsTests PRIVATE Qt${QT_VERSION_MAJOR}::Test Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui)
+add_test(NAME TableReviewsTests COMMAND TableReviewsTests)
+
 option(DO_REAL_AMAZON_TESTS "Run real Amazon SP-API contract tests" OFF)
 if(DO_REAL_AMAZON_TESTS)
     target_compile_definitions(TreeSizingAsinsTests PRIVATE DO_REAL_AMAZON_TESTS=1)
 endif()
+

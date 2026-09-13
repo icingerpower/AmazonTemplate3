@@ -3,6 +3,7 @@
 
 #include <functional>
 
+#include <QDate>
 #include <QJsonObject>
 #include <QList>
 #include <QObject>
@@ -99,6 +100,42 @@ struct ReplyResult {
     bool    sent = false;       // reply actually submitted
 };
 
+// Customer review item scraped from Seller Central Brand Customer Reviews.
+struct ReviewItem {
+    QString id;
+    QString country;
+    QString asin;
+    QString productTitle;
+    QString imageUrl;
+    int     stars = 0;
+    QString date;
+    QString link;
+    QString title;
+    QString text;
+    QString translation;
+    bool    translationChecked = false;
+
+    static ReviewItem parse(const QJsonObject &o);
+    QJsonObject toJson() const;
+    QDate parsedDate() const;
+};
+
+// Target marketplace to scrape reviews from.
+struct ReviewTarget {
+    QString region;       // "eu", "na", "jp"
+    QString countryCode;  // "GB", "DE", "FR", "US", "JP", etc.
+    QString countryName;  // "United Kingdom", "Germany", "Japan", etc.
+};
+
+struct ReviewsResult {
+    QString country;
+    bool    ok = false;
+    QString error;
+    bool    sessionExpired = false;
+    QList<ReviewItem> reviews;
+};
+
+
 // Launches the one-shot Node worker (case-worker/src/oneshot.ts) via QProcess —
 // same fire-and-forget, context-guarded pattern as AbstractCli::runPromptAsync.
 // No server, no port: each call spawns a process, feeds it a JSON job on stdin,
@@ -132,6 +169,10 @@ public:
               const QJsonArray &manufacturers, const QStringList &userSkipAsins,
               bool manualManufacturerSave,
               QObject *context, std::function<void(QList<GsprResult>)> callback);
+
+    // Scrapes brand customer reviews across requested marketplaces.
+    void reviews(const QList<ReviewTarget> &targets, const QString &dumpDir,
+                 QObject *context, std::function<void(QList<ReviewsResult>)> callback);
 
     // Answer a worker "@@gspr-ask" pause: writes one JSON line to the stdin of
     // the (single) live worker process. Returns false when none is running.

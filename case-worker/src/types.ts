@@ -76,3 +76,32 @@ export interface RpcResponse {
   result?: unknown;
   error?: string;
 }
+
+export interface ReviewItem {
+  id: string;
+  country: string;
+  asin: string;
+  productTitle: string;
+  imageUrl: string;
+  stars: number;
+  date: string;
+  link: string;
+  title: string;
+  text: string;
+  translation?: string;
+}
+
+export interface ReviewMarketplace {
+  region: Region;
+  country: string;
+  countryName: string;
+}
+
+export interface ReviewsResult {
+  country: string;
+  ok: boolean;
+  error?: string;
+  sessionExpired?: boolean;
+  reviews: ReviewItem[];
+}
+

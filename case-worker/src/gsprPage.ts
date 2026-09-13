@@ -10,7 +10,7 @@
 import { mkdirSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Page } from "playwright";
+import type { Page, Locator } from "playwright";
 
 export const COMPLIANCE_PATH =
   "/performance/account/health/product-policies?t=regulatory-compliance";
@@ -164,20 +164,43 @@ const FLYOUT_PANEL  = `${FLYOUT} .flyoutPanel.active`;
 const FLYOUT_CLOSE  = `${FLYOUT} .flyoutPanelContent > span`;
 const ATTEST_CARD   = `${FLYOUT} [role="button"][aria-label="Safety attestation"]`;
 const ATTEST_CHECKBOX = `${FLYOUT} kat-checkbox[label*="warning and safety information"]`;
-const SAVE_BUTTON   = `${FLYOUT} kat-button[label="Save"], ${FLYOUT} button:has-text("Save")`;
+const SAVE_BUTTON   = `${FLYOUT} kat-button[label="Save"], ${FLYOUT} kat-button[label="Submit"], `
+                    + `${FLYOUT} kat-button:has-text("Save"), ${FLYOUT} kat-button:has-text("Submit"), `
+                    + `${FLYOUT} button:has-text("Save"), ${FLYOUT} button:has-text("Submit")`;
+const CLOSE_BUTTON  = `${FLYOUT} kat-button[label="Close"], ${FLYOUT} kat-button:has-text("Close"), `
+                    + `${FLYOUT} button:has-text("Close")`;
 
 /** Close the side pane if it is open; true when it ended up closed. */
 async function ensureDrawerClosed(page: Page): Promise<boolean> {
   const panel = page.locator(FLYOUT_PANEL);
   if (!(await panel.isVisible().catch(() => false)))
     return true;
-  await page.locator(FLYOUT_CLOSE).first().click({ force: true }).catch(() => {});
-  if (await panel.waitFor({ state: "hidden", timeout: 5_000 })
-        .then(() => true).catch(() => false))
-    return true;
+
+  // 1. Click the '×' close control (instant & most reliable)
+  const closeSpan = page.locator(FLYOUT_CLOSE).first();
+  if (await closeSpan.isVisible().catch(() => false)) {
+    await closeSpan.click({ force: true }).catch(() => {});
+    if (await panel.waitFor({ state: "hidden", timeout: 2_000 }).then(() => true).catch(() => false))
+      return true;
+  }
+
+  // 2. Click Close button if present (both inner shadow button and host)
+  const closeBtn = page.locator(CLOSE_BUTTON).first();
+  if (await closeBtn.isVisible().catch(() => false)) {
+    await closeBtn.locator("button").first().click({ force: true }).catch(() => {});
+    await closeBtn.click({ force: true }).catch(() => {});
+    if (await panel.waitFor({ state: "hidden", timeout: 2_000 }).then(() => true).catch(() => false))
+      return true;
+  }
+
+  // 3. Try Escape key
   await page.keyboard.press("Escape").catch(() => {});
-  return panel.waitFor({ state: "hidden", timeout: 3_000 })
-    .then(() => true).catch(() => false);
+  if (await panel.waitFor({ state: "hidden", timeout: 2_000 }).then(() => true).catch(() => false))
+    return true;
+
+  // 4. Click the overlay backdrop
+  await page.locator(`${FLYOUT} .flyoutOverlay`).first().click({ force: true }).catch(() => {});
+  return panel.waitFor({ state: "hidden", timeout: 2_000 }).then(() => true).catch(() => false);
 }
 
 /** Whether the attestation kat-checkbox reports being ticked. */
@@ -285,7 +308,7 @@ export async function processSafetyWarnings(
       // Race both markers instead of burning the full timeout on one.
       const checkbox   = page.locator(ATTEST_CHECKBOX).first();
       const reviewNote = page.locator(FLYOUT)
-        .getByText("previously submitted is under review").first();
+        .getByText(/submission is under review/i).first();
       const formState = await Promise.race([
         checkbox.waitFor({ state: "visible", timeout: 10_000 })
           .then(() => "form").catch(() => null),
@@ -391,22 +414,42 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Save → confirmation → Close. Returns null on success, else a fail reason. */
+/** Save/Submit → confirmation → Close. Returns null on success, else a fail reason. */
 async function saveAndClose(page: Page, dumpDir: string, tag: string): Promise<string | null> {
   const save = page.locator(SAVE_BUTTON).last();
   if (!(await save.waitFor({ state: "visible", timeout: 5_000 })
           .then(() => true).catch(() => false))) {
     await dumpDebug(page, dumpDir, `${tag}-no-save`);
-    return "Save button not found";
+    return "Save/Submit button not found";
   }
-  await save.click();
-  const successBox = page.locator(`${FLYOUT} [data-testid="success-page"]`).first();
-  if (await successBox.waitFor({ state: "visible", timeout: 15_000 })
-        .then(() => true).catch(() => false)) {
-    await page.locator(`${FLYOUT} kat-button[label="Close"]`).first()
-      .click().catch(() => {});
-    await page.locator(FLYOUT_PANEL)
-      .waitFor({ state: "hidden", timeout: 5_000 }).catch(() => {});
+  await save.click({ force: true });
+  const successBox = page.locator(
+    `${FLYOUT} [data-testid="success-page"], `
+    + `${FLYOUT} kat-box[variant="success"], `
+    + `${FLYOUT} :text-matches("success|submitted|under review", "i")`
+  ).first();
+  const closeBtn = page.locator(CLOSE_BUTTON).first();
+
+  const confirmed = await Promise.race([
+    successBox.waitFor({ state: "visible", timeout: 15_000 }).then(() => true).catch(() => false),
+    closeBtn.waitFor({ state: "visible", timeout: 15_000 }).then(() => true).catch(() => false),
+    page.locator(FLYOUT_PANEL).waitFor({ state: "hidden", timeout: 15_000 }).then(() => true).catch(() => false),
+  ]);
+
+  if (confirmed) {
+    const closeSpan = page.locator(FLYOUT_CLOSE).first();
+    if (await closeSpan.isVisible().catch(() => false)) {
+      await closeSpan.click({ force: true }).catch(() => {});
+    }
+    if (await closeBtn.isVisible().catch(() => false)) {
+      await closeBtn.locator("button").first().click({ force: true }).catch(() => {});
+      await closeBtn.click({ force: true }).catch(() => {});
+    }
+    const closed = await page.locator(FLYOUT_PANEL)
+      .waitFor({ state: "hidden", timeout: 3_000 }).then(() => true).catch(() => false);
+    if (!closed) {
+      await ensureDrawerClosed(page);
+    }
     return null;
   }
   if (await page.locator(FLYOUT_PANEL).isHidden().catch(() => false))
@@ -416,11 +459,194 @@ async function saveAndClose(page: Page, dumpDir: string, tag: string): Promise<s
 }
 
 /**
- * Process every expandable "GPSR: Responsible Person contact details" group:
- * NEVER submit at group level — expand the brand, then handle each nested
- * per-ASIN sub-row one by one (walking the group's nested pagination). In the
- * submission pane, pick the first choice whose text starts with ecRepPattern
- * (case-insensitive, both sides trimmed), then Save.
+ * Handle one Responsible Person row (either a flat standalone row or an
+ * expandable group sub-row). Opens the submission drawer, steps through
+ * the "Responsible Person Information" navigation card if present, selects
+ * the option matching pattern / optionRegex, and saves.
+ */
+async function processOneRpRow(
+  page: Page,
+  rowEl: Locator,
+  mp: GsprMarketplace,
+  dumpDir: string,
+  pattern: string,
+  optionRegex: RegExp,
+  userSkip: Set<string>,
+  skip: Set<string>,
+  record: (o: GsprWarningOutcome) => void,
+  firstPaneRef: { value: boolean }
+): Promise<"ok" | "stopped"> {
+  const btn = rowEl.locator('[data-testid^="ahd-action-button-"]').first();
+  const hasButton = (await btn.count()) > 0;
+  const link = rowEl
+    .locator('a[data-testid="ahd-listing-url-product-policy-desktop"]').first();
+  const href = (await link.count())
+    ? await link.getAttribute("href").catch(() => null) : null;
+  const asin = href?.match(/[?&]asin=([A-Z0-9]{10})/)?.[1] ?? "";
+  if (!asin) {
+    return "ok"; // not an ASIN row (or malformed link)
+  }
+
+  const statusText = (await rowEl.locator(".text-size-sm.text-secondary").last()
+    .innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+  if (userSkip.has(asin)) {
+    log(`[gspr:${mp.country}] RP ${asin}: skipped by the user`);
+    record({ asin, ok: true, status: "user-skipped", type: "rp", statusText });
+    return "ok";
+  }
+  if (skip.has(asin)) {
+    log(`[gspr:${mp.country}] RP ${asin}: already done earlier — skipped`);
+    record({ asin, ok: true, status: "skipped", type: "rp", statusText });
+    return "ok";
+  }
+  if (!hasButton || !/submission is required/i.test(statusText)) {
+    log(`[gspr:${mp.country}] RP ${asin}: not actionable (${statusText || "no status"}) — pending`);
+    record({ asin, ok: true, status: "pending", statusText, type: "rp" });
+    return "ok";
+  }
+
+  try {
+    if (!(await ensureDrawerClosed(page))) {
+      record({ asin, ok: false, status: "failed", type: "rp",
+               reason: "previous pane would not close" });
+      return "stopped";
+    }
+    await btn.scrollIntoViewIfNeeded().catch(() => {});
+    await btn.click();
+    await page.locator(FLYOUT_PANEL).waitFor({ state: "visible", timeout: 10_000 });
+    await page.locator(`${FLYOUT} .skeleton`).waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
+    await page.waitForTimeout(500);
+
+    if (firstPaneRef.value) { // reference dump of this warning type's pane
+      await dumpDebug(page, dumpDir, `rp-drawer-${asin}`);
+      firstPaneRef.value = false;
+    }
+
+    // Already submitted? Matches both "Your submission is under review" and "previously submitted is under review"
+    const reviewNote = page.locator(FLYOUT)
+      .getByText(/submission is under review/i).first();
+    if (await reviewNote.isVisible().catch(() => false)) {
+      log(`[gspr:${mp.country}] RP ${asin}: already under review — pending`);
+      record({ asin, ok: true, status: "pending", type: "rp",
+               statusText: "Under review (submission pane)" });
+      await ensureDrawerClosed(page);
+      return "ok";
+    }
+
+    // If the landing screen has the "Responsible Person Information" card, click it to open the selection screen
+    const rpCard = page.locator(`${FLYOUT} kat-card, ${FLYOUT} [role="button"]`).filter({
+      hasText: /Responsible Person Information/i
+    }).first();
+    const radioCard = page.locator(`${FLYOUT} kat-card`).filter({ hasText: optionRegex }).first();
+
+    const step1Choice = await Promise.race([
+      rpCard.waitFor({ state: "visible", timeout: 10_000 }).then(() => "rpCard").catch(() => null),
+      reviewNote.waitFor({ state: "visible", timeout: 10_000 }).then(() => "review").catch(() => null),
+      radioCard.waitFor({ state: "visible", timeout: 10_000 }).then(() => "radioCard").catch(() => null),
+    ]);
+
+    if (step1Choice === "review" || (await reviewNote.isVisible().catch(() => false))) {
+      log(`[gspr:${mp.country}] RP ${asin}: already under review — pending`);
+      record({ asin, ok: true, status: "pending", type: "rp",
+               statusText: "Under review (submission pane)" });
+      await ensureDrawerClosed(page);
+      return "ok";
+    }
+
+    if (step1Choice === "rpCard") {
+      await rpCard.click();
+      await page.waitForTimeout(1000);
+      await page.locator(`${FLYOUT} .skeleton`).waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
+      await page.waitForTimeout(500);
+
+      // Re-check for under review in case the inner view shows it
+      if (await reviewNote.isVisible().catch(() => false)) {
+        log(`[gspr:${mp.country}] RP ${asin}: already under review — pending`);
+        record({ asin, ok: true, status: "pending", type: "rp",
+                 statusText: "Under review (submission pane)" });
+        await ensureDrawerClosed(page);
+        return "ok";
+      }
+    }
+
+    // First look for a kat-card matching the EC Rep pattern (the modern card layout with radio button)
+    let card = page.locator(`${FLYOUT} kat-card`).filter({ hasText: optionRegex }).first();
+    let option = page.locator(FLYOUT).getByText(optionRegex).first();
+
+    if (!(await card.waitFor({ state: "visible", timeout: 4_000 }).then(() => true).catch(() => false))
+        && !(await option.isVisible().catch(() => false))) {
+      const searchInput = page.locator(
+        `${FLYOUT} kat-input[label="Search"] input, ${FLYOUT} kat-input input, ${FLYOUT} input[placeholder*="Search"]`
+      ).first();
+      if (await searchInput.isVisible().catch(() => false)) {
+        await searchInput.fill(pattern);
+        await page.waitForTimeout(1000);
+      } else {
+        const dropdown = page.locator(`${FLYOUT} kat-dropdown`).first();
+        if (await dropdown.count()) {
+          await dropdown.click({ force: true }).catch(() => {});
+          await page.waitForTimeout(800);
+        }
+      }
+      card = page.locator(`${FLYOUT} kat-card`).filter({ hasText: optionRegex }).first();
+      option = page.locator(FLYOUT).getByText(optionRegex).first();
+    }
+
+    if (await card.waitFor({ state: "visible", timeout: 8_000 }).then(() => true).catch(() => false)) {
+      const radio = card.locator('kat-radiobutton, input[type="radio"], [part="radiobutton-icon"]').first();
+      if (await radio.count()) {
+        await radio.click({ force: true });
+      } else {
+        await card.click({ force: true });
+      }
+      await page.waitForTimeout(500);
+    } else if (await option.isVisible().catch(() => false)) {
+      await option.click({ force: true });
+      await page.waitForTimeout(500);
+    } else {
+      log(`[gspr:${mp.country}] RP ${asin}: no choice starts with "${pattern}"`);
+      await dumpDebug(page, dumpDir, `rp-nooption-${asin}`);
+      record({ asin, ok: false, status: "failed", type: "rp",
+               reason: `no choice starting with "${pattern}"` });
+      await ensureDrawerClosed(page);
+      return "ok";
+    }
+
+    const failReason = await saveAndClose(page, dumpDir, `rp-${asin}`);
+    if (failReason) {
+      log(`[gspr:${mp.country}] RP ${asin}: ${failReason}`);
+      record({ asin, ok: false, status: "failed", type: "rp", reason: failReason });
+      await ensureDrawerClosed(page);
+      return "ok";
+    }
+    log(`[gspr:${mp.country}] RP ${asin}: responsible person submitted`);
+    record({ asin, ok: true, status: "submitted", type: "rp" });
+    await ensureDrawerClosed(page);
+    // All sub-rows of a group write to the same brand-level record —
+    // rapid consecutive saves were observed to be silently dropped by
+    // Amazon (5/15). Give the backend a moment between submissions.
+    await page.waitForTimeout(2000);
+    return "ok";
+  } catch (e) {
+    const msg = (e as Error).message ?? String(e);
+    if (/has been closed|Target (page|browser).*closed/i.test(msg)) {
+      log(`[gspr:${mp.country}] browser closed — treating as stop`);
+      return "stopped";
+    }
+    log(`[gspr:${mp.country}] RP ${asin} FAILED: ${msg}`);
+    await dumpDebug(page, dumpDir, `rp-error-${asin}`).catch(() => {});
+    record({ asin, ok: false, status: "failed", type: "rp", reason: msg });
+    await ensureDrawerClosed(page);
+    return "ok";
+  }
+}
+
+/**
+ * Process every "GPSR: Responsible Person contact details" warning:
+ * Both flat (standalone) rows and expandable groups (walking each group's
+ * nested pagination). In the submission pane, advances through the
+ * "Responsible Person Information" card, picks the first choice whose text
+ * starts with ecRepPattern (case-insensitive, both sides trimmed), then saves.
  */
 export async function processResponsiblePerson(
   page: Page, mp: GsprMarketplace, dumpDir: string, ecRepPattern: string,
@@ -435,8 +661,27 @@ export async function processResponsiblePerson(
   }
   const optionRegex = new RegExp("^\\s*" + escapeRegex(pattern), "i");
   const skip = new Set(mp.skipAsinsRp ?? []);
-  let firstPane = true;
+  const firstPaneRef = { value: true };
 
+  // 1. Flat (non-expandable) RP rows on the page
+  const flatRows = page.locator(ROW_SELECTOR)
+    .filter({ hasNot: page.locator(".ahd-accordion") })
+    .filter({ hasText: REASON_RP });
+  const nFlat = await flatRows.count();
+  if (nFlat > 0) {
+    log(`[gspr:${mp.country}] ${nFlat} flat "${REASON_RP}" row(s)`);
+    for (let i = 0; i < nFlat; i++) {
+      const row = flatRows.nth(i);
+      const status = await processOneRpRow(
+        page, row, mp, dumpDir, pattern, optionRegex,
+        userSkip, skip, record, firstPaneRef
+      );
+      if (status === "stopped") return out;
+    }
+    await ensureDrawerClosed(page);
+  }
+
+  // 2. Expandable RP groups (accordion)
   const groups = page.locator(ROW_SELECTOR)
     .filter({ has: page.locator(".ahd-accordion") })
     .filter({ hasText: REASON_RP });
@@ -444,12 +689,14 @@ export async function processResponsiblePerson(
   log(`[gspr:${mp.country}] ${nGroups} expandable "${REASON_RP}" group(s)`);
 
   for (let g = 0; g < nGroups; g++) {
+    await ensureDrawerClosed(page);
     const group = groups.nth(g);
 
     // Expand (the chevron button is labelled "expand" while collapsed).
     const expander = group.locator('.ahd-accordion__button[aria-label="expand"]').first();
     if (await expander.isVisible().catch(() => false)) {
       await expander.click().catch(() => {});
+      await page.waitForTimeout(1000);
     }
     const body = group.locator(".ahd-accordion__body").first();
     if (!(await body.locator('[data-testid="ahd-nested-product-policy"]').first()
@@ -468,115 +715,11 @@ export async function processResponsiblePerson(
 
       for (let i = 0; i < nSubs; i++) {
         const sub = subs.nth(i);
-
-        // RP sub-row Submit buttons are keyed by SKU (not ASIN) — take the
-        // button as-is and read the ASIN from the View-listing link. Always
-        // count() before getAttribute(): getAttribute on a missing element
-        // waits the full 30 s default timeout.
-        const btn = sub.locator('[data-testid^="ahd-action-button-"]').first();
-        const hasButton = (await btn.count()) > 0;
-        const link = sub
-          .locator('a[data-testid="ahd-listing-url-product-policy-desktop"]').first();
-        const href = (await link.count())
-          ? await link.getAttribute("href").catch(() => null) : null;
-        const asin = href?.match(/[?&]asin=([A-Z0-9]{10})/)?.[1] ?? "";
-        if (!asin) {
-          log(`[gspr:${mp.country}] RP group ${g + 1} row ${i + 1}: no ASIN — ignored`);
-          continue;
-        }
-
-        const statusText = (await sub.locator(".text-size-sm.text-secondary").last()
-          .innerText().catch(() => "")).replace(/\s+/g, " ").trim();
-        if (userSkip.has(asin)) {
-          log(`[gspr:${mp.country}] RP ${asin}: skipped by the user`);
-          record({ asin, ok: true, status: "user-skipped", type: "rp", statusText });
-          continue;
-        }
-        if (skip.has(asin)) {
-          log(`[gspr:${mp.country}] RP ${asin}: already done earlier — skipped`);
-          record({ asin, ok: true, status: "skipped", type: "rp", statusText });
-          continue;
-        }
-        if (!hasButton || !/submission is required/i.test(statusText)) {
-          log(`[gspr:${mp.country}] RP ${asin}: not actionable (${statusText || "no status"}) — pending`);
-          record({ asin, ok: true, status: "pending", statusText, type: "rp" });
-          continue;
-        }
-
-        try {
-          if (!(await ensureDrawerClosed(page))) {
-            record({ asin, ok: false, status: "failed", type: "rp",
-                     reason: "previous pane would not close" });
-            return out;
-          }
-          await btn.scrollIntoViewIfNeeded().catch(() => {});
-          await btn.click();
-          await page.locator(FLYOUT_PANEL).waitFor({ state: "visible", timeout: 10_000 });
-          await page.waitForTimeout(1500); // pane content loads lazily
-
-          if (firstPane) { // reference dump of this warning type's pane
-            await dumpDebug(page, dumpDir, `rp-drawer-${asin}`);
-            firstPane = false;
-          }
-
-          // Already submitted? Same under-review note as the safety pane.
-          const reviewNote = page.locator(FLYOUT)
-            .getByText("previously submitted is under review").first();
-          if (await reviewNote.isVisible().catch(() => false)) {
-            log(`[gspr:${mp.country}] RP ${asin}: already under review — pending`);
-            record({ asin, ok: true, status: "pending", type: "rp",
-                     statusText: "Under review (submission pane)" });
-            await ensureDrawerClosed(page);
-            continue;
-          }
-
-          // First choice starting with the EC Rep pattern. If none is visible
-          // the choices may sit in a dropdown — open it and retry.
-          let option = page.locator(FLYOUT).getByText(optionRegex).first();
-          if (!(await option.waitFor({ state: "visible", timeout: 8_000 })
-                  .then(() => true).catch(() => false))) {
-            const dropdown = page.locator(`${FLYOUT} kat-dropdown`).first();
-            if (await dropdown.count()) {
-              await dropdown.click({ force: true }).catch(() => {});
-              await page.waitForTimeout(800);
-            }
-            option = page.locator(FLYOUT).getByText(optionRegex).first();
-          }
-          if (!(await option.isVisible().catch(() => false))) {
-            log(`[gspr:${mp.country}] RP ${asin}: no choice starts with "${pattern}"`);
-            await dumpDebug(page, dumpDir, `rp-nooption-${asin}`);
-            record({ asin, ok: false, status: "failed", type: "rp",
-                     reason: `no choice starting with "${pattern}"` });
-            await ensureDrawerClosed(page);
-            continue;
-          }
-          await option.click({ force: true });
-          await page.waitForTimeout(500);
-
-          const failReason = await saveAndClose(page, dumpDir, `rp-${asin}`);
-          if (failReason) {
-            log(`[gspr:${mp.country}] RP ${asin}: ${failReason}`);
-            record({ asin, ok: false, status: "failed", type: "rp", reason: failReason });
-            await ensureDrawerClosed(page);
-            continue;
-          }
-          log(`[gspr:${mp.country}] RP ${asin}: responsible person submitted`);
-          record({ asin, ok: true, status: "submitted", type: "rp" });
-          // All sub-rows of a group write to the same brand-level record —
-          // rapid consecutive saves were observed to be silently dropped by
-          // Amazon (5/15). Give the backend a moment between submissions.
-          await page.waitForTimeout(3000);
-        } catch (e) {
-          const msg = (e as Error).message ?? String(e);
-          if (/has been closed|Target (page|browser).*closed/i.test(msg)) {
-            log(`[gspr:${mp.country}] browser closed — treating as stop`);
-            return out;
-          }
-          log(`[gspr:${mp.country}] RP ${asin} FAILED: ${msg}`);
-          await dumpDebug(page, dumpDir, `rp-error-${asin}`).catch(() => {});
-          record({ asin, ok: false, status: "failed", type: "rp", reason: msg });
-          await ensureDrawerClosed(page);
-        }
+        const status = await processOneRpRow(
+          page, sub, mp, dumpDir, pattern, optionRegex,
+          userSkip, skip, record, firstPaneRef
+        );
+        if (status === "stopped") return out;
       }
 
       // Next nested page, if any: fill the page-number input and click Go.
@@ -684,8 +827,311 @@ function splitAddress(addr: string) {
 }
 
 /**
- * Process every expandable "GPSR: manufacturer contact details" group: NEVER
- * submit at group level — expand, then handle nested sub-rows one by one.
+ * Handle one Manufacturer row (either a flat standalone row or an
+ * expandable group sub-row). Opens the submission drawer, steps through
+ * the "Manufacturer information" navigation card if present, searches for
+ * the manufacturer, clicks the matching card's radio button (or creates a new
+ * record if not found), and saves.
+ */
+async function processOneMfrRow(
+  page: Page,
+  rowEl: Locator,
+  mp: GsprMarketplace,
+  dumpDir: string,
+  manufacturers: ManufacturerEntry[],
+  ask: AskFn,
+  userSkip: Set<string>,
+  skip: Set<string>,
+  record: (o: GsprWarningOutcome) => void,
+  manualSave: boolean,
+  firstPaneRef: { value: boolean },
+  firstFormRef: { value: boolean }
+): Promise<"ok" | "stopped"> {
+  const btn = rowEl.locator('[data-testid^="ahd-action-button-"]').first();
+  const hasButton = (await btn.count()) > 0;
+  const link = rowEl
+    .locator('a[data-testid="ahd-listing-url-product-policy-desktop"]').first();
+  const href = (await link.count())
+    ? await link.getAttribute("href").catch(() => null) : null;
+  const asin = href?.match(/[?&]asin=([A-Z0-9]{10})/)?.[1] ?? "";
+  const rawSku = href?.match(/[?&]sku=([^&]+)/)?.[1] ?? "";
+  const sku = decodeURIComponent(rawSku.replace(/\+/g, "%20"));
+  if (!asin) {
+    return "ok";
+  }
+
+  const statusText = (await rowEl.locator(".text-size-sm.text-secondary").last()
+    .innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+  if (userSkip.has(asin)) {
+    log(`[gspr:${mp.country}] MFR ${asin}: skipped by the user`);
+    record({ asin, ok: true, status: "user-skipped", type: "mfr", statusText });
+    return "ok";
+  }
+  if (skip.has(asin)) {
+    log(`[gspr:${mp.country}] MFR ${asin}: already done earlier — skipped`);
+    record({ asin, ok: true, status: "skipped", type: "mfr", statusText });
+    return "ok";
+  }
+  if (!hasButton || !/submission is required/i.test(statusText)) {
+    log(`[gspr:${mp.country}] MFR ${asin}: not actionable (${statusText || "no status"}) — pending`);
+    record({ asin, ok: true, status: "pending", statusText, type: "mfr" });
+    return "ok";
+  }
+
+  // Resolve the manufacturer BEFORE touching the page — missing OR
+  // incomplete data pauses the run the same way, so the user can
+  // complete the xlsx files instead of watching silent failures pile up.
+  let entry = findManufacturer(manufacturers, sku);
+  let issue = manufacturerIssue(entry);
+  let skippedByUser = false;
+  while (issue && !skippedByUser) {
+    log(`[gspr:${mp.country}] MFR ${asin}: ${issue} (SKU "${sku}") — waiting for the user…`);
+    const reply = await ask({ kind: "manufacturer", country: mp.country, asin, sku, issue });
+    if (reply?.cmd === "done" && Array.isArray(reply.manufacturers)) {
+      manufacturers.length = 0;
+      manufacturers.push(...reply.manufacturers);
+      entry = findManufacturer(manufacturers, sku);
+      issue = manufacturerIssue(entry);
+      if (issue)
+        log(`[gspr:${mp.country}] MFR ${asin}: SKU "${sku}" still incomplete (${issue}) — asking again`);
+    } else if (reply?.cmd === "skip") {
+      skippedByUser = true;
+    } else {
+      log(`[gspr:${mp.country}] stop requested by the user`);
+      return "stopped";
+    }
+  }
+  if (skippedByUser || issue || !entry) {
+    log(`[gspr:${mp.country}] MFR ${asin}: skipped by the user`);
+    userSkip.add(asin); // also skips it in later phases/countries this run
+    record({ asin, ok: true, status: "user-skipped", type: "mfr" });
+    return "ok";
+  }
+
+  try {
+    if (!(await ensureDrawerClosed(page))) {
+      record({ asin, ok: false, status: "failed", type: "mfr",
+               reason: "previous pane would not close" });
+      return "stopped";
+    }
+    await btn.scrollIntoViewIfNeeded().catch(() => {});
+    await btn.click();
+    await page.locator(FLYOUT_PANEL).waitFor({ state: "visible", timeout: 10_000 });
+    await page.locator(`${FLYOUT} .skeleton`).waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
+    await page.waitForTimeout(500);
+
+    if (firstPaneRef.value) { // reference dump of this warning type's pane
+      await dumpDebug(page, dumpDir, `mfr-drawer-${asin}`);
+      firstPaneRef.value = false;
+    }
+
+    const reviewNote = page.locator(FLYOUT)
+      .getByText(/submission is under review/i).first();
+    if (await reviewNote.isVisible().catch(() => false)) {
+      log(`[gspr:${mp.country}] MFR ${asin}: already under review — pending`);
+      record({ asin, ok: true, status: "pending", type: "mfr",
+               statusText: "Under review (submission pane)" });
+      await ensureDrawerClosed(page);
+      return "ok";
+    }
+
+    // Step 1: Landing card vs inner search
+    const mfrCard = page.locator(`${FLYOUT} kat-card, ${FLYOUT} [role="button"]`).filter({
+      hasText: /Manufacturer information/i
+    }).first();
+    const searchInput = page.locator(
+      `${FLYOUT} kat-input[label="Search"] input, ${FLYOUT} kat-input input, ${FLYOUT} input[placeholder*="Search"]`
+    ).first();
+
+    const step1Choice = await Promise.race([
+      mfrCard.waitFor({ state: "visible", timeout: 10_000 }).then(() => "mfrCard").catch(() => null),
+      reviewNote.waitFor({ state: "visible", timeout: 10_000 }).then(() => "review").catch(() => null),
+      searchInput.waitFor({ state: "visible", timeout: 10_000 }).then(() => "searchInput").catch(() => null),
+    ]);
+
+    if (step1Choice === "review" || (await reviewNote.isVisible().catch(() => false))) {
+      log(`[gspr:${mp.country}] MFR ${asin}: already under review — pending`);
+      record({ asin, ok: true, status: "pending", type: "mfr",
+               statusText: "Under review (submission pane)" });
+      await ensureDrawerClosed(page);
+      return "ok";
+    }
+
+    if (step1Choice === "mfrCard") {
+      await mfrCard.click();
+      await page.waitForTimeout(1000);
+      await page.locator(`${FLYOUT} .skeleton`).waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
+      await page.waitForTimeout(500);
+
+      if (await reviewNote.isVisible().catch(() => false)) {
+        log(`[gspr:${mp.country}] MFR ${asin}: already under review — pending`);
+        record({ asin, ok: true, status: "pending", type: "mfr",
+                 statusText: "Under review (submission pane)" });
+        await ensureDrawerClosed(page);
+        return "ok";
+      }
+    }
+
+    // Now on inner screen: search for manufacturer name
+    const innerSearch = page.locator(
+      `${FLYOUT} kat-input[label="Search"] input, ${FLYOUT} kat-input input, ${FLYOUT} input[placeholder*="Search"]`
+    ).first();
+    if (await innerSearch.isVisible().catch(() => false)) {
+      const term = entry.name.slice(0, 30).trim();
+      await innerSearch.fill(term);
+      await page.waitForTimeout(1000);
+    }
+
+    // Look for matching kat-card
+    const card = page.locator(`${FLYOUT} kat-card`).filter({
+      hasText: new RegExp(escapeRegex(entry.name.slice(0, 25)), "i")
+    }).first();
+
+    const isFound = await card.waitFor({ state: "visible", timeout: 5_000 }).then(() => true).catch(() => false);
+    if (isFound) {
+      log(`[gspr:${mp.country}] MFR ${asin}: selecting existing entry "${entry.name}"`);
+      const radio = card.locator('kat-radiobutton, input[type="radio"], [part="radiobutton-icon"]').first();
+      await radio.click({ force: true });
+      await page.waitForTimeout(500);
+    } else {
+      log(`[gspr:${mp.country}] MFR ${asin}: creating entry "${entry.name}"`);
+      const createNew = page.locator(`${FLYOUT} [role="button"], ${FLYOUT} a, ${FLYOUT} span, ${FLYOUT} div`).filter({
+        hasText: /^Create new record$/i
+      }).first();
+      if (!(await createNew.waitFor({ state: "visible", timeout: 5_000 }).then(() => true).catch(() => false))) {
+        log(`[gspr:${mp.country}] MFR ${asin}: neither matching card nor "Create new record" found`);
+        await dumpDebug(page, dumpDir, `mfr-noentry-${asin}`);
+        record({ asin, ok: false, status: "failed", type: "mfr",
+                 reason: `manufacturer "${entry.name}" not found and cannot create` });
+        await ensureDrawerClosed(page);
+        return "ok";
+      }
+
+      await createNew.click();
+      await page.waitForTimeout(1000);
+      await page.locator(`${FLYOUT} .skeleton`).waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
+      await page.waitForTimeout(500);
+
+      if (firstFormRef.value) { // reference dump of the add-new form
+        await dumpDebug(page, dumpDir, `mfr-form-${asin}`);
+        firstFormRef.value = false;
+      }
+
+      const primary = entry.email || entry.url || "";
+      const a = splitAddress(entry.address);
+
+      const filledName = await fillKatField(page,
+        `${FLYOUT} kat-input[kat-aria-label*="Name or company"], ${FLYOUT} kat-input[placeholder*="Enter name or company"], ${FLYOUT} kat-input[name="name"]`,
+        entry.name);
+      await fillKatField(page,
+        `${FLYOUT} kat-input[kat-aria-label*="Primary email"], ${FLYOUT} kat-input[placeholder*="Enter email address"], ${FLYOUT} kat-input[name="primary_contact_reference"]`,
+        primary);
+      // Phone number is deliberately NEVER filled: entering one in the
+      // GSPR manufacturer details triggers an Amazon bug.
+      await fillKatField(page,
+        `${FLYOUT} kat-input[kat-aria-label*="Address line 1"], ${FLYOUT} kat-input[placeholder*="Street address"], ${FLYOUT} kat-input[name="address_line_1"]`,
+        a.line1);
+      if (a.line2) {
+        await fillKatField(page,
+          `${FLYOUT} kat-input[kat-aria-label*="Address line 2"], ${FLYOUT} kat-input[placeholder*="Apartment"], ${FLYOUT} kat-input[name="address_line_2"]`,
+          a.line2);
+      }
+      await fillKatField(page,
+        `${FLYOUT} kat-input[kat-aria-label*="City"], ${FLYOUT} kat-input[placeholder*="city name"], ${FLYOUT} kat-input[name="city"]`,
+        a.city);
+      if (a.state) {
+        await fillKatField(page,
+          `${FLYOUT} kat-input[kat-aria-label*="State"], ${FLYOUT} kat-input[placeholder*="state"], ${FLYOUT} kat-input[name="state_or_region"]`,
+          a.state);
+      }
+      if (a.postal) {
+        await fillKatField(page,
+          `${FLYOUT} kat-input[kat-aria-label*="Postal code"], ${FLYOUT} kat-input[placeholder*="postal code"], ${FLYOUT} kat-input[name="postal_code"]`,
+          a.postal);
+      }
+
+      if (!filledName) {
+        log(`[gspr:${mp.country}] MFR ${asin}: add-new form fields not found`);
+        await dumpDebug(page, dumpDir, `mfr-nofields-${asin}`);
+        record({ asin, ok: false, status: "failed", type: "mfr",
+                 reason: "add-new manufacturer form fields not found" });
+        await ensureDrawerClosed(page);
+        return "ok";
+      }
+
+      // Country dropdown
+      const dd = page.locator(`${FLYOUT} kat-dropdown`).first();
+      if (await dd.isVisible().catch(() => false)) {
+        await dd.click({ force: true }).catch(() => {});
+        await page.waitForTimeout(800);
+        const countryOpt = page.locator(FLYOUT)
+          .getByText(new RegExp("^\\s*" + escapeRegex(a.country) + "\\s*$", "i")).last();
+        if (await countryOpt.isVisible().catch(() => false)) {
+          await countryOpt.click({ force: true }).catch(() => {});
+          await page.waitForTimeout(300);
+        } else if (!manualSave) {
+          log(`[gspr:${mp.country}] MFR ${asin}: country "${a.country}" not in dropdown`);
+          await dumpDebug(page, dumpDir, `mfr-country-${asin}`);
+          record({ asin, ok: false, status: "failed", type: "mfr",
+                   reason: `country "${a.country}" not found in the dropdown` });
+          await ensureDrawerClosed(page);
+          return "ok";
+        }
+      }
+    }
+
+    if (manualSave) {
+      log(`[gspr:${mp.country}] MFR ${asin}: PAUSED — verify the form for "${entry.name}" in the browser, complete missing fields and click Save (up to 10 min)…`);
+      let savedByUser = false, paneClosed = false;
+      for (let t = 0; t < 300; t++) {
+        await page.waitForTimeout(2000);
+        if (!(await page.locator(FLYOUT_PANEL).isVisible().catch(() => false))) {
+          paneClosed = true; break;
+        }
+      }
+      if (!savedByUser && !paneClosed) {
+        log(`[gspr:${mp.country}] MFR ${asin}: timed out waiting for manual save`);
+        record({ asin, ok: false, status: "failed", type: "mfr", reason: "timed out waiting for manual save" });
+        await ensureDrawerClosed(page);
+        return "ok";
+      }
+      log(`[gspr:${mp.country}] MFR ${asin}: manufacturer saved by the user`);
+      record({ asin, ok: true, status: "submitted", type: "mfr" });
+      await ensureDrawerClosed(page);
+      return "ok";
+    }
+
+    const failReason = await saveAndClose(page, dumpDir, `mfr-${asin}`);
+    if (failReason) {
+      log(`[gspr:${mp.country}] MFR ${asin}: ${failReason}`);
+      record({ asin, ok: false, status: "failed", type: "mfr", reason: failReason });
+      await ensureDrawerClosed(page);
+      return "ok";
+    }
+
+    log(`[gspr:${mp.country}] MFR ${asin}: manufacturer contact submitted`);
+    record({ asin, ok: true, status: "submitted", type: "mfr" });
+    await ensureDrawerClosed(page);
+    await page.waitForTimeout(2000);
+    return "ok";
+  } catch (e) {
+    const msg = (e as Error).message ?? String(e);
+    if (/has been closed|Target (page|browser).*closed/i.test(msg)) {
+      log(`[gspr:${mp.country}] browser closed — treating as stop`);
+      return "stopped";
+    }
+    log(`[gspr:${mp.country}] MFR ${asin} FAILED: ${msg}`);
+    await dumpDebug(page, dumpDir, `mfr-error-${asin}`).catch(() => {});
+    record({ asin, ok: false, status: "failed", type: "mfr", reason: msg });
+    await ensureDrawerClosed(page);
+    return "ok";
+  }
+}
+
+/**
+ * Process every "GPSR: manufacturer contact details" warning:
+ * Both flat (standalone) rows and expandable groups (walking each group's
+ * nested pagination).
  * The manufacturer for a sub-row is the longest-prefix match of its SKU in
  * `manufacturers`. When no entry matches, `ask` pauses the run (the Qt app
  * shows a dialog); on "done" the refreshed list is retried, on "stop" the
@@ -703,9 +1149,28 @@ export async function processManufacturer(
     return out;
   }
   const skip = new Set(mp.skipAsinsMfr ?? []);
-  let firstPane = true;
-  let firstForm = true;
+  const firstPaneRef = { value: true };
+  const firstFormRef = { value: true };
 
+  // 1. Flat (non-expandable) MFR rows on the page
+  const flatRows = page.locator(ROW_SELECTOR)
+    .filter({ hasNot: page.locator(".ahd-accordion") })
+    .filter({ hasText: REASON_MFR });
+  const nFlat = await flatRows.count();
+  if (nFlat > 0) {
+    log(`[gspr:${mp.country}] ${nFlat} flat "${REASON_MFR}" row(s)`);
+    for (let i = 0; i < nFlat; i++) {
+      const row = flatRows.nth(i);
+      const status = await processOneMfrRow(
+        page, row, mp, dumpDir, manufacturers, ask, userSkip, skip,
+        record, manualSave, firstPaneRef, firstFormRef
+      );
+      if (status === "stopped") return out;
+    }
+    await ensureDrawerClosed(page);
+  }
+
+  // 2. Expandable MFR groups (accordion)
   const groups = page.locator(ROW_SELECTOR)
     .filter({ has: page.locator(".ahd-accordion") })
     .filter({ hasText: REASON_MFR });
@@ -713,10 +1178,13 @@ export async function processManufacturer(
   log(`[gspr:${mp.country}] ${nGroups} expandable "${REASON_MFR}" group(s)`);
 
   for (let g = 0; g < nGroups; g++) {
+    await ensureDrawerClosed(page);
     const group = groups.nth(g);
     const expander = group.locator('.ahd-accordion__button[aria-label="expand"]').first();
-    if (await expander.isVisible().catch(() => false))
+    if (await expander.isVisible().catch(() => false)) {
       await expander.click().catch(() => {});
+      await page.waitForTimeout(1000);
+    }
     const body = group.locator(".ahd-accordion__body").first();
     if (!(await body.locator('[data-testid="ahd-nested-product-policy"]').first()
             .waitFor({ state: "visible", timeout: 10_000 })
@@ -733,248 +1201,11 @@ export async function processManufacturer(
 
       for (let i = 0; i < nSubs; i++) {
         const sub = subs.nth(i);
-        const btn = sub.locator('[data-testid^="ahd-action-button-"]').first();
-        const hasButton = (await btn.count()) > 0;
-        const link = sub
-          .locator('a[data-testid="ahd-listing-url-product-policy-desktop"]').first();
-        const href = (await link.count())
-          ? await link.getAttribute("href").catch(() => null) : null;
-        const asin = href?.match(/[?&]asin=([A-Z0-9]{10})/)?.[1] ?? "";
-        const rawSku = href?.match(/[?&]sku=([^&]+)/)?.[1] ?? "";
-        const sku = decodeURIComponent(rawSku.replace(/\+/g, "%20"));
-        if (!asin) {
-          log(`[gspr:${mp.country}] MFR group ${g + 1} row ${i + 1}: no ASIN — ignored`);
-          continue;
-        }
-
-        const statusText = (await sub.locator(".text-size-sm.text-secondary").last()
-          .innerText().catch(() => "")).replace(/\s+/g, " ").trim();
-        if (userSkip.has(asin)) {
-          log(`[gspr:${mp.country}] MFR ${asin}: skipped by the user`);
-          record({ asin, ok: true, status: "user-skipped", type: "mfr", statusText });
-          continue;
-        }
-        if (skip.has(asin)) {
-          log(`[gspr:${mp.country}] MFR ${asin}: already done earlier — skipped`);
-          record({ asin, ok: true, status: "skipped", type: "mfr", statusText });
-          continue;
-        }
-        if (!hasButton || !/submission is required/i.test(statusText)) {
-          log(`[gspr:${mp.country}] MFR ${asin}: not actionable (${statusText || "no status"}) — pending`);
-          record({ asin, ok: true, status: "pending", statusText, type: "mfr" });
-          continue;
-        }
-
-        // Resolve the manufacturer BEFORE touching the page — missing OR
-        // incomplete data pauses the run the same way, so the user can
-        // complete the xlsx files instead of watching silent failures pile up.
-        let entry = findManufacturer(manufacturers, sku);
-        let issue = manufacturerIssue(entry);
-        let skippedByUser = false;
-        while (issue && !skippedByUser) {
-          log(`[gspr:${mp.country}] MFR ${asin}: ${issue} (SKU "${sku}") — waiting for the user…`);
-          const reply = await ask({ kind: "manufacturer", country: mp.country, asin, sku, issue });
-          if (reply?.cmd === "done" && Array.isArray(reply.manufacturers)) {
-            manufacturers.length = 0;
-            manufacturers.push(...reply.manufacturers);
-            entry = findManufacturer(manufacturers, sku);
-            issue = manufacturerIssue(entry);
-            if (issue)
-              log(`[gspr:${mp.country}] MFR ${asin}: SKU "${sku}" still incomplete (${issue}) — asking again`);
-          } else if (reply?.cmd === "skip") {
-            skippedByUser = true;
-          } else {
-            log(`[gspr:${mp.country}] stop requested by the user`);
-            return out;
-          }
-        }
-        if (skippedByUser || issue || !entry) {
-          log(`[gspr:${mp.country}] MFR ${asin}: skipped by the user`);
-          userSkip.add(asin); // also skips it in later phases/countries this run
-          record({ asin, ok: true, status: "user-skipped", type: "mfr" });
-          continue;
-        }
-
-        try {
-          if (!(await ensureDrawerClosed(page))) {
-            record({ asin, ok: false, status: "failed", type: "mfr",
-                     reason: "previous pane would not close" });
-            return out;
-          }
-          await btn.scrollIntoViewIfNeeded().catch(() => {});
-          await btn.click();
-          await page.locator(FLYOUT_PANEL).waitFor({ state: "visible", timeout: 10_000 });
-          await page.waitForTimeout(1500);
-
-          if (firstPane) { // reference dump of this warning type's pane
-            await dumpDebug(page, dumpDir, `mfr-drawer-${asin}`);
-            firstPane = false;
-          }
-
-          const reviewNote = page.locator(FLYOUT)
-            .getByText("previously submitted is under review").first();
-          if (await reviewNote.isVisible().catch(() => false)) {
-            log(`[gspr:${mp.country}] MFR ${asin}: already under review — pending`);
-            record({ asin, ok: true, status: "pending", type: "mfr",
-                     statusText: "Under review (submission pane)" });
-            await ensureDrawerClosed(page);
-            continue;
-          }
-
-          // The pane content loads asynchronously (a spinner shows first),
-          // then offers a registry of saved manufacturer entries and an
-          // "Add a new Manufacturer information" link (see the mfr dumps).
-          const registry = page.locator(`${FLYOUT} [data-testid="registry-list"]`).first();
-          if (!(await registry.waitFor({ state: "visible", timeout: 20_000 })
-                  .then(() => true).catch(() => false))) {
-            log(`[gspr:${mp.country}] MFR ${asin}: manufacturer pane did not load`);
-            await dumpDebug(page, dumpDir, `mfr-noload-${asin}`);
-            record({ asin, ok: false, status: "failed", type: "mfr",
-                     reason: "manufacturer pane did not load" });
-            await ensureDrawerClosed(page);
-            continue;
-          }
-
-          // Reuse a saved entry with the same manufacturer name when there is
-          // one; otherwise create it through the add-new form. The entries
-          // render shortly after the list container — give them a moment.
-          await page.waitForTimeout(800);
-          const existing = registry.getByText(entry.name.trim()).first();
-          if (await existing.isVisible().catch(() => false)) {
-            log(`[gspr:${mp.country}] MFR ${asin}: selecting existing entry "${entry.name}"`);
-            await existing.click({ force: true });
-            await page.waitForTimeout(500);
-          } else {
-            log(`[gspr:${mp.country}] MFR ${asin}: creating entry "${entry.name}"`);
-            await page.locator(`${FLYOUT} kat-link[data-testid="add-new-registry"]`)
-              .first().click().catch(() => {});
-            await page.waitForTimeout(1500); // the form renders lazily
-            if (firstForm) { // reference dump of the add-new form
-              await dumpDebug(page, dumpDir, `mfr-form-${asin}`);
-              firstForm = false;
-            }
-            // Field names observed in the mfr-form dump. "Primary email
-            // address or URL" is REQUIRED — the completeness check above
-            // guarantees entry.email or entry.url is set by this point.
-            const primary = entry.email || entry.url || "";
-            const a = splitAddress(entry.address);
-            const filledName = await fillKatField(page,
-              `${FLYOUT} kat-input[name="name"]`, entry.name);
-            await fillKatField(page,
-              `${FLYOUT} kat-input[name="primary_contact_reference"]`, primary);
-            // Phone number is deliberately NEVER filled: entering one in the
-            // GSPR manufacturer details triggers an Amazon bug.
-            await fillKatField(page, `${FLYOUT} kat-input[name="address_line_1"]`, a.line1);
-            if (a.line2)
-              await fillKatField(page, `${FLYOUT} kat-input[name="address_line_2"]`, a.line2);
-            await fillKatField(page, `${FLYOUT} kat-input[name="city"]`, a.city);
-            if (a.state)
-              await fillKatField(page, `${FLYOUT} kat-input[name="state_or_region"]`, a.state);
-            if (a.postal)
-              await fillKatField(page, `${FLYOUT} kat-input[name="postal_code"]`, a.postal);
-            if (!filledName) {
-              log(`[gspr:${mp.country}] MFR ${asin}: add-new form fields not found`);
-              await dumpDebug(page, dumpDir, `mfr-nofields-${asin}`);
-              record({ asin, ok: false, status: "failed", type: "mfr",
-                       reason: "add-new manufacturer form fields not found" });
-              await ensureDrawerClosed(page);
-              continue;
-            }
-            // Country dropdown (in manual mode a miss is not fatal — the
-            // user picks it before saving).
-            const dd = page.locator(`${FLYOUT} kat-dropdown[name="country"]`).first();
-            await dd.click({ force: true }).catch(() => {});
-            await page.waitForTimeout(800);
-            // Options are rendered ALL-CAPS ("CHINA") — match case-insensitively.
-            const countryOpt = page.locator(FLYOUT)
-              .getByText(new RegExp("^\\s*" + escapeRegex(a.country) + "\\s*$", "i")).last();
-            if (await countryOpt.isVisible().catch(() => false)) {
-              await countryOpt.click({ force: true }).catch(() => {});
-              await page.waitForTimeout(300);
-            } else if (!manualSave) {
-              log(`[gspr:${mp.country}] MFR ${asin}: country "${a.country}" not in dropdown`);
-              await dumpDebug(page, dumpDir, `mfr-country-${asin}`);
-              record({ asin, ok: false, status: "failed", type: "mfr",
-                       reason: `country "${a.country}" not found in the dropdown` });
-              await ensureDrawerClosed(page);
-              continue;
-            } else {
-              log(`[gspr:${mp.country}] MFR ${asin}: country "${a.country}" not found — pick it yourself`);
-            }
-
-            if (manualSave) {
-              // The user reviews/completes the form and clicks Save.
-              log(`[gspr:${mp.country}] MFR ${asin}: PAUSED — verify the form for "${entry.name}" in the browser, complete missing fields and click Save (up to 10 min)…`);
-              const nameField = page.locator(`${FLYOUT} kat-input[name="name"]`).first();
-              let savedByUser = false, paneClosed = false;
-              for (let t = 0; t < 300; t++) { // ~10 min at 2 s
-                await page.waitForTimeout(2000);
-                if (!(await page.locator(FLYOUT_PANEL).isVisible().catch(() => false))) {
-                  paneClosed = true; break;
-                }
-                if (!(await nameField.isVisible().catch(() => false))) {
-                  savedByUser = true; break;
-                }
-              }
-              if (!savedByUser) {
-                const reason = paneClosed ? "pane closed before the manufacturer was saved"
-                                          : "timed out waiting for the manufacturer Save";
-                log(`[gspr:${mp.country}] MFR ${asin}: ${reason}`);
-                record({ asin, ok: false, status: "failed", type: "mfr", reason });
-                await ensureDrawerClosed(page);
-                continue;
-              }
-              log(`[gspr:${mp.country}] MFR ${asin}: manufacturer saved by the user`);
-            } else {
-              // Auto mode: click the form's Save; the pane returns to the
-              // registry list.
-              await page.locator(SAVE_BUTTON).last().click().catch(() => {});
-              await page.waitForTimeout(1500);
-            }
-
-            // Click Refresh until the new entry shows up in the registry,
-            // then select it.
-            const created = registry.getByText(entry.name.trim()).first();
-            let visibleNow = false;
-            for (let t = 0; t < 10; t++) {
-              if (await created.isVisible().catch(() => false)) { visibleNow = true; break; }
-              await page.locator(`${FLYOUT} kat-link[data-testid="refresh"]`)
-                .first().click({ force: true }).catch(() => {});
-              await page.waitForTimeout(1500);
-            }
-            if (!visibleNow) {
-              log(`[gspr:${mp.country}] MFR ${asin}: "${entry.name}" still not in the registry after refresh`);
-              await dumpDebug(page, dumpDir, `mfr-norefresh-${asin}`);
-              record({ asin, ok: false, status: "failed", type: "mfr",
-                       reason: "created manufacturer not visible after refresh" });
-              await ensureDrawerClosed(page);
-              continue;
-            }
-            await created.click({ force: true });
-            await page.waitForTimeout(500);
-          }
-          await page.waitForTimeout(500);
-
-          const failReason = await saveAndClose(page, dumpDir, `mfr-${asin}`);
-          if (failReason) {
-            log(`[gspr:${mp.country}] MFR ${asin}: ${failReason}`);
-            record({ asin, ok: false, status: "failed", type: "mfr", reason: failReason });
-            await ensureDrawerClosed(page);
-            continue;
-          }
-          log(`[gspr:${mp.country}] MFR ${asin}: manufacturer "${entry.name}" submitted`);
-          record({ asin, ok: true, status: "submitted", type: "mfr" });
-        } catch (e) {
-          const msg = (e as Error).message ?? String(e);
-          if (/has been closed|Target (page|browser).*closed/i.test(msg)) {
-            log(`[gspr:${mp.country}] browser closed — treating as stop`);
-            return out;
-          }
-          log(`[gspr:${mp.country}] MFR ${asin} FAILED: ${msg}`);
-          await dumpDebug(page, dumpDir, `mfr-error-${asin}`).catch(() => {});
-          record({ asin, ok: false, status: "failed", type: "mfr", reason: msg });
-          await ensureDrawerClosed(page);
-        }
+        const status = await processOneMfrRow(
+          page, sub, mp, dumpDir, manufacturers, ask, userSkip, skip,
+          record, manualSave, firstPaneRef, firstFormRef
+        );
+        if (status === "stopped") return out;
       }
 
       const pageInput = body.locator('[data-testid="ahd-nested-pagination-number-input"]').first();
