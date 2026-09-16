@@ -1,46 +1,63 @@
 #ifndef PANEPRICING_H
 #define PANEPRICING_H
-
-#include <QList>
-#include <QPointer>
-#include <QWidget>
+#include "pricing/AmazonPricingRepository.h"
 #include <QCoro/QCoroTask>
-
+#include <QDir>
+#include <QJsonArray>
+#include <QSettings>
+#include <QWidget>
+#include <memory>
 QT_BEGIN_NAMESPACE
-namespace Ui { class PanePricing; }
+namespace Ui {
+class PanePricing;
+}
 QT_END_NAMESPACE
+class QStandardItemModel;
+class QLabel;
+class QButtonGroup;
 
-class AbstractCli;
-class QDialog;
-class TableCurrencyRates;
-class TablePricing;
-
-class PanePricing : public QWidget
-{
+class PanePricing : public QWidget {
     Q_OBJECT
-public:
+  public:
     explicit PanePricing(QWidget *parent = nullptr);
+    explicit PanePricing(const QDir &workingDir, QWidget *parent = nullptr);
     ~PanePricing();
+    QList<AmazonPricingRepository::Update> pendingUpdates() const;
 
-    void setAvailableClis(const QList<AbstractCli *> &clis);
+  signals:
+    void previewChanged();
 
-protected:
-    void showEvent(QShowEvent *event) override;
-    void hideEvent(QHideEvent *event) override;
-
-private:
-    Ui::PanePricing      *ui;
-    TableCurrencyRates   *m_ratesModel    = nullptr;
-    TablePricing         *m_pricingModel  = nullptr;
-    QList<AbstractCli *>  m_availableClis;
-    QPointer<QDialog>     m_progressDlg;  // survives tab switches; null when idle
-    QCoro::Task<void>     m_refreshTask;
-    QCoro::Task<void>     m_retrieveTask;
-    QCoro::Task<void>     m_updateTask;
-
-    QCoro::Task<void> _onRefreshRate();
-    QCoro::Task<void> _onRetrieve();
-    QCoro::Task<void> _onUpdate();
+  private:
+    void changed();
+    void restoreSort();
+    void saveFilters();
+    void loadFilter(int index);
+    void rebuildChoices();
+    void viewAllPrices();
+    bool validRules() const;
+    QList<Pricing::Market> marketsForRegion(bool keepMetadata = false) const;
+    PricingFilterProxy::Filter filter() const;
+    AmazonPricingRepository::Credentials credentials(bool includeSecrets) const;
+    QCoro::Task<void> retrieve();
+    QCoro::Task<void> update();
+    QCoro::Task<void> refreshRates();
+    Ui::PanePricing *ui;
+    QDir m_working;
+    QSettings m_settings;
+    TableAmazonPricing *m_model;
+    PricingFilterProxy *m_proxy;
+    QStandardItemModel *m_prices;
+    QLabel *m_status;
+    QButtonGroup *m_modes;
+    QList<Pricing::Market> m_markets;
+    QString m_region;
+    QJsonArray m_filters;
+    QHash<QString, double> m_overrides;
+    double m_default = -1;
+    Pricing::Direction m_direction = Pricing::Direction::Increase;
+    bool m_loading = true, m_busy = false;
+    std::unique_ptr<AmazonPricingRepository> m_repository;
+    std::shared_ptr<bool> m_cancelled;
+    QCoro::Task<void> m_task;
 };
-
-#endif // PANEPRICING_H
+#endif

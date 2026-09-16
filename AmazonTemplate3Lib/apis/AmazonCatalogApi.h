@@ -2,6 +2,7 @@
 #define AMAZONCATALOGAPI_H
 
 #include <QObject>
+#include <memory>
 #include <QString>
 #include <QList>
 #include <QMap>
@@ -399,7 +400,9 @@ public:
     QCoro::Task<void> fetchAllSkusViaReport(QString marketplaceId,
                                             QHash<QString, QString>* asinToSku,
                                             QHash<QString, int>* asinToInventory = nullptr,
-                                            QHash<QString, QPair<QString,QString>>* asinToGtin = nullptr);
+                                            QHash<QString, QPair<QString,QString>>* asinToGtin = nullptr,
+                                            QList<StoreItem>* allListings = nullptr,
+                                            std::shared_ptr<bool> cancelled = {});
 
     // Retrieve the productType of a seller listing via the Listings Items API summaries.
     // *productType is empty on error or when the listing is not found.

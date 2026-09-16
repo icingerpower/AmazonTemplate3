@@ -2,6 +2,8 @@
 // miscompile at -O2/-O3.
 #pragma GCC optimize("O1")
 #include "AmazonPricingApi.h"
+#include "ReadRequestControl.h"
+#include "pricing/AmazonDataCache.h"
 
 #include <QDateTime>
 #include <QFile>
@@ -16,6 +18,7 @@
 #include <QUrlQuery>
 #include <QDebug>
 #include <QtMath>
+#include <cmath>
 
 #include <QCoro/QCoroNetworkReply>
 #include <QCoro/QCoroTimer>
@@ -160,10 +163,12 @@ QCoro::Task<void> AmazonPricingApi::_rateLimit()
 //   1. offers[i].price.listingPrice.amount
 //   2. offers[i].listingPrice.amount
 //   3. attributes.purchasable_offer[j].our_price[0].schedule[0].value_with_tax
-//   4. attributes.list_price[0].value
-static double parsePriceFromBody(const QByteArray &json, const QString &marketplaceId,
-                                  QString *productTypeOut)
+// Reference/list prices are deliberately excluded: they are not current prices.
+double AmazonPricingApi::parseListingPrice(const QByteArray &json,
+                                           const QString &marketplaceId,
+                                           QString *productTypeOut)
 {
+    if (productTypeOut) productTypeOut->clear();
     const QJsonObject root = QJsonDocument::fromJson(json).object();
 
     // Product type from summaries
@@ -182,6 +187,9 @@ static double parsePriceFromBody(const QByteArray &json, const QString &marketpl
         const QJsonObject offer = v.toObject();
         if (offer.value("marketplaceId").toString() != marketplaceId)
             continue;
+        if (offer.value("offerType").toString() == "B2B") continue;
+        const double direct = offer.value("price").toObject().value("amount").toDouble(-1);
+        if (direct > 0) return direct;
         {
             const double amt = offer.value("price").toObject()
                                    .value("listingPrice").toObject()
@@ -201,6 +209,7 @@ static double parsePriceFromBody(const QByteArray &json, const QString &marketpl
         const QJsonObject po = v.toObject();
         if (po.value("marketplace_id").toString() != marketplaceId)
             continue;
+        if (!po.value("audience").toString().isEmpty() && po.value("audience").toString() != "ALL") continue;
         const double amt =
             po.value("our_price").toArray().first().toObject()
               .value("schedule").toArray().first().toObject()
@@ -208,11 +217,7 @@ static double parsePriceFromBody(const QByteArray &json, const QString &marketpl
         if (amt > 0.0) return amt;
     }
 
-    // 4: attributes.list_price
-    const double amt = attrs.value("list_price").toArray()
-                            .first().toObject()
-                            .value("value").toDouble(-1.0);
-    return (amt > 0.0) ? amt : -1.0;
+    return -1.0;
 }
 
 // Reads a named schedule-based sub-price (e.g. maximum_seller_allowed_price)
@@ -235,19 +240,44 @@ static double parsePurchasableSubPrice(const QByteArray &json,
     return -1.0;
 }
 
-QCoro::Task<void> AmazonPricingApi::fetchListingPrice(
-    QString marketplaceId, QString sku,
-    double *priceOut, bool *existsOut, QString *productTypeOut,
-    double *minPriceOut, double *maxPriceOut)
-{
-    *priceOut  = -1.0;
+QCoro::Task<void> AmazonPricingApi::fetchListingPrice(QString marketplaceId, QString sku, double *priceOut,
+                                                      bool *existsOut, QString *productTypeOut,
+                                                      double *minPriceOut, double *maxPriceOut,
+                                                      QJsonObject *listingOut,
+                                                      std::shared_ptr<bool> cancelled) {
+    if (listingOut)
+        *listingOut = {};
+    *priceOut = -1.0;
     *existsOut = false;
-    if (productTypeOut) productTypeOut->clear();
-    if (minPriceOut) *minPriceOut = -1.0;
-    if (maxPriceOut) *maxPriceOut = -1.0;
+    if (productTypeOut)
+        productTypeOut->clear();
+    if (minPriceOut)
+        *minPriceOut = -1.0;
+    if (maxPriceOut)
+        *maxPriceOut = -1.0;
     m_lastError.clear();
 
-    const QString region   = lwaRegionForMarketplace(marketplaceId);
+    if (cancelled && *cancelled)
+        co_return;
+    const QString cacheKey = AmazonDataCache::listingKey(marketplaceId, sku);
+    if (m_dataCache) {
+        const auto record = m_dataCache->read("listing", cacheKey);
+        if (AmazonDataCache::fresh(record, 3600, QDateTime::currentSecsSinceEpoch())) {
+            const auto cached = record.value("payload").toObject();
+            const auto body = cached.value("body").toObject();
+            const auto bytes = QJsonDocument(body).toJson(QJsonDocument::Compact);
+            *existsOut = cached.value("exists").toBool();
+            *priceOut = parseListingPrice(bytes, marketplaceId, productTypeOut);
+            if (listingOut)
+                *listingOut = body;
+            if (minPriceOut)
+                *minPriceOut = parsePurchasableSubPrice(bytes, marketplaceId, "minimum_seller_allowed_price");
+            if (maxPriceOut)
+                *maxPriceOut = parsePurchasableSubPrice(bytes, marketplaceId, "maximum_seller_allowed_price");
+            co_return;
+        }
+    }
+    const QString region = lwaRegionForMarketplace(marketplaceId);
     const QString endpoint = endpointForMarketplace(marketplaceId);
     const QString sellerId = sellerIdForMarketplace(marketplaceId);
 
@@ -258,7 +288,8 @@ QCoro::Task<void> AmazonPricingApi::fetchListingPrice(
 
     QString token;
     co_await _getAccessToken(region, &token);
-    if (token.isEmpty()) co_return;
+    if (token.isEmpty())
+        co_return;
 
     co_await _rateLimit();
 
@@ -269,8 +300,7 @@ QCoro::Task<void> AmazonPricingApi::fetchListingPrice(
 
     QUrlQuery query;
     query.addQueryItem(QStringLiteral("marketplaceIds"), marketplaceId);
-    query.addQueryItem(QStringLiteral("includedData"),
-                       QStringLiteral("offers,attributes,summaries"));
+    query.addQueryItem(QStringLiteral("includedData"), QStringLiteral("offers,attributes,summaries"));
     url.setQuery(query);
 
     QNetworkRequest req(url);
@@ -278,41 +308,104 @@ QCoro::Task<void> AmazonPricingApi::fetchListingPrice(
     req.setRawHeader("accept", "application/json");
 
     QNetworkReply *reply = _nam()->get(req);
-    co_await qCoro(reply).waitForFinished();
+    co_await AmazonRead::wait(reply, cancelled);
+    if ((cancelled && *cancelled) || reply->error() == QNetworkReply::OperationCanceledError) {
+        m_lastError = cancelled && *cancelled ? QStringLiteral("Cancelled")
+                                              : QStringLiteral("Listing request timed out");
+        reply->deleteLater();
+        co_return;
+    }
 
     const QByteArray body = reply->readAll();
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     reply->deleteLater();
 
     if (status == 404) {
+        if (m_dataCache)
+            m_dataCache->write("listing", cacheKey,
+                               {{"sku", sku},
+                                {"marketplace", marketplaceId},
+                                {"exists", false},
+                                {"price", -1},
+                                {"body", QJsonObject{}}},
+                               QDateTime::currentSecsSinceEpoch());
         co_return; // not listed
     }
     if (status != 200) {
-        m_lastError = QStringLiteral("HTTP %1 for SKU %2 on %3")
-                          .arg(status).arg(sku, marketplaceId);
-        qWarning() << "AmazonPricingApi:" << m_lastError
-                   << QString::fromUtf8(body.left(300));
+        m_lastError = QStringLiteral("HTTP %1 for SKU %2 on %3").arg(status).arg(sku, marketplaceId);
+        qWarning() << "AmazonPricingApi:" << m_lastError << QString::fromUtf8(body.left(300));
         co_return;
     }
 
     *existsOut = true;
-    *priceOut  = parsePriceFromBody(body, marketplaceId, productTypeOut);
+    if (listingOut)
+        *listingOut = QJsonDocument::fromJson(body).object();
+    *priceOut = parseListingPrice(body, marketplaceId, productTypeOut);
+    if (m_dataCache)
+        m_dataCache->write("listing", cacheKey,
+                           {{"sku", sku},
+                            {"marketplace", marketplaceId},
+                            {"exists", true},
+                            {"price", *priceOut},
+                            {"body", QJsonDocument::fromJson(body).object()}},
+                           QDateTime::currentSecsSinceEpoch());
     if (minPriceOut)
-        *minPriceOut = parsePurchasableSubPrice(
-            body, marketplaceId, "minimum_seller_allowed_price");
+        *minPriceOut = parsePurchasableSubPrice(body, marketplaceId, "minimum_seller_allowed_price");
     if (maxPriceOut)
-        *maxPriceOut = parsePurchasableSubPrice(
-            body, marketplaceId, "maximum_seller_allowed_price");
+        *maxPriceOut = parsePurchasableSubPrice(body, marketplaceId, "maximum_seller_allowed_price");
 }
 
 // ---------------------------------------------------------------------------
 // patchListingPrice
 // ---------------------------------------------------------------------------
 
+QJsonArray AmazonPricingApi::priceOffers(const QString &marketplaceId, const QString &currency,
+    double newPrice, const QJsonArray &existingOffers, QString *error)
+{
+    if (error) error->clear();
+    if (!std::isfinite(newPrice) || newPrice <= 0 || newPrice > 100000000) {
+        if (error) *error = QStringLiteral("Invalid price"); return {};
+    }
+    // Round to 2 decimal places (all currencies we support use cents)
+    const double rounded = std::round(newPrice * 100.0) / 100.0;
+
+    const QJsonObject offerValue{
+        {QStringLiteral("audience"),       QStringLiteral("ALL")},
+        {QStringLiteral("currency"),       currency},
+        {QStringLiteral("marketplace_id"), marketplaceId},
+        {QStringLiteral("our_price"), QJsonArray{
+            QJsonObject{{QStringLiteral("schedule"), QJsonArray{
+                QJsonObject{{QStringLiteral("value_with_tax"), rounded}}
+            }}}
+        }}
+    };
+
+    // The new editor passes the freshly read full attribute to preserve sale
+    // schedules, B2B offers, and price bounds. Existing callers retain behavior.
+    QJsonArray updatedOffers{offerValue};
+    if (!existingOffers.isEmpty()) {
+        updatedOffers = existingOffers;
+        bool found = false;
+        for (int i = 0; i < updatedOffers.size(); ++i) {
+            auto offer = updatedOffers[i].toObject();
+            const QString audience = offer.value("audience").toString();
+            if (offer.value("marketplace_id").toString() != marketplaceId || (!audience.isEmpty() && audience != "ALL")) continue;
+            if (!offer.value("currency").toString().isEmpty() && offer.value("currency").toString() != currency) {
+                if (error) *error = QStringLiteral("Listing currency differs from proposed currency"); return {};
+            }
+            offer["our_price"] = offerValue.value("our_price");
+            offer["currency"] = currency;
+            updatedOffers[i] = offer; found = true;
+        }
+        if (!found) { if (error) *error = QStringLiteral("No B2C purchasable offer to update"); return {}; }
+    }
+    return updatedOffers;
+}
+
 QCoro::Task<void> AmazonPricingApi::patchListingPrice(
     QString marketplaceId, QString sku,
     QString productType, QString currency,
-    double newPrice, bool *success)
+    double newPrice, bool *success, QJsonArray existingOffers, std::shared_ptr<bool> cancelled)
 {
     *success = false;
     m_lastError.clear();
@@ -338,27 +431,15 @@ QCoro::Task<void> AmazonPricingApi::patchListingPrice(
 
     co_await _rateLimit();
 
-    // Round to 2 decimal places (all currencies we support use cents)
-    const double rounded = qRound(newPrice * 100.0) / 100.0;
-
-    const QJsonObject offerValue{
-        {QStringLiteral("audience"),       QStringLiteral("ALL")},
-        {QStringLiteral("currency"),       currency},
-        {QStringLiteral("marketplace_id"), marketplaceId},
-        {QStringLiteral("our_price"), QJsonArray{
-            QJsonObject{{QStringLiteral("schedule"), QJsonArray{
-                QJsonObject{{QStringLiteral("value_with_tax"), rounded}}
-            }}}
-        }}
-    };
-
+    const QJsonArray updatedOffers = priceOffers(marketplaceId,currency,newPrice,existingOffers,&m_lastError);
+    if (updatedOffers.isEmpty()) co_return;
     const QJsonObject patchBody{
         {QStringLiteral("productType"), productType},
         {QStringLiteral("patches"), QJsonArray{
             QJsonObject{
                 {QStringLiteral("op"),    QStringLiteral("replace")},
                 {QStringLiteral("path"),  QStringLiteral("/attributes/purchasable_offer")},
-                {QStringLiteral("value"), QJsonArray{offerValue}}
+                {QStringLiteral("value"), updatedOffers}
             }
         }}
     };
@@ -379,8 +460,14 @@ QCoro::Task<void> AmazonPricingApi::patchListingPrice(
     req.setRawHeader("accept", "application/json");
 
     qDebug() << "AmazonPricingApi: PATCH" << sku << marketplaceId
-             << "price=" << rounded << currency;
+             << "price=" << (std::round(newPrice * 100.0) / 100.0) << currency;
 
+    // Cancel may arrive during authentication or rate limiting. Once sent, wait
+    // for the response so the audit retains the result of the in-flight write.
+    if (cancelled && *cancelled) {
+        m_lastError = QStringLiteral("Cancelled before submission");
+        co_return;
+    }
     QNetworkReply *reply = _nam()->sendCustomRequest(req, "PATCH", jsonBody);
     co_await qCoro(reply).waitForFinished();
 
@@ -412,6 +499,7 @@ QCoro::Task<void> AmazonPricingApi::patchListingPrice(
     }
 
     *success = true;
+    if (m_dataCache) m_dataCache->invalidate("listing", AmazonDataCache::listingKey(marketplaceId,sku));
 }
 
 // ---------------------------------------------------------------------------
@@ -566,4 +654,5 @@ QCoro::Task<void> AmazonPricingApi::patchListingDiscount(
     }
 
     *success = true;
+    if (m_dataCache) m_dataCache->invalidate("listing", AmazonDataCache::listingKey(marketplaceId,sku));
 }

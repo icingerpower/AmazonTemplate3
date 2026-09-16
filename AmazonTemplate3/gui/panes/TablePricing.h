@@ -60,7 +60,7 @@ public:
         QList<CountryData> countries;   // one entry per m_countries, same order
     };
 
-    // Access rows/countries for read-only use by PanePricing (e.g. Update workflow)
+    // Access rows/countries for read-only use by PanePricingSync (e.g. Update workflow)
     const QList<Row>            &rows()      const { return m_rows; }
     const QList<PricingCountry> &countries() const { return m_countries; }
 

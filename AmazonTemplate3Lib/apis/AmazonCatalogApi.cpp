@@ -7,6 +7,7 @@
 // form of the same GCC 13 bug).
 #pragma GCC optimize("O1")
 #include "AmazonCatalogApi.h"
+#include "ReadRequestControl.h"
 #include "AmazonAplusApi.h"
 #include "AmazonMarketplace.h"
 
@@ -3851,21 +3852,30 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllFbaSkus(QString marketplaceId,
 // ---------------------------------------------------------------------------
 
 QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
-                                                           QHash<QString, QString>* asinToSku,
-                                                           QHash<QString, int>* asinToInventory,
-                                                           QHash<QString, QPair<QString,QString>>* asinToGtin)
-{
+                                                          QHash<QString, QString> *asinToSku,
+                                                          QHash<QString, int> *asinToInventory,
+                                                          QHash<QString, QPair<QString, QString>> *asinToGtin,
+                                                          QList<StoreItem> *allListings,
+                                                          std::shared_ptr<bool> cancelled) {
+    if (cancelled && *cancelled)
+        co_return;
     asinToSku->clear();
-    if (asinToInventory) asinToInventory->clear();
-    if (asinToGtin) asinToGtin->clear();
+    if (asinToInventory)
+        asinToInventory->clear();
+    if (asinToGtin)
+        asinToGtin->clear();
+    if (allListings)
+        allListings->clear();
 
     const QString endpoint = endpointForMarketplace(marketplaceId);
-    const QString lwaReg   = lwaRegionForMarketplace(marketplaceId);
+    const QString lwaReg = lwaRegionForMarketplace(marketplaceId);
 
     // --- Step 1: Create the report ---
     QString token;
     co_await _getAccessToken(lwaReg, &token);
-    if (token.isEmpty()) { co_return; }
+    if (token.isEmpty()) {
+        co_return;
+    }
 
     {
         QUrl url;
@@ -3874,16 +3884,22 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
         url.setPath(QStringLiteral("/reports/2021-06-30/reports"));
 
         QJsonObject body;
-        body[QStringLiteral("reportType")]    = QStringLiteral("GET_MERCHANT_LISTINGS_ALL_DATA");
-        body[QStringLiteral("marketplaceIds")] = QJsonArray{ marketplaceId };
+        body[QStringLiteral("reportType")] = QStringLiteral("GET_MERCHANT_LISTINGS_ALL_DATA");
+        body[QStringLiteral("marketplaceIds")] = QJsonArray{marketplaceId};
 
         QNetworkRequest req(url);
         req.setRawHeader("x-amz-access-token", token.toUtf8());
         req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
 
         qDebug() << "AmazonCatalogApi: requesting GET_MERCHANT_LISTINGS_ALL_DATA report for" << marketplaceId;
-        QNetworkReply* reply = _nam()->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
-        co_await qCoro(reply).waitForFinished();
+        QNetworkReply *reply = _nam()->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+        co_await AmazonRead::wait(reply, cancelled);
+        if ((cancelled && *cancelled) || reply->error() == QNetworkReply::OperationCanceledError) {
+            m_lastError = cancelled && *cancelled ? QStringLiteral("Cancelled")
+                                                  : QStringLiteral("Report request timed out");
+            reply->deleteLater();
+            co_return;
+        }
 
         const QByteArray data = reply->readAll();
         const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -3891,16 +3907,17 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
 
         if (status != 202) {
             m_lastError = QStringLiteral("Report creation failed: HTTP %1 — %2")
-                          .arg(status).arg(QString::fromUtf8(data.left(400)));
+                              .arg(status)
+                              .arg(QString::fromUtf8(data.left(400)));
             qWarning() << "AmazonCatalogApi:" << m_lastError;
             co_return;
         }
 
-        const QString reportId = QJsonDocument::fromJson(data).object()
-                                     .value(QStringLiteral("reportId")).toString();
+        const QString reportId =
+            QJsonDocument::fromJson(data).object().value(QStringLiteral("reportId")).toString();
         if (reportId.isEmpty()) {
-            m_lastError = QStringLiteral("Report creation: no reportId in response — ")
-                          + QString::fromUtf8(data.left(300));
+            m_lastError = QStringLiteral("Report creation: no reportId in response — ") +
+                          QString::fromUtf8(data.left(300));
             qWarning() << "AmazonCatalogApi:" << m_lastError;
             co_return;
         }
@@ -3908,19 +3925,20 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
         qDebug() << "AmazonCatalogApi: reportId =" << reportId;
 
         // --- Step 2: Poll until DONE (max 3 minutes, 5-second intervals) ---
-        static const int kMaxPolls   = 36; // 36 × 5 s = 3 min
-        static const int kPollMs     = 5000;
+        static const int kMaxPolls = 36; // 36 × 5 s = 3 min
+        static const int kPollMs = 5000;
         QString reportDocumentId;
 
         for (int poll = 0; poll < kMaxPolls; ++poll) {
             // Wait 5 seconds between polls (first poll also waits — report is never instant)
-            QTimer timer;
-            timer.setSingleShot(true);
-            timer.start(kPollMs);
-            co_await qCoro(&timer).waitForTimeout();
+            co_await AmazonRead::delay(kPollMs, cancelled);
+            if (cancelled && *cancelled)
+                co_return;
 
             co_await _getAccessToken(lwaReg, &token);
-            if (token.isEmpty()) { co_return; }
+            if (token.isEmpty()) {
+                co_return;
+            }
 
             QUrl pollUrl;
             pollUrl.setScheme(QStringLiteral("https"));
@@ -3931,8 +3949,14 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
             pollReq.setRawHeader("x-amz-access-token", token.toUtf8());
             pollReq.setRawHeader("accept", "application/json");
 
-            QNetworkReply* pollReply = _nam()->get(pollReq);
-            co_await qCoro(pollReply).waitForFinished();
+            QNetworkReply *pollReply = _nam()->get(pollReq);
+            co_await AmazonRead::wait(pollReply, cancelled);
+            if ((cancelled && *cancelled) || pollReply->error() == QNetworkReply::OperationCanceledError) {
+                m_lastError = cancelled && *cancelled ? QStringLiteral("Cancelled")
+                                                      : QStringLiteral("Report request timed out");
+                pollReply->deleteLater();
+                co_return;
+            }
 
             const QByteArray pollData = pollReply->readAll();
             const int pollStatus = pollReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -3945,9 +3969,8 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
             }
 
             const QJsonObject pollObj = QJsonDocument::fromJson(pollData).object();
-            const QString procStatus  = pollObj.value(QStringLiteral("processingStatus")).toString();
-            qDebug() << "AmazonCatalogApi: report poll" << (poll + 1)
-                     << "processingStatus =" << procStatus;
+            const QString procStatus = pollObj.value(QStringLiteral("processingStatus")).toString();
+            qDebug() << "AmazonCatalogApi: report poll" << (poll + 1) << "processingStatus =" << procStatus;
 
             if (procStatus == QStringLiteral("DONE")) {
                 reportDocumentId = pollObj.value(QStringLiteral("reportDocumentId")).toString();
@@ -3971,7 +3994,9 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
 
         // --- Step 3: Get the download URL ---
         co_await _getAccessToken(lwaReg, &token);
-        if (token.isEmpty()) { co_return; }
+        if (token.isEmpty()) {
+            co_return;
+        }
 
         QUrl docUrl;
         docUrl.setScheme(QStringLiteral("https"));
@@ -3982,8 +4007,14 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
         docReq.setRawHeader("x-amz-access-token", token.toUtf8());
         docReq.setRawHeader("accept", "application/json");
 
-        QNetworkReply* docReply = _nam()->get(docReq);
-        co_await qCoro(docReply).waitForFinished();
+        QNetworkReply *docReply = _nam()->get(docReq);
+        co_await AmazonRead::wait(docReply, cancelled);
+        if ((cancelled && *cancelled) || docReply->error() == QNetworkReply::OperationCanceledError) {
+            m_lastError = cancelled && *cancelled ? QStringLiteral("Cancelled")
+                                                  : QStringLiteral("Report request timed out");
+            docReply->deleteLater();
+            co_return;
+        }
 
         const QByteArray docData = docReply->readAll();
         const int docStatus = docReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -3991,18 +4022,19 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
 
         if (docStatus != 200) {
             m_lastError = QStringLiteral("Report document fetch failed: HTTP %1 — %2")
-                          .arg(docStatus).arg(QString::fromUtf8(docData.left(300)));
+                              .arg(docStatus)
+                              .arg(QString::fromUtf8(docData.left(300)));
             qWarning() << "AmazonCatalogApi:" << m_lastError;
             co_return;
         }
 
-        const QJsonObject docObj      = QJsonDocument::fromJson(docData).object();
-        const QString downloadUrl     = docObj.value(QStringLiteral("url")).toString();
-        const QString compression     = docObj.value(QStringLiteral("compressionAlgorithm")).toString();
+        const QJsonObject docObj = QJsonDocument::fromJson(docData).object();
+        const QString downloadUrl = docObj.value(QStringLiteral("url")).toString();
+        const QString compression = docObj.value(QStringLiteral("compressionAlgorithm")).toString();
 
         if (downloadUrl.isEmpty()) {
-            m_lastError = QStringLiteral("Report document: no download URL — ")
-                          + QString::fromUtf8(docData.left(300));
+            m_lastError =
+                QStringLiteral("Report document: no download URL — ") + QString::fromUtf8(docData.left(300));
             qWarning() << "AmazonCatalogApi:" << m_lastError;
             co_return;
         }
@@ -4010,8 +4042,14 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
         // --- Step 4: Download the TSV (presigned S3, no auth header needed) ---
         const QUrl dlUrlObj(downloadUrl);
         QNetworkRequest dlReq(dlUrlObj);
-        QNetworkReply* dlReply = _nam()->get(dlReq);
-        co_await qCoro(dlReply).waitForFinished();
+        QNetworkReply *dlReply = _nam()->get(dlReq);
+        co_await AmazonRead::wait(dlReply, cancelled);
+        if ((cancelled && *cancelled) || dlReply->error() == QNetworkReply::OperationCanceledError) {
+            m_lastError = cancelled && *cancelled ? QStringLiteral("Cancelled")
+                                                  : QStringLiteral("Report request timed out");
+            dlReply->deleteLater();
+            co_return;
+        }
 
         QByteArray tsvData = dlReply->readAll();
         const int dlStatus = dlReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -4047,28 +4085,28 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
         const QStringList headers = lines.at(0).split(QLatin1Char('\t'));
         qDebug() << "AmazonCatalogApi: TSV headers found:" << headers;
 
-        const int skuCol  = headers.indexOf(QStringLiteral("seller-sku"));
+        const int skuCol = headers.indexOf(QStringLiteral("seller-sku"));
         // asin1Col: dedicated ASIN column (always the ASIN regardless of product-id-type).
         const int asin1Col = headers.indexOf(QStringLiteral("asin1"));
         // product-id: external identifier (ASIN if product-id-type=1, else EAN/UPC/etc.)
         const int productIdCol = headers.indexOf(QStringLiteral("product-id"));
         // Fall back: if no asin1, use product-id as ASIN source (type must be 1)
-        const int asinCol  = (asin1Col >= 0) ? asin1Col : productIdCol;
+        const int asinCol = (asin1Col >= 0) ? asin1Col : productIdCol;
         // "product-id-type" column: 1=ASIN, 3=UPC, 4=EAN, 5=JAN, 8=GTIN14
         const int typeCol = headers.indexOf(QStringLiteral("product-id-type"));
-        const int qtyCol  = headers.indexOf(QStringLiteral("quantity"));
+        const int qtyCol = headers.indexOf(QStringLiteral("quantity"));
 
         // product-id-type → SP-API gtinType string (only EAN/UPC/GTIN14 are kept)
         static const QHash<QString, QString> kReportTypeMap{
             {QStringLiteral("3"), QStringLiteral("upc")},
             {QStringLiteral("4"), QStringLiteral("ean")},
-            {QStringLiteral("5"), QStringLiteral("ean")},   // JAN = Japanese EAN
+            {QStringLiteral("5"), QStringLiteral("ean")}, // JAN = Japanese EAN
             {QStringLiteral("8"), QStringLiteral("gtin14")},
         };
 
         if (skuCol < 0 || asinCol < 0) {
-            m_lastError = QStringLiteral("Report TSV: could not find seller-sku/asin1 columns. Headers: ")
-                          + lines.at(0).left(300);
+            m_lastError = QStringLiteral("Report TSV: could not find seller-sku/asin1 columns. Headers: ") +
+                          lines.at(0).left(300);
             qWarning() << "AmazonCatalogApi:" << m_lastError;
             co_return;
         }
@@ -4085,9 +4123,9 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
                 continue;
             }
 
-            const QString typeVal = (typeCol >= 0 && typeCol < cols.size())
-                ? cols.at(typeCol).trimmed() : QString{};
-            const QString sku  = cols.at(skuCol).trimmed();
+            const QString typeVal =
+                (typeCol >= 0 && typeCol < cols.size()) ? cols.at(typeCol).trimmed() : QString{};
+            const QString sku = cols.at(skuCol).trimmed();
             const QString asin = cols.at(asinCol).trimmed();
 
             // product-id-type: 1=ASIN. If empty, check if product-id looks like ASIN.
@@ -4095,7 +4133,8 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
             if (!isAsin && typeVal.isEmpty() && asinRegex.match(asin).hasMatch())
                 isAsin = true;
             // If asin1 is a separate column, the asin variable is always the real ASIN.
-            if (asin1Col >= 0) isAsin = true;
+            if (asin1Col >= 0)
+                isAsin = true;
 
             if (isAsin) {
                 if (!sku.isEmpty() && !asin.isEmpty()) {
@@ -4103,15 +4142,23 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
                     // the seller's SKU — never let them resolve the ASIN's SKU.
                     if (!isRefurbishedSku(sku) && !asinToSku->contains(asin))
                         asinToSku->insert(asin, sku);
+                    // Pricing needs every seller SKU even when ASINs repeat.
+                    // Preserve the historical ASIN map for existing callers.
+                    if (allListings && !isRefurbishedSku(sku)) {
+                        StoreItem listing;
+                        listing.sku = sku;
+                        listing.asin = asin;
+                        listing.inventory = qtyCol >= 0 && qtyCol < cols.size() ? cols.at(qtyCol).toInt() : 0;
+                        allListings->append(listing);
+                    }
                     if (asinToInventory && qtyCol >= 0 && qtyCol < cols.size())
                         (*asinToInventory)[asin] += cols.at(qtyCol).trimmed().toInt();
 
                     // When asin1 is a dedicated column, product-id may be the external ID (EAN etc.)
-                    if (asinToGtin && asin1Col >= 0 && productIdCol >= 0
-                            && productIdCol < cols.size()
-                            && !asinToGtin->contains(asin)) {
+                    if (asinToGtin && asin1Col >= 0 && productIdCol >= 0 && productIdCol < cols.size() &&
+                        !asinToGtin->contains(asin)) {
                         const QString gtinVal = cols.at(productIdCol).trimmed();
-                        const QString gtinTy  = kReportTypeMap.value(typeVal);
+                        const QString gtinTy = kReportTypeMap.value(typeVal);
                         if (!gtinTy.isEmpty() && !gtinVal.isEmpty()) {
                             asinToGtin->insert(asin, {gtinVal, gtinTy});
                             ++gtinRows;
@@ -4123,17 +4170,15 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
             } else {
                 nonAsinRows++;
                 if (asinRegex.match(asin).hasMatch()) {
-                    qDebug() << "AmazonCatalogApi: skipped row with ASIN-like product-id"
-                             << asin << "because type =" << (typeVal.isEmpty() ? "(empty)" : typeVal);
+                    qDebug() << "AmazonCatalogApi: skipped row with ASIN-like product-id" << asin
+                             << "because type =" << (typeVal.isEmpty() ? "(empty)" : typeVal);
                 }
             }
         }
 
         qDebug() << "AmazonCatalogApi: fetchAllSkusViaReport complete."
-                 << "Total lines:" << lines.size()
-                 << "Extracted ASINs:" << asinToSku->size()
-                 << "GTINs from report:" << gtinRows
-                 << "Skipped rows:" << skippedRows
+                 << "Total lines:" << lines.size() << "Extracted ASINs:" << asinToSku->size()
+                 << "GTINs from report:" << gtinRows << "Skipped rows:" << skippedRows
                  << "Non-ASIN rows:" << nonAsinRows;
     }
     co_return;

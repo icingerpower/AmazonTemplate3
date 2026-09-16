@@ -6,29 +6,135 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>800</width>
+    <width>938</width>
     <height>600</height>
    </rect>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout_3">
    <item>
+    <widget class="QTableView" name="tableNewPrices">
+     <property name="sizePolicy">
+      <sizepolicy hsizetype="Expanding" vsizetype="Maximum">
+       <horstretch>0</horstretch>
+       <verstretch>0</verstretch>
+      </sizepolicy>
+     </property>
+    </widget>
+   </item>
+   <item>
     <widget class="QSplitter" name="splitter">
      <property name="orientation">
       <enum>Qt::Orientation::Vertical</enum>
      </property>
-     <widget class="QWidget" name="layoutWidget">
-      <layout class="QVBoxLayout" name="verticalLayout_2">
+     <widget class="QGroupBox" name="groupBox">
+      <property name="title">
+       <string>Filtering</string>
+      </property>
+      <layout class="QVBoxLayout" name="verticalLayout">
        <item>
-        <layout class="QHBoxLayout" name="horizontalLayout_2">
+        <layout class="QHBoxLayout" name="horizontalLayout">
          <item>
-          <widget class="QPushButton" name="buttonRefreshRate">
+          <widget class="QLabel" name="labelFilter">
            <property name="text">
-            <string>Refresh rate</string>
+            <string>Filter</string>
            </property>
           </widget>
          </item>
          <item>
-          <widget class="QComboBox" name="comboBoxCli"/>
+          <widget class="QComboBox" name="comboBoxFilters"/>
+         </item>
+         <item>
+          <widget class="QPushButton" name="buttonAddNewFilter">
+           <property name="text">
+            <string>Add new</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="buttonEditFilters">
+           <property name="toolTip">
+            <string>Show the different filter and allow do remove some (Default filter can't be removed)</string>
+           </property>
+           <property name="text">
+            <string>Edit</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="horizontalSpacer">
+           <property name="orientation">
+            <enum>Qt::Orientation::Horizontal</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>40</width>
+             <height>20</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+         <item>
+          <widget class="QPushButton" name="buttonRetrieveData">
+           <property name="text">
+            <string>Retrieve data</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="horizontalLayout_2">
+         <item>
+          <widget class="QLabel" name="label_8">
+           <property name="text">
+            <string>SKU</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLineEdit" name="lineEditSkuToContain">
+           <property name="toolTip">
+            <string>Part of the SKU it should contain</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLabel" name="label_9">
+           <property name="text">
+            <string>Title</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLineEdit" name="lineEditTitle"/>
+         </item>
+         <item>
+          <widget class="QLabel" name="label_3">
+           <property name="text">
+            <string>Product type</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="ProductTypeSelector" name="comboBoxProductType"/>
+         </item>
+         <item>
+          <widget class="QLabel" name="label_4">
+           <property name="text">
+            <string>Brand</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QComboBox" name="comboBoxBrand"/>
+         </item>
+         <item>
+          <widget class="QLabel" name="labelRegion">
+           <property name="text"><string>Region</string></property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QComboBox" name="comboBoxRegion"/>
          </item>
          <item>
           <spacer name="horizontalSpacer_2">
@@ -46,40 +152,63 @@
         </layout>
        </item>
        <item>
-        <widget class="QTableView" name="tableViewCurrenceRates"/>
-       </item>
-      </layout>
-     </widget>
-     <widget class="QWidget" name="layoutWidget">
-      <layout class="QVBoxLayout" name="verticalLayout">
-       <item>
-        <layout class="QHBoxLayout" name="horizontalLayout">
+        <layout class="QHBoxLayout" name="horizontalLayout_4">
          <item>
-          <widget class="QPushButton" name="buttonRetrieve">
+          <widget class="QLabel" name="label_6">
            <property name="text">
-            <string>Retrieve</string>
+            <string>Size from</string>
            </property>
           </widget>
          </item>
          <item>
-          <widget class="QPushButton" name="buttonUpdate">
+          <widget class="QLineEdit" name="lineEditSizeFrom"/>
+         </item>
+         <item>
+          <widget class="QLabel" name="label_7">
            <property name="text">
-            <string>Update</string>
+            <string>Size to</string>
            </property>
           </widget>
          </item>
          <item>
-          <widget class="QLabel" name="labelSourceCountry">
+          <widget class="QLineEdit" name="lineEditSizeTo"/>
+         </item>
+         <item>
+          <widget class="QLabel" name="label">
            <property name="text">
-            <string>Source (never updated):</string>
+            <string>Min price</string>
            </property>
           </widget>
          </item>
          <item>
-          <widget class="QComboBox" name="comboBoxSourceCountry"/>
+          <widget class="QDoubleSpinBox" name="spinBoxPriceMin"/>
          </item>
          <item>
-          <spacer name="horizontalSpacer">
+          <widget class="QLabel" name="label_2">
+           <property name="text">
+            <string>Max price</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QDoubleSpinBox" name="spinBoxPriceMax"/>
+         </item>
+         <item>
+          <widget class="QLabel" name="label_5">
+           <property name="text">
+            <string>Min day inv.</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QSpinBox" name="spinBoxInvLeftDays">
+           <property name="toolTip">
+            <string>The number of inventory left in days</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="horizontalSpacer_4">
            <property name="orientation">
             <enum>Qt::Orientation::Horizontal</enum>
            </property>
@@ -94,7 +223,89 @@
         </layout>
        </item>
        <item>
-        <widget class="QTableView" name="tableViewPricing"/>
+        <layout class="QHBoxLayout" name="horizontalLayout_3">
+         <item>
+          <widget class="QRadioButton" name="radioIncreaseOnly">
+           <property name="text">
+            <string>Increase price only</string>
+           </property>
+           <property name="checked">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QRadioButton" name="radioDecreaseOnly">
+           <property name="text">
+            <string>Decrease price only</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QRadioButton" name="radioIncreaseDecrease">
+           <property name="text">
+            <string>Increase or decrease</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="horizontalSpacer_3">
+           <property name="orientation">
+            <enum>Qt::Orientation::Horizontal</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>40</width>
+             <height>20</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+        </layout>
+       </item>
+      </layout>
+     </widget>
+     <widget class="QWidget" name="layoutWidget">
+      <layout class="QVBoxLayout" name="verticalLayout_2">
+       <item>
+        <layout class="QHBoxLayout" name="horizontalLayout_5">
+         <item>
+          <widget class="QPushButton" name="pushButtonUpdatePrices">
+           <property name="toolTip">
+            <string>Update all of the table prices to amazon</string>
+           </property>
+           <property name="text">
+            <string>Update</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="buttonPriceUpdateReset">
+           <property name="toolTip">
+            <string>Cancel the suggested price update for the selection, so price won't be updated</string>
+           </property>
+           <property name="text">
+            <string>Reset pricing</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="horizontalSpacer_5">
+           <property name="orientation">
+            <enum>Qt::Orientation::Horizontal</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>40</width>
+             <height>20</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <widget class="QTableView" name="tableViewPricesToUpdate"/>
        </item>
       </layout>
      </widget>
@@ -102,6 +313,13 @@
    </item>
   </layout>
  </widget>
+ <customwidgets>
+  <customwidget>
+   <class>ProductTypeSelector</class>
+   <extends>QComboBox</extends>
+   <header>gui/panes/ProductTypeSelector.h</header>
+  </customwidget>
+ </customwidgets>
  <resources/>
  <connections/>
 </ui>

@@ -49,6 +49,14 @@ add_library(AmazonTemplate3Lib STATIC
   apis/AmazonWarningsApi.cpp
   apis/AmazonInventoryApi.h
   apis/AmazonInventoryApi.cpp
+  pricing/AmazonPricingRepository.h
+  pricing/AmazonPricingRepository.cpp
+  pricing/PricingData.h
+  pricing/PricingData.cpp
+  pricing/AmazonDataCache.h
+  pricing/AmazonDataCache.cpp
+  pricing/TableAmazonPricing.h
+  pricing/TableAmazonPricing.cpp
   apis/AmazonPricingApi.h
   apis/AmazonPricingApi.cpp
   apis/TemuInventoryApi.h
@@ -175,6 +183,14 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   apis/AmazonWarningsApi.cpp
   apis/AmazonInventoryApi.h
   apis/AmazonInventoryApi.cpp
+  pricing/AmazonPricingRepository.h
+  pricing/AmazonPricingRepository.cpp
+  pricing/PricingData.h
+  pricing/PricingData.cpp
+  pricing/AmazonDataCache.h
+  pricing/AmazonDataCache.cpp
+  pricing/TableAmazonPricing.h
+  pricing/TableAmazonPricing.cpp
   apis/AmazonPricingApi.h
   apis/AmazonPricingApi.cpp
   apis/TemuInventoryApi.h

@@ -9,6 +9,8 @@
 #include "../apis/AmazonInventoryApi.h"
 #include "AbstractInventorySourceFactory.h"
 #include "secrets/CredentialManager.h"
+#include "pricing/AmazonDataCache.h"
+#include <QFileInfo>
 
 namespace {
 
@@ -58,6 +60,11 @@ AmazonFbaInventorySource::AmazonFbaInventorySource(const QString &lwaClientId,
 AmazonFbaInventorySource::~AmazonFbaInventorySource()
 {
     delete m_api;
+    delete m_dataCache;
+}
+void AmazonFbaInventorySource::setDataCache(AmazonDataCache *cache)
+{
+    delete m_dataCache; m_dataCache = cache; m_api->setDataCache(cache);
 }
 
 QString AmazonFbaInventorySource::lastError() const
@@ -187,6 +194,9 @@ QList<AbstractInventorySource *> AmazonFbaInventorySourceFactory::createInstance
         qDebug() << "AmazonFbaInventorySourceFactory: EU LWA credentials incomplete — 0 sources";
         return out;
     }
-    out.append(new AmazonFbaInventorySource(clientId, clientSecret, refreshToken, sellerId));
+    auto *source = new AmazonFbaInventorySource(clientId, clientSecret, refreshToken, sellerId);
+    source->setDataCache(new AmazonDataCache(QFileInfo(settings->fileName()).absoluteDir(),
+        sellerId + "|" + settings->value("AmazonApi/na/sellerId").toString()));
+    out.append(source);
     return out;
 }

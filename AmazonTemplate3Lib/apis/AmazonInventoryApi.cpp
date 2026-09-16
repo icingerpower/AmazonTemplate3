@@ -7,6 +7,9 @@
 // form of the same GCC 13 bug).
 #pragma GCC optimize("O1")
 #include "AmazonInventoryApi.h"
+#include "ReadRequestControl.h"
+#include "pricing/AmazonDataCache.h"
+#include "AmazonMarketplace.h"
 
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
@@ -107,10 +110,11 @@ QNetworkAccessManager *AmazonInventoryApi::_nam()
 // LWA access token (single-region EU variant)
 // ---------------------------------------------------------------------------
 
-QCoro::Task<void> AmazonInventoryApi::_getAccessToken(QString *out)
-{
-    if (!m_accessToken.isEmpty() && m_accessTokenExpiry.isValid()
-        && QDateTime::currentDateTimeUtc() < m_accessTokenExpiry) {
+QCoro::Task<void> AmazonInventoryApi::_getAccessToken(QString *out) {
+    if (readCancelled())
+        co_return;
+    if (!m_accessToken.isEmpty() && m_accessTokenExpiry.isValid() &&
+        QDateTime::currentDateTimeUtc() < m_accessTokenExpiry) {
         *out = m_accessToken;
         co_return;
     }
@@ -132,7 +136,17 @@ QCoro::Task<void> AmazonInventoryApi::_getAccessToken(QString *out)
     const QByteArray payload = body.toString(QUrl::FullyEncoded).toUtf8();
 
     QNetworkReply *reply = _nam()->post(req, payload);
-    co_await qCoro(reply).waitForFinished();
+    co_await AmazonRead::wait(reply, m_cancelled);
+    if (readCancelled() || reply->error() != QNetworkReply::NoError) {
+        m_lastError = readCancelled() ? QStringLiteral("Cancelled") : reply->errorString();
+        // HTTP error replies (e.g. 429) still go through the bounded retry path.
+        const int responseStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (readCancelled() || responseStatus == 0 ||
+            reply->error() == QNetworkReply::OperationCanceledError) {
+            reply->deleteLater();
+            co_return;
+        }
+    }
 
     const QByteArray data = reply->readAll();
     reply->deleteLater();
@@ -144,12 +158,12 @@ QCoro::Task<void> AmazonInventoryApi::_getAccessToken(QString *out)
         const QString errCode = obj.value("error").toString();
         const QString errDesc = obj.value("error_description").toString();
         m_lastError = errDesc.isEmpty() ? errCode : errDesc;
-        if (m_lastError.isEmpty()) m_lastError = QStringLiteral("LWA token exchange failed");
+        if (m_lastError.isEmpty())
+            m_lastError = QStringLiteral("LWA token exchange failed");
         qWarning() << "AmazonInventoryApi: LWA token exchange failed:" << m_lastError
                    << "Response:" << QString::fromUtf8(data.left(500));
     } else {
-        qDebug() << "AmazonInventoryApi: LWA token obtained, expires_in ="
-                 << obj.value("expires_in").toInt();
+        qDebug() << "AmazonInventoryApi: LWA token obtained, expires_in =" << obj.value("expires_in").toInt();
     }
     const int expiresIn = obj.value("expires_in").toInt(3600);
     const int cacheSecs = qMin(expiresIn - 300, 55 * 60);
@@ -162,14 +176,16 @@ QCoro::Task<void> AmazonInventoryApi::_getAccessToken(QString *out)
 // FBA inventory
 // ---------------------------------------------------------------------------
 
-QCoro::Task<void> AmazonInventoryApi::fetchFbaInventory(QStringList skus,
-                                                        QList<InventorySummary> *out,
-                                                        std::function<void(const QString &)> onProgress)
-{
+QCoro::Task<void> AmazonInventoryApi::fetchFbaInventory(QStringList skus, QList<InventorySummary> *out,
+                                                        std::function<void(const QString &)> onProgress) {
     auto progress = [&onProgress](const QString &msg) {
-        if (onProgress) onProgress(msg);
+        if (onProgress)
+            onProgress(msg);
     };
 
+    m_lastError.clear();
+    if (readCancelled())
+        co_return;
     if (skus.isEmpty())
         co_return;
 
@@ -184,9 +200,12 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventory(QStringList skus,
 
     static const int kChunk = 50; // API limit per call
     for (int start = 0; start < skus.size(); start += kChunk) {
+        if (readCancelled())
+            co_return;
         const QStringList chunk = skus.mid(start, kChunk);
 
-        QUrl url(QStringLiteral("https://%1/fba/inventory/v1/summaries").arg(endpointForMarketplace(m_marketplaceId)));
+        QUrl url(QStringLiteral("https://%1/fba/inventory/v1/summaries")
+                     .arg(endpointForMarketplace(m_marketplaceId)));
         QUrlQuery query;
         query.addQueryItem("details", "true");
         query.addQueryItem("granularityType", "Marketplace");
@@ -203,7 +222,17 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventory(QStringList skus,
             req.setRawHeader("Accept", "application/json");
 
             QNetworkReply *reply = _nam()->get(req);
-            co_await qCoro(reply).waitForFinished();
+            co_await AmazonRead::wait(reply, m_cancelled);
+            if (readCancelled() || reply->error() != QNetworkReply::NoError) {
+                m_lastError = readCancelled() ? QStringLiteral("Cancelled") : reply->errorString();
+                // HTTP error replies (e.g. 429) still go through the bounded retry path.
+                const int responseStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+                if (readCancelled() || responseStatus == 0 ||
+                    reply->error() == QNetworkReply::OperationCanceledError) {
+                    reply->deleteLater();
+                    co_return;
+                }
+            }
 
             const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             const QByteArray data = reply->readAll();
@@ -213,10 +242,12 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventory(QStringList skus,
                 qWarning() << "AmazonInventoryApi::fetchFbaInventory: 429 throttled, attempt"
                            << (attempt + 1);
                 if (attempt < 2) {
-                    QTimer timer;
-                    timer.setSingleShot(true);
-                    timer.start(2000);
-                    co_await qCoro(&timer).waitForTimeout();
+                    if (m_readProgress)
+                        m_readProgress(QStringLiteral("Amazon throttled the request; retry %1/3 in 2 seconds")
+                                           .arg(attempt + 2));
+                    co_await AmazonRead::delay(2000, m_cancelled);
+                    if (readCancelled())
+                        co_return;
                     continue;
                 }
                 m_lastError = QStringLiteral("FBA inventory throttled (429)");
@@ -226,43 +257,49 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventory(QStringList skus,
             if (status != 200) {
                 const QString body = QString::fromUtf8(data.left(800));
                 m_lastError = QStringLiteral("HTTP %1 — %2").arg(status).arg(body);
-                qWarning() << "AmazonInventoryApi::fetchFbaInventory: HTTP" << status
-                           << "Response:" << body;
+                qWarning() << "AmazonInventoryApi::fetchFbaInventory: HTTP" << status << "Response:" << body;
                 co_return;
             }
 
+            m_lastError.clear();
             const QJsonDocument doc = QJsonDocument::fromJson(data);
             const QJsonObject payload = doc.object().value("payload").toObject();
             const QJsonArray summaries = payload.value("inventorySummaries").toArray();
             for (const QJsonValue &v : summaries) {
                 const QJsonObject o = v.toObject();
                 InventorySummary s;
-                s.sku  = o.value("sellerSku").toString();
+                s.sku = o.value("sellerSku").toString();
                 s.asin = o.value("asin").toString();
                 const QJsonObject det = o.value("inventoryDetails").toObject();
                 const QJsonObject res = det.value("reservedQuantity").toObject();
                 const int fulfillable = det.value("fulfillableQuantity").toInt();
-                const int fcTransfer  = res.value("pendingTransshipmentQuantity").toInt();
-                const int custOrders  = res.value("pendingCustomerOrderQuantity").toInt();
+                const int fcTransfer = res.value("pendingTransshipmentQuantity").toInt();
+                const int custOrders = res.value("pendingCustomerOrderQuantity").toInt();
                 const int fcProcessing = res.value("fcProcessingQuantity").toInt();
-                const int researching = det.value("researchingQuantity").toObject()
-                                           .value("totalResearchingQuantity").toInt();
+                const int researching =
+                    det.value("researchingQuantity").toObject().value("totalResearchingQuantity").toInt();
                 // FC-transfer units stay sellable (they're only moving between
                 // fulfillment centres), so count them as available.
                 s.available = fulfillable + fcTransfer;
-                s.inbound   = det.value("inboundWorkingQuantity").toInt()
-                            + det.value("inboundShippedQuantity").toInt()
-                            + det.value("inboundReceivingQuantity").toInt();
+                s.inbound = det.value("inboundWorkingQuantity").toInt() +
+                            det.value("inboundShippedQuantity").toInt() +
+                            det.value("inboundReceivingQuantity").toInt();
                 if (fcTransfer > 0 || custOrders > 0 || fcProcessing > 0 || researching > 0)
                     progress(QStringLiteral("    %1: fulfillable %2 + FC transfer %3 = %4 "
                                             "(customer orders %5, FC processing %6, researching %7)")
-                             .arg(s.sku).arg(fulfillable).arg(fcTransfer).arg(s.available)
-                             .arg(custOrders).arg(fcProcessing).arg(researching));
+                                 .arg(s.sku)
+                                 .arg(fulfillable)
+                                 .arg(fcTransfer)
+                                 .arg(s.available)
+                                 .arg(custOrders)
+                                 .arg(fcProcessing)
+                                 .arg(researching));
                 out->append(s);
             }
             break; // chunk done
         }
     }
+    cacheInventory(*out);
     co_return;
 }
 
@@ -594,6 +631,7 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventoryReport(
             m_lastError = savedError;
         }
     }
+    cacheInventory(*out, false);
     co_return;
 }
 
@@ -942,10 +980,34 @@ QCoro::Task<void> AmazonInventoryApi::fetchInventoryAgeReport(
 // Sales units
 // ---------------------------------------------------------------------------
 
-QCoro::Task<void> AmazonInventoryApi::fetchSalesUnits(QString sku, int days,
-                                                       QStringList marketplaceIds, int *out)
+int AmazonInventoryApi::parseSalesUnits(const QByteArray &body)
 {
+    QJsonParseError error;
+    const auto doc=QJsonDocument::fromJson(body,&error);
+    if(error.error!=QJsonParseError::NoError || !doc.isObject() || !doc.object().value("payload").isArray())return -1;
+    const auto payload=doc.object().value("payload").toArray();
+    if(payload.isEmpty())return 0;
+    const auto value=payload.first().toObject().value("unitCount");
+    if(!value.isDouble() || value.toDouble()<0 || value.toDouble()>2147483647.0 || value.toDouble()!=double(value.toInt(-1)))return -1;
+    return value.toInt();
+}
+
+void AmazonInventoryApi::cacheInventory(const QList<InventorySummary> &rows, bool live) const
+{
+    if (!m_dataCache) return;
+    const auto *market = AmazonMarketplace::forMarketplaceId(m_marketplaceId);
+    const QString pool = market && market->region() == AmazonMarketplace::Region::Europe && market->countryCode() != "GB"
+        ? "eu-mainland" : m_marketplaceId;
+    for (const auto &r : rows) m_dataCache->write(live ? "inventory" : "inventoryReport", AmazonDataCache::listingKey(pool,r.sku),
+        {{"available",r.available},{"inbound",r.inbound},{"asin",r.asin}},QDateTime::currentSecsSinceEpoch());
+}
+
+QCoro::Task<void> AmazonInventoryApi::fetchSalesUnits(QString sku, int days, QStringList marketplaceIds,
+                                                      int *out) {
     *out = -1;
+    m_lastError.clear();
+    if (readCancelled())
+        co_return;
 
     if (marketplaceIds.isEmpty())
         marketplaceIds = QStringList{m_marketplaceId};
@@ -958,22 +1020,25 @@ QCoro::Task<void> AmazonInventoryApi::fetchSalesUnits(QString sku, int days,
         co_return;
     }
 
-    const QDateTime endDt   = QDateTime::currentDateTimeUtc();
+    const QDateTime endDt = QDateTime::currentDateTimeUtc();
     const QDateTime startDt = endDt.addDays(-days);
-    const QString fmt      = QStringLiteral("yyyy-MM-ddThh:mm:ssZ");
+    const QString fmt = QStringLiteral("yyyy-MM-ddThh:mm:ssZ");
     const QString interval = startDt.toString(fmt) + QStringLiteral("--") + endDt.toString(fmt);
 
-    int total   = 0;
-    bool anyOk  = false;
+    int total = 0;
+    bool anyOk = false;
 
     for (const QString &mpId : marketplaceIds) {
+        if (readCancelled())
+            co_return;
         int status = 0;
         QByteArray data;
 
         for (int attempt = 0; attempt < 3; ++attempt) {
             co_await _getAccessToken(&token);
 
-            QUrl url(QStringLiteral("https://%1/sales/v1/orderMetrics").arg(endpointForMarketplace(m_marketplaceId)));
+            QUrl url(QStringLiteral("https://%1/sales/v1/orderMetrics")
+                         .arg(endpointForMarketplace(m_marketplaceId)));
             QUrlQuery query;
             query.addQueryItem("marketplaceIds", mpId);
             query.addQueryItem("interval", interval);
@@ -986,20 +1051,32 @@ QCoro::Task<void> AmazonInventoryApi::fetchSalesUnits(QString sku, int days,
             req.setRawHeader("Accept", "application/json");
 
             QNetworkReply *reply = _nam()->get(req);
-            co_await qCoro(reply).waitForFinished();
+            co_await AmazonRead::wait(reply, m_cancelled);
+            if (readCancelled() || reply->error() != QNetworkReply::NoError) {
+                m_lastError = readCancelled() ? QStringLiteral("Cancelled") : reply->errorString();
+                // HTTP error replies (e.g. 429) still go through the bounded retry path.
+                const int responseStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+                if (readCancelled() || responseStatus == 0 ||
+                    reply->error() == QNetworkReply::OperationCanceledError) {
+                    reply->deleteLater();
+                    co_return;
+                }
+            }
 
             status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             data = reply->readAll();
             reply->deleteLater();
 
             if (status == 429) {
-                qWarning() << "AmazonInventoryApi::fetchSalesUnits: 429 throttled for" << mpId
-                           << "attempt" << (attempt + 1);
+                qWarning() << "AmazonInventoryApi::fetchSalesUnits: 429 throttled for" << mpId << "attempt"
+                           << (attempt + 1);
                 if (attempt < 2) {
-                    QTimer timer;
-                    timer.setSingleShot(true);
-                    timer.start(3000);
-                    co_await qCoro(&timer).waitForTimeout();
+                    if (m_readProgress)
+                        m_readProgress(QStringLiteral("Amazon throttled the request; retry %1/3 in 3 seconds")
+                                           .arg(attempt + 2));
+                    co_await AmazonRead::delay(3000, m_cancelled);
+                    if (readCancelled())
+                        co_return;
                     continue;
                 }
             }
@@ -1007,19 +1084,28 @@ QCoro::Task<void> AmazonInventoryApi::fetchSalesUnits(QString sku, int days,
         }
 
         if (status != 200) {
-            qWarning() << "AmazonInventoryApi::fetchSalesUnits: HTTP" << status
-                       << "for" << mpId << QString::fromUtf8(data.left(200));
+            m_lastError = QStringLiteral("Sales request failed: HTTP %1 for %2").arg(status).arg(mpId);
+            qWarning() << "AmazonInventoryApi::fetchSalesUnits: HTTP" << status << "for" << mpId
+                       << QString::fromUtf8(data.left(200));
             continue; // skip this marketplace, try the rest
         }
 
-        const QJsonArray payload = QJsonDocument::fromJson(data).object()
-                                       .value("payload").toArray();
-        if (!payload.isEmpty()) {
-            total += payload.first().toObject().value("unitCount").toInt();
-            anyOk = true;
-        } else {
-            anyOk = true; // valid response, just 0 sales
+        m_lastError.clear();
+        const int units = parseSalesUnits(data);
+        if (units < 0) {
+            m_lastError = QStringLiteral("Malformed sales response for %1").arg(mpId);
+            continue;
         }
+        if (m_dataCache && days == 90)
+            m_dataCache->write("sales90", AmazonDataCache::listingKey(mpId, sku),
+                               {{"units", units},
+                                {"days", 90},
+                                {"metric", "orderUnits"},
+                                {"startUtc", startDt.toString(Qt::ISODate)},
+                                {"endUtc", endDt.toString(Qt::ISODate)}},
+                               QDateTime::currentSecsSinceEpoch());
+        total += units;
+        anyOk = true;
     }
 
     if (anyOk)

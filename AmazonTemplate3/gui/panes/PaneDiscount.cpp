@@ -1,5 +1,5 @@
 // GCC 13 ICE workaround: coroutines with non-trivially-destructible frame
-// locals miscompile at -O2/-O3. Force O1 (same as PanePricing).
+// locals miscompile at -O2/-O3. Force O1 (same as PanePricingSync).
 #pragma GCC optimize("O1")
 #include "PaneDiscount.h"
 #include "ui_PaneDiscount.h"
@@ -8,6 +8,8 @@
 #include "ProgressDialog.h"
 #include "AmazonInventoryApi.h"
 #include "AmazonPricingApi.h"
+#include "pricing/AmazonDataCache.h"
+#include "workingdirectory/WorkingDirectoryManager.h"
 #include "AmazonCatalogApi.h"
 #include "SettingsTable.h"
 
@@ -174,7 +176,7 @@ void PaneDiscount::_buildCountriesModel()
 QCoro::Task<void> PaneDiscount::_onLoad()
 {
     // --- Collect checked countries, resolving currency + EUR rate from the
-    //     shared (PanePricing) rate store, which loads from QSettings. ---
+    //     shared (PanePricingSync) rate store, which loads from QSettings. ---
     struct Country { QString mp; QString country; QString currency; double rate; };
     QList<Country> countries;
     {
@@ -242,6 +244,10 @@ QCoro::Task<void> PaneDiscount::_onLoad()
         st->value(SettingsTable::KEY_EU_SELLER_ID),
         st->value(SettingsTable::KEY_NA_SELLER_ID),
         this);
+    AmazonDataCache sharedPriceCache(WorkingDirectoryManager::instance()->workingDir(),
+        st->value(SettingsTable::KEY_EU_SELLER_ID) + "|" + st->value(SettingsTable::KEY_NA_SELLER_ID));
+    pricingApi.setDataCache(&sharedPriceCache);
+    inventoryApi.setDataCache(&sharedPriceCache);
     AmazonCatalogApi catalogApi(
         st->value(SettingsTable::KEY_LWA_CLIENT_ID),
         st->value(SettingsTable::KEY_LWA_CLIENT_SECRET),
@@ -436,6 +442,9 @@ QCoro::Task<void> PaneDiscount::_onApply()
         st->value(SettingsTable::KEY_EU_SELLER_ID),
         st->value(SettingsTable::KEY_NA_SELLER_ID),
         this);
+    AmazonDataCache sharedPriceCache(WorkingDirectoryManager::instance()->workingDir(),
+        st->value(SettingsTable::KEY_EU_SELLER_ID) + "|" + st->value(SettingsTable::KEY_NA_SELLER_ID));
+    pricingApi.setDataCache(&sharedPriceCache);
 
     const QDateTime startAt = QDateTime::currentDateTimeUtc();
     const QDateTime endAt   = startAt.addDays(days);

@@ -2,17 +2,35 @@
 #define AMAZONPRICINGAPI_H
 
 #include <QDateTime>
+#include <QJsonObject>
+#include <QJsonArray>
 #include <QObject>
+#include <memory>
 #include <QString>
 
 #include <QCoro/QCoroTask>
 
 class QNetworkAccessManager;
+class AmazonDataCache;
 
 class AmazonPricingApi : public QObject
 {
     Q_OBJECT
 public:
+    // Borrowed transport; caller keeps it alive through all pending requests.
+    void setNetworkAccessManager(QNetworkAccessManager *network) { m_nam = network; }
+    // Optional shared observation cache. Omit for mandatory live revalidation.
+    void setDataCache(AmazonDataCache *cache) { m_dataCache = cache; }
+    // Parse only an offer/current seller price. Reference attributes.list_price
+    // is never a fallback. Returns -1 when no current price is present.
+    // Pure parser, also usable for cached responses and offline fixture tests.
+    static double parseListingPrice(const QByteArray &json,
+                                    const QString &marketplaceId,
+                                    QString *productTypeOut = nullptr);
+    static QJsonArray priceOffers(const QString &marketplaceId, const QString &currency,
+                                 double newPrice, const QJsonArray &existingOffers,
+                                 QString *error = nullptr);
+
     explicit AmazonPricingApi(const QString &lwaClientId,
                               const QString &lwaClientSecret,
                               const QString &lwaRefreshTokenEu,
@@ -32,7 +50,8 @@ public:
                                         double *priceOut, bool *existsOut,
                                         QString *productTypeOut = nullptr,
                                         double *minPriceOut = nullptr,
-                                        double *maxPriceOut = nullptr);
+                                        double *maxPriceOut = nullptr,
+                                        QJsonObject *listingOut = nullptr, std::shared_ptr<bool> cancelled = {});
 
     // PATCH the purchasable_offer attribute to set a new B2C price.
     // currency: the marketplace currency code (e.g. "EUR", "GBP").
@@ -41,7 +60,9 @@ public:
     // GCC 13 ICE workaround: params passed by value.
     QCoro::Task<void> patchListingPrice(QString marketplaceId, QString sku,
                                         QString productType, QString currency,
-                                        double newPrice, bool *success);
+                                        double newPrice, bool *success,
+                                        QJsonArray existingOffers = {},
+                                        std::shared_ptr<bool> cancelled = {});
 
     // PATCH purchasable_offer to schedule a time-boxed sale (strike-through)
     // price. listPrice keeps our_price (the regular price); discountedPrice is
@@ -85,6 +106,7 @@ private:
     QNetworkAccessManager *m_nam = nullptr;
     QDateTime              m_lastRequestTime;
     QString                m_lastError;
+    AmazonDataCache       *m_dataCache = nullptr; // borrowed; caller owns lifetime
 };
 
 #endif // AMAZONPRICINGAPI_H

@@ -11,15 +11,25 @@
 #include <QJsonObject>
 
 #include <functional>
+#include <memory>
 
 #include <QCoro/QCoroTask>
 
 class QNetworkAccessManager;
+class AmazonDataCache;
 
 class AmazonInventoryApi : public QObject
 {
     Q_OBJECT
 public:
+    // Publish fresh observations for other panes without changing this caller's
+    // report/live refresh behavior or legacy cache invalidation semantics.
+    void setDataCache(AmazonDataCache *cache) { m_dataCache = cache; }
+    void setReadCancellation(std::shared_ptr<bool> cancelled) { m_cancelled = std::move(cancelled); }
+    void setReadProgress(std::function<void(const QString &)> progress) { m_readProgress = std::move(progress); }
+    // Borrowed manager for offline transport tests; set before starting a request.
+    void setNetworkAccessManager(QNetworkAccessManager *manager) { m_nam = manager; }
+    static int parseSalesUnits(const QByteArray &body); // -1 for malformed/incomplete responses
     struct InventorySummary {
         QString sku;
         QString asin;
@@ -119,6 +129,11 @@ public:
     static QString endpointForMarketplace(const QString &marketplaceId);
 
 private:
+    AmazonDataCache *m_dataCache = nullptr;
+    std::shared_ptr<bool> m_cancelled;
+    std::function<void(const QString &)> m_readProgress;
+    bool readCancelled() const { return m_cancelled && *m_cancelled; }
+    void cacheInventory(const QList<InventorySummary> &rows, bool live = true) const;
     QString m_lwaClientId;
     QString m_lwaClientSecret;
     QString m_lwaRefreshToken;

@@ -7,6 +7,7 @@
 #include "AbstractInventorySourceFactory.h"
 
 class AmazonInventoryApi;
+class AmazonDataCache;
 
 // Amazon FBA (EU pool) as fulfillment/inventory source. Created by
 // AmazonFbaInventorySourceFactory from the "AmazonApi/*" settings keys.
@@ -16,6 +17,7 @@ public:
     AmazonFbaInventorySource(const QString &lwaClientId, const QString &lwaClientSecret,
                              const QString &lwaRefreshToken, const QString &sellerId);
     ~AmazonFbaInventorySource() override;
+    void setDataCache(AmazonDataCache *cache);
 
     QString id()          const override { return QStringLiteral("amazon_fba_eu"); }
     QString displayName() const override { return QStringLiteral("Amazon FBA EU"); }
@@ -34,6 +36,7 @@ public:
 
 private:
     AmazonInventoryApi *m_api = nullptr; // owned
+    AmazonDataCache *m_dataCache = nullptr; // owned, optional
 };
 
 // Registered explicitly in AbstractInventorySourceFactory::getFactories()

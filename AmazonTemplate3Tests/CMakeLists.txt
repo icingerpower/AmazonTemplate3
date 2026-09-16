@@ -26,7 +26,7 @@ endif()
 enable_testing()
 
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Network Test Gui)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Network Test Gui)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Network Test Gui Widgets)
 find_package(QCoro6 REQUIRED COMPONENTS Core)
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
@@ -120,8 +120,33 @@ target_include_directories(TableReviewsTests PRIVATE ../AmazonTemplate3Lib)
 target_link_libraries(TableReviewsTests PRIVATE Qt${QT_VERSION_MAJOR}::Test Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui)
 add_test(NAME TableReviewsTests COMMAND TableReviewsTests)
 
+# Pure pricing-parser tests: no network calls or application startup.
+add_executable(AmazonPricingApiTests tst_amazonpricingapi.cpp)
+target_link_libraries(AmazonPricingApiTests PRIVATE AmazonTemplate3Lib_Tests Qt6::Test)
+target_include_directories(AmazonPricingApiTests PRIVATE ../AmazonTemplate3Lib)
+add_test(NAME AmazonPricingApiTests COMMAND AmazonPricingApiTests)
+
 option(DO_REAL_AMAZON_TESTS "Run real Amazon SP-API contract tests" OFF)
 if(DO_REAL_AMAZON_TESTS)
     target_compile_definitions(TreeSizingAsinsTests PRIVATE DO_REAL_AMAZON_TESTS=1)
 endif()
 
+add_executable(PricingEditorTests tst_pricingeditor.cpp
+    ../AmazonTemplate3/gui/panes/PanePricing.cpp
+    ../AmazonTemplate3/gui/panes/ProductTypeSelector.h
+    ../AmazonTemplate3/gui/panes/PanePricing.h
+    ../AmazonTemplate3/gui/panes/PanePricing.ui
+    ../AmazonTemplate3/gui/panes/TableCurrencyRates.cpp
+    ../AmazonTemplate3/gui/panes/ProgressDialog.cpp
+    ../AmazonTemplate3/SettingsTable.cpp
+    ../../common/workingdirectory/WorkingDirectoryManager.cpp)
+target_include_directories(PricingEditorTests PRIVATE ../AmazonTemplate3 ../AmazonTemplate3Lib ../../common)
+target_link_libraries(PricingEditorTests PRIVATE AmazonTemplate3Lib_Tests Qt6::Test Qt6::Widgets)
+add_test(NAME PricingEditorTests COMMAND PricingEditorTests)
+set_tests_properties(PricingEditorTests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(PricingRetrievalTests tst_pricingretrieval.cpp)
+target_include_directories(PricingRetrievalTests PRIVATE ../AmazonTemplate3 ../AmazonTemplate3Lib)
+target_link_libraries(PricingRetrievalTests PRIVATE AmazonTemplate3Lib_Tests Qt6::Test Qt6::Widgets)
+add_test(NAME PricingRetrievalTests COMMAND PricingRetrievalTests)
+set_tests_properties(PricingRetrievalTests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 15)
