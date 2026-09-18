@@ -4,6 +4,7 @@
 #pragma GCC optimize("O1")
 
 #include <QObject>
+#include <QDateTime>
 #include <QString>
 #include <QStringList>
 #include <QHash>
@@ -42,6 +43,7 @@ public:
         int quantity = 0;
         QString status;
         QString sku;
+        QDateTime orderDate;
     };
     QCoro::Task<QList<TemuOrder>> fetchUnshippedOrders();
     // Shipping address of an order (bg.order.shippinginfo.v2.get):

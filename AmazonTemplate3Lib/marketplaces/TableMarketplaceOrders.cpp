@@ -49,6 +49,9 @@ QVariant TableMarketplaceOrders::data(const QModelIndex &index, int role) const
             case ColTargetOrderId:  return order.targetOrderId;
             case ColTracking:       return order.trackingNumber;
             case ColTargetStore:    return order.targetStore;
+            case ColOrderDate:
+                if (role == Qt::EditRole) return order.orderDate;
+                return order.orderDate.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm"));
             default: break;
         }
     }
@@ -64,6 +67,7 @@ QVariant TableMarketplaceOrders::headerData(int section, Qt::Orientation orienta
             case ColTargetOrderId:  return tr("Target Order ID");
             case ColTracking:       return tr("Tracking Number");
             case ColTargetStore:    return tr("Target Store");
+            case ColOrderDate:      return tr("Order Date");
             default: break;
         }
     }

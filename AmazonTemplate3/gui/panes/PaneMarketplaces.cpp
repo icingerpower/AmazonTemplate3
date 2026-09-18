@@ -815,6 +815,7 @@ QCoro::Task<void> PaneMarketplaces::_onLoadOrders()
         row.goodsId = order.goodsId;
         row.skuId = order.skuId;
         row.quantity = order.quantity;
+        row.orderDate = order.orderDate;
 
         if (!_source()) {
             appendLog(tr("→ %1: no fulfillment source configured — cannot fetch tracking")
@@ -870,6 +871,7 @@ QCoro::Task<void> PaneMarketplaces::_onLoadOrders()
     }
 
     m_ordersModel->setOrders(orderRows);
+    ui->tableViewOrders->resizeColumnsToContents();
 
     if (barPtr) { barPtr->setRange(0, 1); barPtr->setValue(1); }
     setStatus(tr("Done."));

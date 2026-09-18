@@ -6,6 +6,7 @@
 // Plain value structs — no behaviour, no platform-specific fields.
 
 #include <QList>
+#include <QDateTime>
 #include <QString>
 #include <QtGlobal>
 #include <functional>
@@ -76,6 +77,7 @@ struct MarketOrder {
     qint64  skuId   = 0;   // marketplace-internal sku id
     int     quantity = 0;
     QString status;
+    QDateTime orderDate;
 };
 
 // Inventory of one SKU at a fulfillment source.

@@ -10,6 +10,7 @@
 #include <QJsonArray>
 #include <QJsonValue>
 #include <QDateTime>
+#include <QTimeZone>
 #include <QCryptographicHash>
 #include <QRegularExpression>
 #include <QDebug>
@@ -627,6 +628,12 @@ QCoro::Task<QList<TemuInventoryApi::TemuOrder>> TemuInventoryApi::fetchUnshipped
                 }
 
                 order.status = QString::number(finalStatus);
+                qint64 orderTime = parentObj.value(QStringLiteral("parentOrderMap")).toObject()
+                                      .value(QStringLiteral("parentOrderTime")).toVariant().toLongLong();
+                if (orderTime <= 0)
+                    orderTime = itemObj.value(QStringLiteral("orderCreateTime")).toVariant().toLongLong();
+                if (orderTime > 0)
+                    order.orderDate = QDateTime::fromSecsSinceEpoch(orderTime, QTimeZone::UTC);
                 order.quantity = itemObj.value(QStringLiteral("quantity")).toInt();
                 if (order.quantity <= 0) order.quantity = itemObj.value(QStringLiteral("goodsCount")).toInt();
 

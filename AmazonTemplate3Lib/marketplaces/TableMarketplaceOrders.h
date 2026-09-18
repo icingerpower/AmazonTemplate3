@@ -2,6 +2,7 @@
 #define TABLEMARKETPLACEORDERS_H
 
 #include <QAbstractTableModel>
+#include <QDateTime>
 #include <QList>
 #include <QString>
 #include <QHash>
@@ -16,7 +17,8 @@ public:
         ColTargetOrderId = 2,
         ColTracking = 3,
         ColTargetStore = 4,
-        ColCount = 5
+        ColOrderDate = 5,
+        ColCount = 6
     };
 
     struct OrderRow {
@@ -26,6 +28,7 @@ public:
         QString targetOrderId;  // e.g. "PO-..."
         QString trackingNumber;
         QString targetStore;
+        QDateTime orderDate;
 
         // Hidden fulfillment fields for sync
         QString marketplaceId;  // AbstractTargetMarketplace::id() the order belongs to

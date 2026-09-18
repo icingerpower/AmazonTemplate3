@@ -73,6 +73,7 @@ QCoro::Task<QList<MarketOrder>> TemuTargetMarketplace::fetchUnshippedOrders()
         o.skuId         = t.skuId;
         o.quantity      = t.quantity;
         o.status        = t.status;
+        o.orderDate     = t.orderDate;
         out.append(o);
     }
     qDebug() << "TemuTargetMarketplace" << id() << "unshipped orders:" << out.size();
