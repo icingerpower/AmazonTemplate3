@@ -75,13 +75,18 @@ public:
     //   forParents=true  → include rows where !hasParent
     //   forImages=true   → include rows where imageCount < max image count for that color
     // A target may have both flags set simultaneously.
-    QList<FixTarget> getFixTargets(bool forParents, bool forImages) const;
+    // forcedRow >= 0: force the requested repairs for only this row, even when
+    // its health checks pass. Still skips inactive, unloaded and missing cells.
+    QList<FixTarget> getFixTargets(bool forParents, bool forImages,
+                                  int forcedRow = -1) const;
 
     // Returns the ASIN with the highest imageCount among rows whose lowercase
     // color equals colorKey in marketplace mktIdx. Used to pick a "good" sibling
     // ASIN to copy image URLs from. Returns an empty string when nothing useful
-    // exists (no row for that color, all MISSING, or only the row itself has imgs).
-    QString bestImageSourceAsin(const QString &colorKey, int mktIdx) const;
+    // exists. excludedAsin lets a forced repair require another sibling even
+    // when the selected child has the same image count as the family maximum.
+    QString bestImageSourceAsin(const QString &colorKey, int mktIdx,
+                               const QString &excludedAsin = {}) const;
 
     // Read-only access to all rows (used by PaneSizing's fix workflow).
     const QList<ChildEntry> &rows() const { return m_rows; }

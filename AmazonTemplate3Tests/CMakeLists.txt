@@ -114,6 +114,11 @@ target_link_libraries(TreeSizingAsinsTests PRIVATE
     QCoro6::Core)
 add_test(NAME TreeSizingAsinsTests COMMAND TreeSizingAsinsTests)
 
+add_executable(BrokenChildTableTests tst_brokenchildtable.cpp)
+target_link_libraries(BrokenChildTableTests PRIVATE AmazonTemplate3Lib_Tests Qt6::Test)
+target_include_directories(BrokenChildTableTests PRIVATE ../AmazonTemplate3Lib)
+add_test(NAME BrokenChildTableTests COMMAND BrokenChildTableTests)
+
 add_executable(TableReviewsTests tst_tablereviews.cpp)
 target_link_libraries(TableReviewsTests PRIVATE AmazonTemplate3Lib_Tests)
 target_include_directories(TableReviewsTests PRIVATE ../AmazonTemplate3Lib)

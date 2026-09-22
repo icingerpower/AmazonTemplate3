@@ -24,3 +24,28 @@ Lessons from fixing broken Amazon EU variation families (July 2026, caftan famil
 - Feed processing report + `/tmp/sp-api-feed-body-*.json` + `/tmp/sp-api-schema-*.json` dumps are the evidence trail.
 
 Related: [[project_spapi_auth]]
+
+## 2026-09-22 — Force repair for a selected child
+
+- PaneSizing's **Fix selected row** invokes the existing parent + image workflow
+  for just the selected child, including cells whose health checks pass. It can
+  also submit the parent listing, as the existing variation repair requires.
+  Inactive, unloaded and missing marketplace cells remain excluded, including
+  marketplaces marked `(missing)` in the country list. Automatic fix buttons
+  retain their previous targeting rules.
+- Forced image repair excludes the target ASIN when choosing the same-color
+  sibling source, so equal image counts do not cause a self-source skip. If no
+  sibling has images, the existing workflow logs a skip. An image count does
+  not establish that those images meet Amazon's requirements.
+- `fetchChildHealth` checks catalog parent relationships and image variant
+  counts, not seller listing suppression/issues. A `✓ 7` cell is therefore not
+  proof that a listing is unsuppressed.
+- The table reads the catalog's plain `size` attribute (preferring FR, then US,
+  then DE). The feed builder explicitly handles apparel/shapewear composites,
+  but has no dedicated shoe-width handling. A displayed `43 EU` versus
+  `43 EU Étroit` is not sufficient evidence to infer or overwrite width. Left
+  unchanged: first compare affected and correct sibling catalog/listing size
+  and width attributes, plus the actual product-type schema per marketplace;
+  then consider a narrowly scoped shoe-specific repair with regression tests.
+  The supplied Seller Central screenshot reports main-image suppression, not
+  a width error. No live API reads or writes were needed for this code change.

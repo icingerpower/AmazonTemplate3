@@ -104,10 +104,12 @@ void BrokenChildTable::_recomputeMaxImages()
 }
 
 QList<BrokenChildTable::FixTarget>
-BrokenChildTable::getFixTargets(bool forParents, bool forImages) const
+BrokenChildTable::getFixTargets(bool forParents, bool forImages, int forcedRow) const
 {
     QList<FixTarget> targets;
+    if (forcedRow < -1 || forcedRow >= m_rows.size()) return targets;
     for (int ri = 0; ri < m_rows.size(); ++ri) {
+        if (forcedRow >= 0 && ri != forcedRow) continue;
         const ChildEntry &row = m_rows[ri];
         const QString ck = row.color.toLower();
         for (int mi = 0; mi < m_specs.size() && mi < row.health.size(); ++mi) {
@@ -117,13 +119,13 @@ BrokenChildTable::getFixTargets(bool forParents, bool forImages) const
 
             const int maxImgs = m_maxImages.value(ck).value(mi, 0);
 
-            const bool needsParent = forParents && !h.hasParent;
+            const bool needsParent = forParents && (forcedRow >= 0 || !h.hasParent);
             // Image count is "wrong" only when the listing HAS some images but fewer
             // than the family max (0 < count < max). count == 0 usually means the
             // page was never created — nothing to copy images onto — so it is not an
             // image-fix target (it's flagged dark-orange in the table instead).
-            const bool needsImages = forImages && maxImgs > 0
-                                     && h.imageCount > 0 && h.imageCount < maxImgs;
+            const bool needsImages = forImages && (forcedRow >= 0
+                || (maxImgs > 0 && h.imageCount > 0 && h.imageCount < maxImgs));
             if (!needsParent && !needsImages) continue;
 
             targets.append({ri, mi, needsParent, needsImages});
@@ -132,7 +134,8 @@ BrokenChildTable::getFixTargets(bool forParents, bool forImages) const
     return targets;
 }
 
-QString BrokenChildTable::bestImageSourceAsin(const QString &colorKey, int mktIdx) const
+QString BrokenChildTable::bestImageSourceAsin(const QString &colorKey, int mktIdx,
+                                            const QString &excludedAsin) const
 {
     if (mktIdx < 0 || mktIdx >= m_specs.size())
         return {};
@@ -140,6 +143,7 @@ QString BrokenChildTable::bestImageSourceAsin(const QString &colorKey, int mktId
     QString bestAsin;
     int bestCount = 0;
     for (const ChildEntry &row : m_rows) {
+        if (!excludedAsin.isEmpty() && row.asin == excludedAsin) continue;
         if (row.color.toLower() != colorKey) continue;
         if (mktIdx >= row.health.size()) continue;
         const MarketplaceHealth &h = row.health[mktIdx];

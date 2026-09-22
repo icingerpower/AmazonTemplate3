@@ -106,6 +106,7 @@ private slots:
 
     // Broken-child fix workflow (Broken child tab)
     void onFixAllClicked();
+    void onFixSelectedRowClicked();
     void onFixParentsClicked();
     void onFixImagesClicked();
     void onFixLogClicked();
@@ -213,7 +214,8 @@ private:
     // checkOnly: read-only diagnostic — settled listing state, issues,
     // relationships and apparel_size schema rules; NO submission.
     QCoro::Task<void> _runBrokenChildFix(bool fixParents, bool fixImages,
-                                         bool checkOnly = false);
+                                       bool checkOnly = false, int forcedRow = -1);
+    QCoro::Task<void> m_fixSelectedRowTask;
     void _refreshTemplateCombo();
     // Looks for an already-existing sizing/ subfolder for this product, without
     // creating one. The parent ASIN returned by the catalog API can differ per

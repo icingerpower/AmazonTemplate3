@@ -310,6 +310,8 @@ PaneSizing::PaneSizing(QWidget *parent)
     // Broken child fix buttons
     connect(ui->buttonFixAll,    &QPushButton::clicked,
             this, &PaneSizing::onFixAllClicked);
+    connect(ui->buttonFixSelectedRow, &QPushButton::clicked,
+            this, &PaneSizing::onFixSelectedRowClicked);
     connect(ui->buttonFixParent, &QPushButton::clicked,
             this, &PaneSizing::onFixParentsClicked);
     connect(ui->buttonFixImages, &QPushButton::clicked,
@@ -9435,6 +9437,18 @@ void PaneSizing::onFixAllClicked()
     _runBrokenChildFix(true, true);
 }
 
+void PaneSizing::onFixSelectedRowClicked()
+{
+    if (!m_brokenChildTable || !ui->tableViewBrokenChild->selectionModel()) return;
+    const QModelIndexList rows = ui->tableViewBrokenChild->selectionModel()->selectedRows();
+    if (rows.size() != 1) {
+        QMessageBox::information(this, tr("Fix selected row"),
+                                 tr("Select a child row in the Broken child table first."));
+        return;
+    }
+    m_fixSelectedRowTask = _runBrokenChildFix(true, true, false, rows.first().row());
+}
+
 void PaneSizing::onFixParentsClicked()
 {
     _runBrokenChildFix(true, false);
@@ -10439,13 +10453,13 @@ void PaneSizing::_generateParentFlatFile(const QString &marketplaceCode,
 }
 
 QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages,
-                                                 bool checkOnly)
+                                               bool checkOnly, int forcedRow)
 {
     if (!m_brokenChildTable) co_return;
 
     // ── 1. Collect fix targets ──────────────────────────────────────────────
     QList<BrokenChildTable::FixTarget> targets =
-        m_brokenChildTable->getFixTargets(fixParents, fixImages);
+        m_brokenChildTable->getFixTargets(fixParents, fixImages, forcedRow);
 
     // Remove targets for marketplaces the seller has no active listing on.
     // Read the country list widget at fix-time — it reflects marketplacesChecked
@@ -10470,7 +10484,10 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
     }
 
     if (targets.isEmpty()) {
-        QMessageBox::information(this, tr("Fix"), tr("Nothing to fix."));
+        QMessageBox::information(this, tr("Fix"), forcedRow >= 0
+            ? tr("The selected row has no loaded, existing listing in an active marketplace. "
+                 "Use Re-run to refresh the checks.")
+            : tr("Nothing to fix."));
         co_return;
     }
 
@@ -10478,7 +10495,8 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
     auto *progressDlg = new QDialog(this);
     progressDlg->setAttribute(Qt::WA_DeleteOnClose);
     progressDlg->setWindowModality(Qt::ApplicationModal);
-    progressDlg->setWindowTitle(tr("Fixing broken children…"));
+    progressDlg->setWindowTitle(forcedRow >= 0 ? tr("Fixing selected row…")
+                                             : tr("Fixing broken children…"));
     progressDlg->resize(640, 460);
     auto *pLayout = new QVBoxLayout(progressDlg);
 
@@ -10541,6 +10559,11 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
     progressDlg->show();
 
     appendLog(tr("Found %1 cell(s) to fix.").arg(targets.size()));
+    if (forcedRow >= 0) {
+        appendLog(tr("Forcing parent and image repairs for %1 across active marketplaces, "
+                     "including cells whose health checks pass. The parent listing may also be updated.")
+                      .arg(m_brokenChildTable->rows().at(forcedRow).asin));
+    }
 
     // ── 3. Determine product type ───────────────────────────────────────────
     if (m_productType.isEmpty() && m_productWorkingDir.exists()) {
@@ -11544,7 +11567,8 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
         // 6b. Image fix
         if (target.needsImages && fixImages) {
             const QString sourceAsin =
-                m_brokenChildTable->bestImageSourceAsin(row.color.toLower(), target.mktIdx);
+                m_brokenChildTable->bestImageSourceAsin(row.color.toLower(), target.mktIdx,
+                                                       forcedRow >= 0 ? row.asin : QString{});
             if (sourceAsin.isEmpty() || sourceAsin == row.asin) {
                 appendLog(tr("[%1] %2: no better image source — skipping image fix")
                               .arg(mpCode, row.asin));
