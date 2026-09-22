@@ -26,6 +26,7 @@ import { getThread, submitReply, isLoggedIn, passAccountSwitcher, SessionExpired
 import { timestampSlug } from "./browser.js";
 import { openComplianceFor, snapshotCompliance, processSafetyWarnings,
          processResponsiblePerson, processManufacturer,
+         setupPageCrashHandler, PageCrashedError, totalOutcomesEmitted,
          type GsprMarketplace, type GsprSnapshotResult,
          type ManufacturerEntry, type AskReply } from "./gsprPage.js";
 import { scrapeReviewsFor } from "./reviewsPage.js";
@@ -160,12 +161,13 @@ async function main() {
     // own row status (already-submitted rows read back as "under review")
     // makes the retry naturally idempotent — nothing gets double-submitted.
     const CRASHED_RE = /crashed/i;
-    const MAX_RELAUNCHES = 3; // per marketplace — a fresh country starts with a clean budget
-    let relaunches = 0;
-    let relaunchBudgetIndex = -1; // marketplace index the counter above applies to
+    const MAX_CONSECUTIVE_CRASHES = 5;
+    let consecutiveCrashes = 0;
+    let lastOutcomeCount = totalOutcomesEmitted;
 
     let ctx = await launchContext(cfg, region);
     let page = await firstPage(ctx);
+    setupPageCrashHandler(page);
     try {
       if (!(await ensureLoggedIn(page, cfg, region))) {
         for (const mp of marketplaces)
@@ -175,7 +177,6 @@ async function main() {
         let i = 0;
         while (i < marketplaces.length) {
           const mp = marketplaces[i]!;
-          if (i !== relaunchBudgetIndex) { relaunches = 0; relaunchBudgetIndex = i; }
           const mpDumpDir = join(dumpDir, timestampSlug(now), mp.country);
           try {
             log(`[gspr:${mp.country}] opening compliance page…`);
@@ -221,6 +222,8 @@ async function main() {
             }
             results.push(snap);
             i++; // this marketplace is done — advance
+            consecutiveCrashes = 0;
+            lastOutcomeCount = totalOutcomesEmitted;
 
             // The user closing the browser means STOP — don't relaunch for
             // the remaining marketplaces.
@@ -230,27 +233,38 @@ async function main() {
             }
           } catch (e) {
             const msg = (e as Error).message ?? String(e);
+            const isCrash = e instanceof PageCrashedError || (CRASHED_RE.test(msg) && !CLOSED_RE.test(msg));
 
-            if (CRASHED_RE.test(msg) && !CLOSED_RE.test(msg)) {
-              if (relaunches >= MAX_RELAUNCHES) {
-                log(`[gspr:${mp.country}] browser crashed again — giving up after ${MAX_RELAUNCHES} relaunches`);
+            if (isCrash) {
+              if (totalOutcomesEmitted > lastOutcomeCount) {
+                // Progress was made since the last crash: reset consecutive crashes counter
+                consecutiveCrashes = 0;
+                lastOutcomeCount = totalOutcomesEmitted;
+              }
+              if (consecutiveCrashes >= MAX_CONSECUTIVE_CRASHES) {
+                log(`[gspr:${mp.country}] browser crashed ${MAX_CONSECUTIVE_CRASHES} consecutive times without progress — giving up on this marketplace`);
                 results.push({ country: mp.country, ok: false,
-                               error: `browser crashed ${MAX_RELAUNCHES} times: ${msg}` });
+                               error: `browser crashed ${MAX_CONSECUTIVE_CRASHES} consecutive times without progress: ${msg}` });
                 i++;
+                consecutiveCrashes = 0;
+                lastOutcomeCount = totalOutcomesEmitted;
                 continue;
               }
-              relaunches++;
-              log(`[gspr:${mp.country}] browser crashed (${msg}) — relaunching`
-                  + ` (attempt ${relaunches}/${MAX_RELAUNCHES}) and resuming this marketplace…`);
+              consecutiveCrashes++;
+              log(`[gspr:${mp.country}] browser crashed (${msg}) — automatically relaunching`
+                  + ` (attempt ${consecutiveCrashes}/${MAX_CONSECUTIVE_CRASHES}) and resuming this marketplace…`);
               await ctx.close().catch(() => {});
               try {
                 ctx = await launchContext(cfg, region);
                 page = await firstPage(ctx);
+                setupPageCrashHandler(page);
                 if (!(await ensureLoggedIn(page, cfg, region))) {
                   log(`[gspr:${mp.country}] re-login failed after crash recovery — giving up on this marketplace`);
                   results.push({ country: mp.country, ok: false,
                                  error: "re-login failed after crash recovery", sessionExpired: true });
                   i++;
+                  consecutiveCrashes = 0;
+                  lastOutcomeCount = totalOutcomesEmitted;
                 }
                 // else: retry the SAME marketplace (i unchanged) with the new page.
               } catch (relaunchErr) {
@@ -267,6 +281,8 @@ async function main() {
             results.push({ country: mp.country, ok: false, error: msg,
                            sessionExpired: e instanceof SessionExpiredError });
             i++;
+            consecutiveCrashes = 0;
+            lastOutcomeCount = totalOutcomesEmitted;
             if (CLOSED_RE.test(msg)) {
               log(`[gspr] browser/context closed — stopping run`);
               break;

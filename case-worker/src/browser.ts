@@ -19,7 +19,12 @@ export async function launchContext(cfg: Config, region: Region): Promise<Browse
     viewport: { width: 1440, height: 900 },
     // A stable, region-appropriate UA/locale reduces bot-detection friction.
     locale: rc.locale,
-    args: ["--disable-blink-features=AutomationControlled"],
+    args: [
+      "--disable-blink-features=AutomationControlled",
+      "--disable-dev-shm-usage",
+      "--disable-renderer-backgrounding",
+      "--js-flags=--max-old-space-size=4096",
+    ],
   };
 
   // Only ONE Chromium can use a profile dir at a time. A previous run's browser

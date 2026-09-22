@@ -58,10 +58,35 @@ export interface GsprWarningOutcome {
   type?: "psi" | "rp" | "mfr";
 }
 
+export class PageCrashedError extends Error {
+  constructor(message?: string) {
+    super(message ?? "Chromium page/renderer crashed");
+    this.name = "PageCrashedError";
+  }
+}
+
+let pageCrashed = false;
+
+export function isPageCrashed(): boolean {
+  return pageCrashed;
+}
+
+export function setupPageCrashHandler(page: Page): void {
+  pageCrashed = false;
+  page.on("crash", () => {
+    log(`[gspr] CRITICAL: Chromium page renderer crashed (Aw, Snap!)`);
+    pageCrashed = true;
+    page.close().catch(() => {});
+  });
+}
+
+export let totalOutcomesEmitted = 0;
+
 function log(msg: string) { process.stderr.write(msg + "\n"); }
 
 /** Per-ASIN outcome event, parsed live by the Qt app — record-as-you-go. */
 function emitOutcome(country: string, o: GsprWarningOutcome) {
+  totalOutcomesEmitted++;
   log(`@@gspr-result ${JSON.stringify({ country, ...o })}`);
 }
 
@@ -74,6 +99,7 @@ export async function currentMarketplace(page: Page): Promise<string> {
 
 /** Dump the current DOM + screenshot into dir as {tag}.html / {tag}.png. */
 async function dumpDebug(page: Page, dir: string, tag: string): Promise<void> {
+  if (pageCrashed || page.isClosed()) return;
   mkdirSync(dir, { recursive: true });
   await writeFile(join(dir, `${tag}.html`), await page.content()).catch(() => {});
   await page.screenshot({ path: join(dir, `${tag}.png`), fullPage: true })
@@ -94,6 +120,7 @@ async function dumpDebug(page: Page, dir: string, tag: string): Promise<void> {
 export async function openComplianceFor(
   page: Page, domain: string, mp: GsprMarketplace, debugDir: string
 ): Promise<string> {
+  setupPageCrashHandler(page);
   const complianceUrl = `https://${domain}${COMPLIANCE_PATH}`;
   await page.goto(complianceUrl, { waitUntil: "domcontentloaded" });
   await settle(page);
@@ -405,6 +432,10 @@ export async function processSafetyWarnings(
       record({ asin, ok: true, status: "submitted" });
     } catch (e) {
       const msg = (e as Error).message ?? String(e);
+      if (pageCrashed || /crashed/i.test(msg) || e instanceof PageCrashedError) {
+        log(`[gspr:${mp.country}] page crashed during safety warning for ${asin} — aborting phase for relaunch`);
+        throw (e instanceof PageCrashedError ? e : new PageCrashedError(msg));
+      }
       // A closed browser is the user stopping the run, not an ASIN failure —
       // don't record anything for it.
       if (/has been closed|Target (page|browser).*closed/i.test(msg)) {
@@ -651,6 +682,10 @@ async function processOneRpRow(
     return "ok";
   } catch (e) {
     const msg = (e as Error).message ?? String(e);
+    if (pageCrashed || /crashed/i.test(msg) || e instanceof PageCrashedError) {
+      log(`[gspr:${mp.country}] page crashed during RP for ${asin} — aborting for relaunch`);
+      throw (e instanceof PageCrashedError ? e : new PageCrashedError(msg));
+    }
     if (/has been closed|Target (page|browser).*closed/i.test(msg)) {
       log(`[gspr:${mp.country}] browser closed — treating as stop`);
       return "stopped";
@@ -783,13 +818,15 @@ export interface ManufacturerEntry {
 export interface AskReply { cmd?: string; manufacturers?: ManufacturerEntry[]; }
 export type AskFn = (payload: Record<string, unknown>) => Promise<AskReply>;
 
-/** Longest case-insensitive prefix match of sku against the entries. */
+/** Longest case-insensitive prefix match of sku against the entries (strips leading "P-" parent prefix if present). */
 function findManufacturer(entries: ManufacturerEntry[], sku: string): ManufacturerEntry | null {
   const s = sku.toLowerCase();
+  const sWithoutP = sku.replace(/^p-/i, "").toLowerCase();
   let best: ManufacturerEntry | null = null;
   for (const e of entries) {
     if (!e.prefix) continue;
-    if (s.startsWith(e.prefix.toLowerCase())
+    const p = e.prefix.toLowerCase();
+    if ((s.startsWith(p) || sWithoutP.startsWith(p))
         && (!best || e.prefix.length > best.prefix.length))
       best = e;
   }
@@ -1023,7 +1060,11 @@ async function processOneMfrRow(
     if (isFound) {
       log(`[gspr:${mp.country}] MFR ${asin}: selecting existing entry "${entry.name}"`);
       const radio = card.locator('kat-radiobutton, input[type="radio"], [part="radiobutton-icon"]').first();
-      await radio.click({ force: true });
+      if (await radio.count()) {
+        await radio.click({ force: true });
+      } else {
+        await card.click({ force: true });
+      }
       await page.waitForTimeout(500);
     } else {
       log(`[gspr:${mp.country}] MFR ${asin}: creating entry "${entry.name}"`);
@@ -1110,27 +1151,27 @@ async function processOneMfrRow(
           return "ok";
         }
       }
-    }
 
-    if (manualSave) {
-      log(`[gspr:${mp.country}] MFR ${asin}: PAUSED — verify the form for "${entry.name}" in the browser, complete missing fields and click Save (up to 10 min)…`);
-      let savedByUser = false, paneClosed = false;
-      for (let t = 0; t < 300; t++) {
-        await page.waitForTimeout(2000);
-        if (!(await page.locator(FLYOUT_PANEL).isVisible().catch(() => false))) {
-          paneClosed = true; break;
+      if (manualSave) {
+        log(`[gspr:${mp.country}] MFR ${asin}: PAUSED — verify the form for "${entry.name}" in the browser, complete missing fields and click Save (up to 10 min)…`);
+        let savedByUser = false, paneClosed = false;
+        for (let t = 0; t < 300; t++) {
+          await page.waitForTimeout(2000);
+          if (!(await page.locator(FLYOUT_PANEL).isVisible().catch(() => false))) {
+            paneClosed = true; break;
+          }
         }
-      }
-      if (!savedByUser && !paneClosed) {
-        log(`[gspr:${mp.country}] MFR ${asin}: timed out waiting for manual save`);
-        record({ asin, ok: false, status: "failed", type: "mfr", reason: "timed out waiting for manual save" });
+        if (!savedByUser && !paneClosed) {
+          log(`[gspr:${mp.country}] MFR ${asin}: timed out waiting for manual save`);
+          record({ asin, ok: false, status: "failed", type: "mfr", reason: "timed out waiting for manual save" });
+          await ensureDrawerClosed(page);
+          return "ok";
+        }
+        log(`[gspr:${mp.country}] MFR ${asin}: manufacturer saved by the user`);
+        record({ asin, ok: true, status: "submitted", type: "mfr" });
         await ensureDrawerClosed(page);
         return "ok";
       }
-      log(`[gspr:${mp.country}] MFR ${asin}: manufacturer saved by the user`);
-      record({ asin, ok: true, status: "submitted", type: "mfr" });
-      await ensureDrawerClosed(page);
-      return "ok";
     }
 
     const failReason = await saveAndClose(page, dumpDir, `mfr-${asin}`);
@@ -1148,6 +1189,10 @@ async function processOneMfrRow(
     return "ok";
   } catch (e) {
     const msg = (e as Error).message ?? String(e);
+    if (pageCrashed || /crashed/i.test(msg) || e instanceof PageCrashedError) {
+      log(`[gspr:${mp.country}] page crashed during MFR for ${asin} — aborting for relaunch`);
+      throw (e instanceof PageCrashedError ? e : new PageCrashedError(msg));
+    }
     if (/has been closed|Target (page|browser).*closed/i.test(msg)) {
       log(`[gspr:${mp.country}] browser closed — treating as stop`);
       return "stopped";
