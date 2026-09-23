@@ -216,12 +216,19 @@
           </widget>
          </item>
          <item>
+          <widget class="QPushButton" name="buttonDuplicateProducts">
+           <property name="enabled"><bool>false</bool></property>
+           <property name="toolTip"><string>Add selected products to another category, keeping their current placements</string></property>
+           <property name="text"><string>Duplicate</string></property>
+          </widget>
+         </item>
+         <item>
           <widget class="QPushButton" name="buttonRemoveProducts">
            <property name="enabled">
             <bool>false</bool>
            </property>
            <property name="toolTip">
-            <string>Remove selected product(s) — use for duplicates caused by parent bugs</string>
+            <string>Remove selected products from this node; placements in other categories are preserved</string>
            </property>
            <property name="text">
             <string>Remove</string>

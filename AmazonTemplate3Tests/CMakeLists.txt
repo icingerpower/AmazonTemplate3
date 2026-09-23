@@ -155,3 +155,19 @@ target_include_directories(PricingRetrievalTests PRIVATE ../AmazonTemplate3 ../A
 target_link_libraries(PricingRetrievalTests PRIVATE AmazonTemplate3Lib_Tests Qt6::Test Qt6::Widgets)
 add_test(NAME PricingRetrievalTests COMMAND PricingRetrievalTests)
 set_tests_properties(PricingRetrievalTests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 15)
+
+# Store category placement tests exercise the real pane with an offline catalog.
+add_executable(StoreTests tst_store.cpp
+    ../AmazonTemplate3/gui/panes/PaneStore.cpp
+    ../AmazonTemplate3/gui/panes/PaneStore.h
+    ../AmazonTemplate3/gui/panes/PaneStore.ui
+    ../AmazonTemplate3/gui/DialogGenStorefrontImage.cpp
+    ../AmazonTemplate3/gui/DialogGenStorefrontImage.h
+    ../AmazonTemplate3/SettingsTable.cpp
+    ../../common/aicli/AbstractCli.cpp
+    ../../common/workingdirectory/WorkingDirectoryManager.cpp)
+target_include_directories(StoreTests PRIVATE ../AmazonTemplate3 ../AmazonTemplate3Lib
+    ../../common ../../common/aicli)
+target_link_libraries(StoreTests PRIVATE AmazonTemplate3Lib_Tests Qt6::Test Qt6::Widgets)
+add_test(NAME StoreTests COMMAND StoreTests)
+set_tests_properties(StoreTests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)

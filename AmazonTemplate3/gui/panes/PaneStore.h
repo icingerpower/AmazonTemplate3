@@ -13,6 +13,7 @@
 
 #include "apis/AmazonCatalogApi.h"
 #include "AmazonMarketplace.h"
+#include "StorePlacements.h"
 #include "AbstractCli.h"
 #include "../DialogGenStorefrontImage.h"
 
@@ -37,6 +38,7 @@ public:
     void setAvailableClis(const QList<AbstractCli *> &clis);
 
 private:
+    friend class StoreTests;
     Ui::PaneStore          *ui;
     QDir                    m_workingDir;
     AmazonCatalogApi       *m_catalogApi     = nullptr;
@@ -50,9 +52,11 @@ private:
     QHash<QString, QPixmap>                     m_asinToPixmap;
     QList<AmazonCatalogApi::StoreItem>          m_items;
 
-    // User-defined display order: list of representative ASINs in the order the user arranged.
-    // New products (not in this list) appear first; known ones appear in order.
-    QStringList             m_savedOrder;
+    // Orders use stable product/color group keys, with an independent list per node.
+    // New products appear first; old global/ASIN order files provide a fallback.
+    QStringList             m_savedOrder; // legacy fallback for nodes without their own order
+    QHash<QString, QStringList> m_nodeOrders;
+    StorePlacements         m_placements;
     QList<QStringList>      m_customPaths; // manually added tree node paths, persisted
 
     QCoro::Task<void> m_retrieveTask;
@@ -80,10 +84,15 @@ private:
     void _buildTable(const QStringList &asins);
     void _onTreeSelectionChanged();
     void _onCountrySelectionChanged();
+    void _updateTableActions();
     void _updateTableForCurrentSelection();
     void _onMerge();
     void _onMoveProducts();
+    void _onTransferProducts(bool duplicate);
+    QStringList _rawPath(const QStringList &displayPath) const;
+    QStringList _orderForCurrentNode() const;
     void _onRemoveProducts();
+    void _refreshAfterProductAction();
     void _onAddCategory();
     void _onRemoveCategory();
     void _onCopyAsins();
@@ -97,7 +106,7 @@ private:
 
     // Maps every ASIN in visibleAsins to the full (product,color) group it
     // belongs to — same grouping key _buildTable() uses to build rows, so
-    // Move/Remove/Copy always act on exactly what a selected row represents.
+    // Move/Remove/Duplicate act on exactly what a selected row represents.
     QHash<QString, QStringList> _buildAsinGroups(const QStringList &visibleAsins) const;
 
     bool            _isCurrentNodeCustom() const;
@@ -109,9 +118,7 @@ private:
     void _onMoveToBottom();
     void _loadOrder();
     void _saveOrder();
-    // Replaces ONLY the currently-visible node's entries in the global
-    // m_savedOrder with their new on-screen order — other categories' saved
-    // order must survive a reorder made while viewing a different node.
+    // Save order independently for the selected category path.
     void _syncSavedOrderFromVisibleRows();
     void _onSortBySales();
 

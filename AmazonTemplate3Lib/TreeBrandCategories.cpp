@@ -1,6 +1,7 @@
 #include "TreeBrandCategories.h"
 
 #include <QRegularExpression>
+#include <functional>
 
 TreeBrandCategories::TreeBrandCategories(QObject *parent)
     : QAbstractItemModel(parent)
@@ -56,11 +57,22 @@ QString TreeBrandCategories::colorGroupKey(const AmazonCatalogApi::StoreItem &it
 }
 
 void TreeBrandCategories::setItems(const QList<AmazonCatalogApi::StoreItem> &items,
-                                    const QList<QStringList> &customPaths)
+                                    const QList<QStringList> &customPaths, bool preserveNodes)
 {
-    beginResetModel();
-    qDeleteAll(m_root.children);
-    m_root.children.clear();
+    if (preserveNodes) {
+        std::function<void(TreeNode *)> clearMembership = [&](TreeNode *node) {
+            node->asins.clear();
+            node->asinSet.clear();
+            node->colorKeys.clear();
+            node->englishName = m_englishNames.value(_pathKeyFor(node));
+            for (auto *child : node->children) clearMembership(child);
+        };
+        clearMembership(&m_root);
+    } else {
+        beginResetModel();
+        qDeleteAll(m_root.children);
+        m_root.children.clear();
+    }
 
     for (const AmazonCatalogApi::StoreItem &item : items) {
         const QString brand    = item.brand.isEmpty()    ? tr("(unknown brand)")    : item.brand;
@@ -70,16 +82,20 @@ void TreeBrandCategories::setItems(const QList<AmazonCatalogApi::StoreItem> &ite
 
         const QString colorKey = colorGroupKey(item);
 
-        TreeNode *brandNode    = _findOrCreate(&m_root,      brand);
-        TreeNode *categoryNode = _findOrCreate(brandNode,    category);
-        TreeNode *genderNode   = _findOrCreate(categoryNode, gender);
-        TreeNode *ageNode      = _findOrCreate(genderNode,   age);
+        TreeNode *brandNode    = _findOrCreate(&m_root,      brand, preserveNodes);
+        TreeNode *categoryNode = _findOrCreate(brandNode,    category, preserveNodes);
+        TreeNode *genderNode   = _findOrCreate(categoryNode, gender, preserveNodes);
+        TreeNode *ageNode      = _findOrCreate(genderNode,   age, preserveNodes);
 
-        // Propagate ASIN and color key upward so every level aggregates its subtree.
-        ageNode->asins.append(item.asin);      ageNode->colorKeys.insert(colorKey);
-        genderNode->asins.append(item.asin);   genderNode->colorKeys.insert(colorKey);
-        categoryNode->asins.append(item.asin); categoryNode->colorKeys.insert(colorKey);
-        brandNode->asins.append(item.asin);    brandNode->colorKeys.insert(colorKey);
+        // A product may appear in several categories. Aggregate each ASIN only
+        // once per ancestor so stock/sales and exports cannot double-count it.
+        for (TreeNode *node = ageNode; node != &m_root; node = node->parent) {
+            if (!node->asinSet.contains(item.asin)) {
+                node->asinSet.insert(item.asin);
+                node->asins.append(item.asin);
+            }
+            node->colorKeys.insert(colorKey);
+        }
 
         // Re-apply the persisted English name to each level — nodes are
         // recreated by qDeleteAll() above on every rebuild, so this has to be
@@ -94,12 +110,23 @@ void TreeBrandCategories::setItems(const QList<AmazonCatalogApi::StoreItem> &ite
     for (const QStringList &path : customPaths) {
         TreeNode *node = &m_root;
         for (const QString &name : path) {
-            node = _findOrCreate(node, name);
+            node = _findOrCreate(node, name, preserveNodes);
             node->englishName = m_englishNames.value(_pathKeyFor(node));
         }
     }
 
-    endResetModel();
+    if (preserveNodes) {
+        std::function<void(QModelIndex)> notifyChanged = [&](QModelIndex parent) {
+            const int count = rowCount(parent);
+            if (!count) return;
+            emit dataChanged(index(0, 0, parent), index(count - 1, ColColumnCount - 1, parent),
+                             {Qt::DisplayRole, Qt::ToolTipRole});
+            for (int row = 0; row < count; ++row) notifyChanged(index(row, 0, parent));
+        };
+        notifyChanged({});
+    } else {
+        endResetModel();
+    }
 }
 
 void TreeBrandCategories::clear()
@@ -183,6 +210,7 @@ QModelIndex TreeBrandCategories::parent(const QModelIndex &child) const
 
 int TreeBrandCategories::rowCount(const QModelIndex &parent) const
 {
+    if (parent.isValid() && parent.column() != 0) return 0;
     const TreeNode *node = parent.isValid()
         ? static_cast<const TreeNode *>(parent.internalPointer())
         : &m_root;
@@ -244,12 +272,19 @@ Qt::ItemFlags TreeBrandCategories::flags(const QModelIndex &index) const
 }
 
 TreeBrandCategories::TreeNode *TreeBrandCategories::_findOrCreate(
-    TreeNode *parentNode, const QString &name)
+    TreeNode *parentNode, const QString &name, bool notifyInsertion)
 {
     for (TreeNode *child : parentNode->children) {
         if (child->name == name) return child;
     }
+    if (notifyInsertion) {
+        const QModelIndex parentIndex = parentNode == &m_root ? QModelIndex{}
+            : createIndex(parentNode->parent->children.indexOf(parentNode), 0, parentNode);
+        const int row = parentNode->children.size();
+        beginInsertRows(parentIndex, row, row);
+    }
     auto *node = new TreeNode(name, parentNode);
     parentNode->children.append(node);
+    if (notifyInsertion) endInsertRows();
     return node;
 }

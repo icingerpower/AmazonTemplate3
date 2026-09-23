@@ -4,7 +4,7 @@
 
 - [Amazon SP-API auth lessons](project_spapi_auth.md) — LWA only (no SigV4 since 2023-10-02); refresh tokens must be regenerated after adding app roles; MCF needs the "Amazon Fulfillment" role (no "Multi-Channel Fulfillment" role exists)
 - [A+ content upload API lessons](project_aplus_api_lessons.md) — 11 hard-won rules: NA-only Uploads API, S3 form-body params, EBC not EMC, child ASINs only, no em-dashes, decorator pitfalls, module structure
-- [PaneStore data location](project_panestore.md) — stores/ subfolder under workingDir, files named {marketplaceId}.json (default EU Germany A1PA6795UKMFR9)
+- [PaneStore categories and persistence](project_panestore.md) — stores/{marketplaceId}.json; duplicate category placements, independent ordering, and offline regression tests
 - [Temu API lessons](project_temu_api.md) — working endpoints, MD5 signing, goodsSearchType/skuSearchType required as int, per-SKU stock via sku.list.query types 2+3, stock.edit is diff-based
 - [No autonomous commits](feedback_no_commit.md) — never commit without explicit user permission; at most ask
 - [Octopia fulfillment plan](project_octopia_plan.md) — inventory + shipping will later also come from Octopia; keep marketplace sync code source-agnostic

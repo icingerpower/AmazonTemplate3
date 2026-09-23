@@ -47,6 +47,7 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSaveFile>
+#include <QScrollBar>
 #include <QSet>
 #include <QSettings>
 #include <QStandardItem>
@@ -77,10 +78,10 @@ PaneStore::PaneStore(QWidget *parent)
     ui->treeViewBrandCategory->setAlternatingRowColors(true);
     ui->treeViewBrandCategory->setSelectionMode(QAbstractItemView::ExtendedSelection);
     // Persist English-name edits (double-click the "English name" column) as
-    // soon as they're made — setData() is the only thing that ever emits
-    // dataChanged() on this model, so no filtering by column is needed here.
-    connect(m_treeModel, &QAbstractItemModel::dataChanged, this, [this]() {
-        _saveEnglishCategoryNames();
+    // soon as they are made. Membership/count updates only emit DisplayRole.
+    connect(m_treeModel, &QAbstractItemModel::dataChanged, this,
+            [this](const QModelIndex &, const QModelIndex &, const QList<int> &roles) {
+        if (roles.contains(Qt::EditRole)) _saveEnglishCategoryNames();
     });
 
     // Right top: horizontal countries chip-bar
@@ -140,6 +141,9 @@ PaneStore::PaneStore(QWidget *parent)
             this, &PaneStore::_onGenStorefrontImage);
     connect(ui->buttonMoveProducts, &QPushButton::clicked,
             this, &PaneStore::_onMoveProducts);
+    connect(ui->buttonDuplicateProducts, &QPushButton::clicked, this, [this]() {
+        _onTransferProducts(true);
+    });
     connect(ui->buttonRemoveProducts, &QPushButton::clicked,
             this, &PaneStore::_onRemoveProducts);
     connect(ui->buttonAddCategory, &QPushButton::clicked,
@@ -166,33 +170,30 @@ PaneStore::PaneStore(QWidget *parent)
             QGuiApplication::clipboard()->setText(path);
     });
 
-    // Enable Up/Down only when a table row is selected
-    connect(ui->tableViewAsins->selectionModel(),
-            &QItemSelectionModel::selectionChanged,
-            this, [this]() {
-                const bool hasSel = !_selectedTableRows().isEmpty();
-                ui->buttonMoveToTop->setEnabled(hasSel);
-                ui->buttonMoveUp->setEnabled(hasSel);
-                ui->buttonMoveDown->setEnabled(hasSel);
-                ui->buttonMoveToBottom->setEnabled(hasSel);
-                ui->buttonMoveProducts->setEnabled(hasSel);
-                ui->buttonRemoveProducts->setEnabled(hasSel);
-                ui->buttonExportProducts->setEnabled(hasSel);
-            });
+    // A model reset clears selection without emitting selectionChanged.
+    connect(ui->tableViewAsins->selectionModel(), &QItemSelectionModel::selectionChanged,
+            this, &PaneStore::_updateTableActions);
+    connect(m_storeModel, &QAbstractItemModel::modelReset, this, &PaneStore::_updateTableActions);
+    connect(m_treeModel, &QAbstractItemModel::modelReset, this, [this]() {
+        ui->buttonAddCategory->setEnabled(false);
+        ui->buttonRemoveCategory->setEnabled(false);
+        ui->buttonMerge->setEnabled(false);
+    });
 
     connect(ui->treeViewBrandCategory->selectionModel(),
             &QItemSelectionModel::currentChanged,
             this, [this](const QModelIndex &, const QModelIndex &) {
                 _onTreeSelectionChanged();
                 ui->buttonAddCategory->setEnabled(
-                    ui->treeViewBrandCategory->currentIndex().isValid());
+                    ui->treeViewBrandCategory->currentIndex().isValid()
+                    && TreeBrandCategories::depthOfIndex(ui->treeViewBrandCategory->currentIndex()) < 3);
                 ui->buttonRemoveCategory->setEnabled(_isCurrentNodeCustom());
             });
     connect(ui->treeViewBrandCategory->selectionModel(),
             &QItemSelectionModel::selectionChanged,
             this, [this]() {
                 const QModelIndexList sel =
-                    ui->treeViewBrandCategory->selectionModel()->selectedIndexes();
+                    ui->treeViewBrandCategory->selectionModel()->selectedRows(0);
                 ui->buttonMerge->setEnabled(
                     sel.size() == 2
                     && sel.at(0).parent() == sel.at(1).parent());
@@ -212,6 +213,10 @@ PaneStore::~PaneStore()
 void PaneStore::setWorkingDir(const QDir &workingDir)
 {
     m_workingDir = workingDir;
+    m_placements.clear();
+    m_savedOrder.clear();
+    m_nodeOrders.clear();
+    _applyItems({});
     m_workingDir.mkpath(QStringLiteral("stores"));
     _loadCustomPaths();
     _loadStockCache();
@@ -287,39 +292,50 @@ QString PaneStore::_marketplaceId() const
 
 void PaneStore::_loadOrder()
 {
+    m_savedOrder.clear();
+    m_nodeOrders.clear();
     const QString path = m_workingDir.filePath(
         QStringLiteral("stores/%1_order.json").arg(_marketplaceId()));
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) return;
-    m_savedOrder.clear();
-    for (const QJsonValue &v : QJsonDocument::fromJson(f.readAll()).array()) {
+    const auto document = QJsonDocument::fromJson(f.readAll());
+    const auto legacy = document.isArray() ? document.array()
+        : document.object().value(QStringLiteral("legacy")).toArray();
+    for (const auto &v : legacy) {
         QString entry = v.toString();
-        // Migrate legacy entries (a representative ASIN) to the stable group
-        // key. Group keys always contain the \x1f separator; a bare ASIN
-        // never does. Old entries are converted on first load so upgrading
-        // doesn't reset everyone's custom order — only entries for ASINs no
-        // longer in the catalog are left as unmatched (harmless) leftovers.
         if (!entry.contains(QLatin1Char('\x1f'))) {
-            const AmazonCatalogApi::StoreItem &it = m_asinToItem.value(entry);
-            if (!it.asin.isEmpty())
-                entry = TreeBrandCategories::colorGroupKey(it);
+            const auto item = m_asinToItem.value(entry);
+            if (!item.asin.isEmpty()) entry = TreeBrandCategories::colorGroupKey(item);
         }
         m_savedOrder.append(entry);
+    }
+    const auto nodes = document.object().value(QStringLiteral("nodes")).toObject();
+    for (auto it = nodes.begin(); it != nodes.end(); ++it) {
+        QStringList order;
+        for (const auto &v : it.value().toArray()) order.append(v.toString());
+        m_nodeOrders.insert(it.key(), order);
     }
 }
 
 void PaneStore::_saveOrder()
 {
-    QJsonArray arr;
-    for (const QString &asin : std::as_const(m_savedOrder))
-        arr.append(asin);
+    QJsonObject nodes;
+    for (auto it = m_nodeOrders.cbegin(); it != m_nodeOrders.cend(); ++it)
+        nodes[it.key()] = QJsonArray::fromStringList(it.value());
+    const QJsonObject object{{QStringLiteral("legacy"), QJsonArray::fromStringList(m_savedOrder)},
+                             {QStringLiteral("nodes"), nodes}};
     const QString path = m_workingDir.filePath(
         QStringLiteral("stores/%1_order.json").arg(_marketplaceId()));
     QSaveFile sf(path);
     if (sf.open(QIODevice::WriteOnly)) {
-        sf.write(QJsonDocument(arr).toJson(QJsonDocument::Compact));
+        sf.write(QJsonDocument(object).toJson(QJsonDocument::Compact));
         sf.commit();
     }
+}
+
+QStringList PaneStore::_orderForCurrentNode() const
+{
+    return m_nodeOrders.value(_currentNodePath().join(QLatin1Char('\x1f')), m_savedOrder);
 }
 
 void PaneStore::_populateCountriesList()
@@ -401,9 +417,14 @@ void PaneStore::_loadFromDisk(const QString &marketplaceId)
     const QString path = m_workingDir.filePath(
         QStringLiteral("stores/%1.json").arg(marketplaceId));
     QFile f(path);
-    if (!f.open(QIODevice::ReadOnly)) return;
+    if (!f.open(QIODevice::ReadOnly)) {
+        _applyItems({});
+        _loadOrder();
+        return;
+    }
 
     const QJsonArray arr = QJsonDocument::fromJson(f.readAll()).array();
+    m_placements.clear();
     QList<AmazonCatalogApi::StoreItem> items;
     items.reserve(arr.size());
     for (const QJsonValue &v : arr) {
@@ -426,6 +447,8 @@ void PaneStore::_loadFromDisk(const QString &marketplaceId)
         for (const QJsonValue &mpv : obj.value(QStringLiteral("existsIn")).toArray())
             item.existsInMarketplaces.insert(mpv.toString());
         item.manuallyMoved = obj.value(QStringLiteral("manuallyMoved")).toBool(false);
+        if (obj.contains(QStringLiteral("placements")))
+            m_placements.load(item.asin, obj.value(QStringLiteral("placements")).toArray());
         items.append(item);
     }
     _applyItems(items);
@@ -464,6 +487,8 @@ void PaneStore::_saveToDisk(const QString &marketplaceId,
         }
         if (item.manuallyMoved)
             obj[QStringLiteral("manuallyMoved")] = true;
+        if (m_placements.hasOverride(item.asin))
+            obj[QStringLiteral("placements")] = m_placements.toJson(item);
         arr.append(obj);
     }
 
@@ -508,7 +533,7 @@ void PaneStore::_applyItems(const QList<AmazonCatalogApi::StoreItem> &items)
         }
     }
 
-    m_treeModel->setItems(items, m_customPaths);
+    m_treeModel->setItems(m_placements.treeItems(items), m_customPaths);
     m_storeModel->clear();
 }
 
@@ -521,6 +546,18 @@ QStringList PaneStore::_currentNodePath() const
         idx = idx.parent();
     }
     return path;
+}
+
+QStringList PaneStore::_rawPath(const QStringList &displayPath) const
+{
+    QStringList result = displayPath;
+    const QStringList unknowns = {TreeBrandCategories::tr("(unknown brand)"),
+                                 TreeBrandCategories::tr("(unknown category)"),
+                                 TreeBrandCategories::tr("(unknown gender)"),
+                                 TreeBrandCategories::tr("(unknown age)")};
+    for (int i = 0; i < result.size() && i < unknowns.size(); ++i)
+        if (result[i] == unknowns[i]) result[i].clear();
+    return result;
 }
 
 void PaneStore::_onTreeSelectionChanged()
@@ -544,6 +581,16 @@ void PaneStore::_onTreeSelectionChanged()
     _loadStorefrontVersions();
 }
 
+void PaneStore::_updateTableActions()
+{
+    const bool hasSelection = !_selectedTableRows().isEmpty();
+    for (auto *button : {ui->buttonMoveToTop, ui->buttonMoveUp, ui->buttonMoveDown,
+                         ui->buttonMoveToBottom, ui->buttonMoveProducts,
+                         ui->buttonDuplicateProducts, ui->buttonRemoveProducts,
+                         ui->buttonExportProducts})
+        button->setEnabled(hasSelection);
+}
+
 void PaneStore::_onCountrySelectionChanged()
 {
     const QModelIndex idx = ui->listViewCountries->currentIndex();
@@ -564,7 +611,7 @@ void PaneStore::_updateTableForCurrentSelection()
 void PaneStore::_onMerge()
 {
     const QModelIndexList sel =
-        ui->treeViewBrandCategory->selectionModel()->selectedIndexes();
+        ui->treeViewBrandCategory->selectionModel()->selectedRows(0);
     if (sel.size() != 2 || sel.at(0).parent() != sel.at(1).parent()) return;
 
     const QModelIndex idx0 = sel.at(0);
@@ -603,7 +650,6 @@ void PaneStore::_onMerge()
 
     if (dlg.exec() != QDialog::Accepted) return;
 
-    const QString winner     = rb0->isChecked() ? name0 : name1;
     const QString loser      = rb0->isChecked() ? name1 : name0;
     const QModelIndex winIdx = rb0->isChecked() ? idx0  : idx1;
 
@@ -635,39 +681,48 @@ void PaneStore::_onMerge()
     for (QModelIndex p = winIdx.parent(); p.isValid(); p = p.parent())
         expanded.insert(namePath(p).join(QLatin1Char('\0')));
 
-    // The tree shows placeholder labels for empty fields (e.g. "(unknown gender)").
-    // Normalize those back to "" so the comparison against raw item fields works.
-    static const QHash<QString, QString> kPlaceholders = {
-        {tr("(unknown brand)"),    {}},
-        {tr("(unknown category)"), {}},
-        {tr("(unknown gender)"),   {}},
-        {tr("(unknown age)"),      {}},
-    };
-    const QString rawLoser  = kPlaceholders.value(loser,  loser);
-    const QString rawWinner = kPlaceholders.value(winner, winner);
-
-    // Remap: change loser value → winner for the relevant field. Same as Move,
-    // this must be flagged manuallyMoved or the next Retrieve will silently
-    // revert it back to whatever Amazon's API returns for that field.
-    for (AmazonCatalogApi::StoreItem &item : m_items) {
-        QString *field = nullptr;
-        switch (depth) {
-        case 0: field = &item.brand;    break;
-        case 1: field = &item.category; break;
-        case 2: field = &item.gender;   break;
-        case 3: field = &item.age;      break;
-        }
-        if (field && *field == rawLoser) {
-            *field = rawWinner;
-            item.manuallyMoved = true;
-        }
+    QStringList loserPath = winnerPath;
+    loserPath.last() = loser;
+    QSet<QString> allAsins;
+    for (const auto &item : std::as_const(m_items)) allAsins.insert(item.asin);
+    m_placements.transfer(m_items, allAsins, _rawPath(loserPath), _rawPath(winnerPath), false);
+    for (auto &path : m_customPaths) {
+        if (!StorePlacements::within(path, loserPath)) continue;
+        path = winnerPath + path.mid(loserPath.size());
     }
+    QList<QStringList> uniquePaths;
+    for (const auto &path : std::as_const(m_customPaths))
+        if (!uniquePaths.contains(path)) uniquePaths.append(path);
+    m_customPaths = uniquePaths;
+    _saveCustomPaths();
+
+    auto names = m_treeModel->englishNames();
+    const auto previousNames = names;
+    for (auto it = previousNames.cbegin(); it != previousNames.cend(); ++it) {
+        const auto path = it.key().split(QLatin1Char('\x1f'));
+        if (!StorePlacements::within(path, loserPath)) continue;
+        const auto newKey = (winnerPath + path.mid(loserPath.size())).join(QLatin1Char('\x1f'));
+        if (names.value(newKey).isEmpty()) names[newKey] = it.value();
+        names.remove(it.key());
+    }
+    m_treeModel->setEnglishNames(names);
+    _saveEnglishCategoryNames();
+    const auto previousOrders = m_nodeOrders;
+    for (auto it = previousOrders.cbegin(); it != previousOrders.cend(); ++it) {
+        const auto path = it.key().split(QLatin1Char('\x1f'));
+        if (!StorePlacements::within(path, loserPath)) continue;
+        const auto newKey = (winnerPath + path.mid(loserPath.size())).join(QLatin1Char('\x1f'));
+        auto &order = m_nodeOrders[newKey];
+        for (const auto &key : it.value()) if (!order.contains(key)) order.append(key);
+        m_nodeOrders.remove(it.key());
+    }
+    _saveOrder();
 
     // Rebuild (sales cache preserved intentionally).
     m_asinToItem.clear();
     for (const AmazonCatalogApi::StoreItem &item : m_items)
         m_asinToItem.insert(item.asin, item);
-    m_treeModel->setItems(m_items, m_customPaths);
+    m_treeModel->setItems(m_placements.treeItems(m_items), m_customPaths);
     m_storeModel->clear();
     _saveToDisk(_marketplaceId(), m_items);
 
@@ -704,7 +759,7 @@ void PaneStore::_onMerge()
 // ---------------------------------------------------------------------------
 // _buildAsinGroups — maps every ASIN in visibleAsins to the full (product,color)
 // group it belongs to (same key _buildTable() groups rows by), so Move/Remove/
-// Copy expand a selected representative ASIN to ALL its sibling sizes/ASINs
+// Duplicate expand a selected representative ASIN to ALL its sibling sizes/ASINs
 // instead of just the one shown in the table.
 // ---------------------------------------------------------------------------
 
@@ -725,6 +780,11 @@ QHash<QString, QStringList> PaneStore::_buildAsinGroups(const QStringList &visib
 }
 
 void PaneStore::_onMoveProducts()
+{
+    _onTransferProducts(false);
+}
+
+void PaneStore::_onTransferProducts(bool duplicate)
 {
     // Collect selected representative ASINs from the table.
     const QList<int> tableSel = _selectedTableRows();
@@ -750,18 +810,45 @@ void PaneStore::_onMoveProducts()
             for (const QString &a : group) asinsToMove.insert(a);
     }
 
+    // Restrict destinations to the actual product brand, including every size
+    // represented by the selected rows. Keep the shared tree model read-only.
+    const QString brand = m_asinToItem.value(repAsins.first()).brand;
+    for (const QString &asin : std::as_const(asinsToMove)) {
+        if (m_asinToItem.value(asin).brand != brand) {
+            QMessageBox::information(this, tr("Select products"),
+                                     tr("Select products from a single brand."));
+            return;
+        }
+    }
+    QModelIndex brandIndex;
+    for (int row = 0; row < m_treeModel->rowCount({}); ++row) {
+        const auto index = m_treeModel->index(row, 0, {});
+        if (_rawPath({m_treeModel->nodeNameForIndex(index)}).first() == brand) {
+            brandIndex = index;
+            break;
+        }
+    }
+    if (!brandIndex.isValid()) return;
+
     // Build dialog.
     QDialog dlg(this);
-    dlg.setWindowTitle(tr("Move %n product(s) to…", "", repAsins.size()));
-    dlg.resize(400, 500);
+    dlg.setWindowTitle(duplicate
+        ? tr("Duplicate %n product(s) to…", "", repAsins.size())
+        : tr("Move %n product(s) to…", "", repAsins.size()));
+    dlg.resize(650, 500);
     auto *layout = new QVBoxLayout(&dlg);
-    layout->addWidget(new QLabel(tr("Select the destination node (exactly one):"), &dlg));
+    layout->addWidget(new QLabel(tr("Select a destination within %1:")
+                                    .arg(m_treeModel->nodeNameForIndex(brandIndex)), &dlg));
 
     auto *destTree = new QTreeView(&dlg);
     destTree->setModel(m_treeModel);
+    destTree->setRootIndex(brandIndex);
+    destTree->setEditTriggers(QAbstractItemView::NoEditTriggers);
     destTree->setSelectionMode(QAbstractItemView::SingleSelection);
     destTree->setRootIsDecorated(true);
     destTree->setAlternatingRowColors(true);
+    destTree->header()->setStretchLastSection(true);
+    destTree->setColumnWidth(TreeBrandCategories::ColName, 320);
     destTree->expandAll();
     layout->addWidget(destTree, 1);
 
@@ -780,6 +867,15 @@ void PaneStore::_onMoveProducts()
             warningLabel->show();
             return;
         }
+        const QModelIndex destination = destTree->currentIndex().siblingAtColumn(0);
+        QModelIndex destinationBrand = destination;
+        while (destinationBrand.parent().isValid()) destinationBrand = destinationBrand.parent();
+        if (destinationBrand != brandIndex || destination == brandIndex
+                || TreeBrandCategories::depthOfIndex(destination) > 3) {
+            warningLabel->setText(tr("Select a category, gender or age within this product's brand."));
+            warningLabel->show();
+            return;
+        }
         dlg.accept();
     });
 
@@ -788,7 +884,6 @@ void PaneStore::_onMoveProducts()
     const QModelIndexList destSel = destTree->selectionModel()->selectedIndexes();
     if (destSel.isEmpty()) return;
     const QModelIndex destIdx   = destSel.first();
-    const int         destDepth = TreeBrandCategories::depthOfIndex(destIdx);
 
     // Build the name path from root to the selected node.
     auto namePath = [&](QModelIndex idx) -> QStringList {
@@ -801,49 +896,10 @@ void PaneStore::_onMoveProducts()
     };
     const QStringList destPath = namePath(destIdx);
 
-    // Normalize display placeholders back to raw empty strings.
-    static const QHash<QString, QString> kPlaceholders = {
-        {tr("(unknown brand)"),    {}},
-        {tr("(unknown category)"), {}},
-        {tr("(unknown gender)"),   {}},
-        {tr("(unknown age)"),      {}},
-    };
-    auto normalize = [&](const QString &s) -> QString {
-        return kPlaceholders.value(s, s);
-    };
+    m_placements.transfer(m_items, asinsToMove, _rawPath(_currentNodePath()),
+                          _rawPath(destPath), duplicate);
 
-    // Apply: update only the fields that the destination depth covers.
-    for (AmazonCatalogApi::StoreItem &item : m_items) {
-        if (!asinsToMove.contains(item.asin)) continue;
-        if (destDepth >= 0 && destPath.size() > 0) item.brand    = normalize(destPath[0]);
-        if (destDepth >= 1 && destPath.size() > 1) item.category = normalize(destPath[1]);
-        if (destDepth >= 2 && destPath.size() > 2) item.gender   = normalize(destPath[2]);
-        if (destDepth >= 3 && destPath.size() > 3) item.age      = normalize(destPath[3]);
-        item.manuallyMoved = true;
-    }
-
-    // Rebuild.
-    m_asinToItem.clear();
-    for (const AmazonCatalogApi::StoreItem &item : m_items)
-        m_asinToItem.insert(item.asin, item);
-    m_treeModel->setItems(m_items, m_customPaths);
-    m_storeModel->clear();
-    _saveToDisk(_marketplaceId(), m_items);
-
-    // Re-select the destination node in the rebuilt tree.
-    std::function<QModelIndex(QModelIndex, const QStringList &, int)> findNode =
-        [&](QModelIndex parent, const QStringList &path, int lvl) -> QModelIndex {
-        if (lvl == static_cast<int>(path.size())) return parent;
-        for (int i = 0; i < m_treeModel->rowCount(parent); ++i) {
-            const QModelIndex child = m_treeModel->index(i, 0, parent);
-            if (m_treeModel->nodeNameForIndex(child) == path[lvl])
-                return findNode(child, path, lvl + 1);
-        }
-        return {};
-    };
-    const QModelIndex newDest = findNode({}, destPath, 0);
-    if (newDest.isValid())
-        ui->treeViewBrandCategory->setCurrentIndex(newDest);
+    _refreshAfterProductAction();
 }
 
 void PaneStore::_onRemoveProducts()
@@ -873,21 +929,31 @@ void PaneStore::_onRemoveProducts()
 
     const auto res = QMessageBox::question(
         this, tr("Remove products"),
-        tr("Remove %n product(s) (%2 ASIN(s)) from the store list?\n"
-           "This only removes the local entry — the listing on Amazon is not affected.",
+        tr("Remove %n product(s) (%2 ASIN(s)) from this node?\n"
+           "Placements inside this node will be removed. Other categories and Amazon listings are unchanged.",
            "", repAsins.size()).arg(asinsToRemove.size()),
         QMessageBox::Yes | QMessageBox::Cancel);
     if (res != QMessageBox::Yes) return;
 
-    m_items.removeIf([&](const AmazonCatalogApi::StoreItem &item) {
-        return asinsToRemove.contains(item.asin);
-    });
+    m_placements.remove(m_items, asinsToRemove, _rawPath(_currentNodePath()));
 
+    _refreshAfterProductAction();
+}
+
+void PaneStore::_refreshAfterProductAction()
+{
+    auto *tree = ui->treeViewBrandCategory;
+    const int verticalPosition = tree->verticalScrollBar()->value();
+    const int horizontalPosition = tree->horizontalScrollBar()->value();
     m_asinToItem.clear();
-    for (const AmazonCatalogApi::StoreItem &item : m_items)
-        m_asinToItem.insert(item.asin, item);
-    m_treeModel->setItems(m_items, m_customPaths);
-    m_storeModel->clear();
+    for (const auto &item : std::as_const(m_items)) m_asinToItem.insert(item.asin, item);
+    // Keep existing nodes and QModelIndexes alive: no reset, collapse, reorder,
+    // or navigation to the destination. Empty categories stay available here.
+    m_treeModel->setItems(m_placements.treeItems(m_items), m_customPaths, true);
+    _updateTableForCurrentSelection();
+    tree->doItemsLayout();
+    tree->verticalScrollBar()->setValue(verticalPosition);
+    tree->horizontalScrollBar()->setValue(horizontalPosition);
     _saveToDisk(_marketplaceId(), m_items);
 }
 
@@ -990,7 +1056,7 @@ bool PaneStore::_isCurrentNodeCustom() const
 void PaneStore::_onAddCategory()
 {
     const QModelIndex current = ui->treeViewBrandCategory->currentIndex();
-    if (!current.isValid()) return;
+    if (!current.isValid() || TreeBrandCategories::depthOfIndex(current) >= 3) return;
 
     // New node is a child of the selected node.
     auto namePath = [&](QModelIndex idx) -> QStringList {
@@ -1022,7 +1088,7 @@ void PaneStore::_onAddCategory()
 
     m_customPaths.append(newPath);
     _saveCustomPaths();
-    m_treeModel->setItems(m_items, m_customPaths);
+    m_treeModel->setItems(m_placements.treeItems(m_items), m_customPaths);
 
     // Select the new node.
     std::function<QModelIndex(QModelIndex, const QStringList &, int)> findNode =
@@ -1056,37 +1122,36 @@ void PaneStore::_onRemoveCategory()
         return parts;
     };
     const QStringList path = namePath(current);
-    const int depth = TreeBrandCategories::depthOfIndex(current);
 
     const QStringList asinsInNode = m_treeModel->asinsForIndex(current);
 
     QString msg = asinsInNode.isEmpty()
         ? tr("Remove custom category \"%1\"?").arg(path.last())
         : tr("Remove custom category \"%1\"?\n"
-             "%2 product(s) currently in this node will be reassigned to \"(unknown)\".")
+             "%2 ASIN(s): original placements will be reassigned to \"(unknown)\"; "
+             "duplicate placements will be removed.")
           .arg(path.last()).arg(asinsInNode.size());
 
     if (QMessageBox::question(this, tr("Remove category"), msg,
                               QMessageBox::Yes | QMessageBox::Cancel) != QMessageBox::Yes)
         return;
 
-    // Reassign items: clear the field corresponding to this depth.
-    if (!asinsInNode.isEmpty()) {
-        const QSet<QString> asinSet(asinsInNode.begin(), asinsInNode.end());
-        for (AmazonCatalogApi::StoreItem &item : m_items) {
-            if (!asinSet.contains(item.asin)) continue;
-            switch (depth) {
-            case 0: item.brand    = {}; break;
-            case 1: item.category = {}; break;
-            case 2: item.gender   = {}; break;
-            case 3: item.age      = {}; break;
-            }
-        }
-        m_asinToItem.clear();
-        for (const AmazonCatalogApi::StoreItem &item : m_items)
-            m_asinToItem.insert(item.asin, item);
-        _saveToDisk(_marketplaceId(), m_items);
+    m_placements.removeCategory(m_items, _rawPath(path));
+    m_asinToItem.clear();
+    for (const auto &item : std::as_const(m_items)) m_asinToItem.insert(item.asin, item);
+    _saveToDisk(_marketplaceId(), m_items);
+    auto names = m_treeModel->englishNames();
+    for (auto it = names.begin(); it != names.end();) {
+        if (StorePlacements::within(it.key().split(QLatin1Char('\x1f')), path)) it = names.erase(it);
+        else ++it;
     }
+    m_treeModel->setEnglishNames(names);
+    _saveEnglishCategoryNames();
+    for (auto it = m_nodeOrders.begin(); it != m_nodeOrders.end();) {
+        if (StorePlacements::within(it.key().split(QLatin1Char('\x1f')), path)) it = m_nodeOrders.erase(it);
+        else ++it;
+    }
+    _saveOrder();
 
     // Remove the path and any child custom paths under it.
     m_customPaths.removeIf([&](const QStringList &p) {
@@ -1094,7 +1159,7 @@ void PaneStore::_onRemoveCategory()
         return p.mid(0, path.size()) == path;
     });
     _saveCustomPaths();
-    m_treeModel->setItems(m_items, m_customPaths);
+    m_treeModel->setItems(m_placements.treeItems(m_items), m_customPaths);
     m_storeModel->clear();
 }
 
@@ -1123,36 +1188,14 @@ void PaneStore::_onCopyAsins()
 }
 
 // ---------------------------------------------------------------------------
-// _syncSavedOrderFromVisibleRows — after reordering rows in the currently
-// selected node, update the GLOBAL m_savedOrder to match. m_savedOrder covers
-// every category, not just the one on screen, so this must only replace the
-// entries belonging to the visible node — wiping and rebuilding the whole
-// list from m_storeModel (which only ever holds one node's rows) would erase
-// every other category's saved order the moment you reorder anything.
-// Entries are keyed by the stable (product,color) group key rather than by
-// the representative ASIN shown in the table — which ASIN gets picked to
-// represent a group depends on its category/gender (shoe-size / women's-size
-// heuristics in _buildTable), so that identity is not stable across a
-// category Move; the group key is, since it only depends on sku/color.
+// Each category keeps its own order, even when products appear in several nodes.
 // ---------------------------------------------------------------------------
-
 void PaneStore::_syncSavedOrderFromVisibleRows()
 {
-    QStringList visibleKeysInOrder;
-    QSet<QString> visibleKeySet;
-    for (int i = 0; i < m_storeModel->rowCount(); ++i) {
-        const QString asin = m_storeModel->data(m_storeModel->index(i, TableStoreAsin::ColAsin)).toString();
-        const QString key  = TreeBrandCategories::colorGroupKey(m_asinToItem.value(asin));
-        visibleKeysInOrder << key;
-        visibleKeySet.insert(key);
-    }
-
-    QStringList newOrder;
-    for (const QString &key : std::as_const(m_savedOrder))
-        if (!visibleKeySet.contains(key)) newOrder << key;
-    newOrder << visibleKeysInOrder;
-
-    m_savedOrder = newOrder;
+    QStringList order;
+    for (const auto &row : m_storeModel->rows())
+        order.append(TreeBrandCategories::colorGroupKey(m_asinToItem.value(row.asin)));
+    m_nodeOrders[_currentNodePath().join(QLatin1Char('\x1f'))] = order;
     _saveOrder();
 }
 
@@ -1409,7 +1452,7 @@ void PaneStore::_buildTable(const QStringList &asins)
     };
 
     // Grouping key: shared with TreeBrandCategories (whose tree counts must match
-    // these table rows) and with _expandToGroup() (used by Move/Remove/Copy) —
+    // these table rows) and with _buildAsinGroups() (Move/Remove/Duplicate) —
     // see TreeBrandCategories::colorGroupKey for why color alone isn't enough.
     QHash<QString, QStringList> colorGroups;
     QStringList colorOrder;
@@ -1420,6 +1463,7 @@ void PaneStore::_buildTable(const QStringList &asins)
         colorGroups[key].append(asin);
     }
 
+    const QStringList currentScope = _rawPath(_currentNodePath());
     // Build raw rows (one per color group)
     QList<TableStoreAsin::Row> unsortedRows;
     unsortedRows.reserve(colorGroups.size());
@@ -1467,6 +1511,9 @@ void PaneStore::_buildTable(const QStringList &asins)
         TableStoreAsin::Row row;
         row.asin                  = picked;
         row.title                 = si.title;
+        row.duplicate = std::all_of(group.cbegin(), group.cend(), [&](const QString &asin) {
+            return m_placements.isDuplicate(m_asinToItem.value(asin), currentScope);
+        });
         row.image                 = m_asinToPixmap.value(picked);
         row.createdDate           = si.createdDate;
         row.existsInMarketplaces  = si.existsInMarketplaces;
@@ -1480,19 +1527,18 @@ void PaneStore::_buildTable(const QStringList &asins)
         unsortedRows.append(row);
     }
 
-    // Apply saved order: new rows (not in m_savedOrder) go first, then known order.
+    const QStringList savedOrder = _orderForCurrentNode();
+    // Apply saved order: new rows (not in savedOrder) go first, then known order.
     // Matched by the stable (product,color) group key, not the representative
-    // ASIN — see _syncSavedOrderFromVisibleRows for why ASIN identity isn't
-    // stable across a category Move (shoe/gender size-picking can change which
-    // ASIN represents a group), while the group key always is.
-    const QSet<QString> savedSet(m_savedOrder.cbegin(), m_savedOrder.cend());
+    // ASIN, which can change with category/gender size-picking heuristics.
+    const QSet<QString> savedSet(savedOrder.cbegin(), savedOrder.cend());
     QList<TableStoreAsin::Row> newRows, orderedRows;
     newRows.reserve(unsortedRows.size());
-    orderedRows.resize(m_savedOrder.size()); // slots, some may stay default-constructed
+    orderedRows.resize(savedOrder.size()); // slots, some may stay default-constructed
 
     QHash<QString, int> savedPos;
-    for (int i = 0; i < m_savedOrder.size(); ++i)
-        savedPos.insert(m_savedOrder.at(i), i);
+    for (int i = 0; i < savedOrder.size(); ++i)
+        savedPos.insert(savedOrder.at(i), i);
 
     for (const TableStoreAsin::Row &r : std::as_const(unsortedRows)) {
         const QString key = TreeBrandCategories::colorGroupKey(m_asinToItem.value(r.asin));

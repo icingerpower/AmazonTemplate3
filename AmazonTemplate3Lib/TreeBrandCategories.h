@@ -20,8 +20,10 @@ public:
 
     // customPaths: extra paths to ensure exist in the tree even if no items reside there.
     // Each entry is an ordered list of node names from root, e.g. {"Nike","Platform Heels"}.
+    // preserveNodes updates counts/membership in place, appending new nodes and
+    // retaining empty ones so product actions do not disturb tree navigation.
     void setItems(const QList<AmazonCatalogApi::StoreItem> &items,
-                  const QList<QStringList> &customPaths = {});
+                  const QList<QStringList> &customPaths = {}, bool preserveNodes = false);
     void clear();
 
     // Returns all ASINs for the node at index (aggregated across children).
@@ -71,6 +73,7 @@ private:
     struct TreeNode {
         QString          name;
         QString          englishName; // user-filled, persisted via m_englishNames
+        QSet<QString>    asinSet;    // deduplicates membership across category placements
         QStringList      asins;      // all ASINs under this subtree (aggregated)
         QSet<QString>    colorKeys;  // unique color-group keys (color or asin-if-no-color)
         QList<TreeNode*> children;
@@ -86,7 +89,7 @@ private:
     // Kept alive across setItems() rebuilds — see setEnglishNames().
     QHash<QString, QString> m_englishNames;
 
-    TreeNode *_findOrCreate(TreeNode *parentNode, const QString &name);
+    TreeNode *_findOrCreate(TreeNode *parentNode, const QString &name, bool notifyInsertion = false);
     QString   _pathKeyFor(const TreeNode *node) const;
 };
 

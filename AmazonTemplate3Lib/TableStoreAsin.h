@@ -28,6 +28,7 @@ public:
     struct Row {
         QString asin;
         QString title;
+        bool duplicate = false;
         QPixmap image;
         QDate   createdDate;
         QSet<QString> existsInMarketplaces; // marketplaceIds where this color-group rep exists

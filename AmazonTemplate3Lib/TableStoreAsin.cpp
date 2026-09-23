@@ -137,6 +137,11 @@ QVariant TableStoreAsin::data(const QModelIndex &index, int role) const
         && row.stockDays >= 0 && row.stockDays < kFourMonthCoverageDays)
         return QBrush(QColor(0xd9, 0x3c, 0x3c));
 
+    if (role == Qt::ForegroundRole && row.duplicate)
+        return QBrush(QColor(0x87, 0xce, 0xfa));
+    if (role == Qt::ToolTipRole && row.duplicate && (col == ColAsin || col == ColTitle))
+        return tr("Additional category placement of this product");
+
     // Tooltip: full date + days ago
     if (role == Qt::ToolTipRole && col == ColCreatedDate && row.createdDate.isValid()) {
         const int days = row.createdDate.daysTo(QDate::currentDate());
