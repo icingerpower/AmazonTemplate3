@@ -21,6 +21,7 @@ QT_BEGIN_NAMESPACE
 namespace Ui { class PaneStore; }
 QT_END_NAMESPACE
 
+class TreeDeletedProducts;
 class TableStoreAsin;
 class TreeBrandCategories;
 class QStandardItemModel;
@@ -56,6 +57,7 @@ private:
     // New products appear first; old global/ASIN order files provide a fallback.
     QStringList             m_savedOrder; // legacy fallback for nodes without their own order
     QHash<QString, QStringList> m_nodeOrders;
+    TreeDeletedProducts *m_deletedProducts = nullptr;
     StorePlacements         m_placements;
     QList<QStringList>      m_customPaths; // manually added tree node paths, persisted
 
@@ -92,6 +94,8 @@ private:
     QStringList _rawPath(const QStringList &displayPath) const;
     QStringList _orderForCurrentNode() const;
     void _onRemoveProducts();
+    void _onViewDeleted();
+    void _restoreDeleted(const QSet<QString> &asins);
     void _refreshAfterProductAction();
     void _onAddCategory();
     void _onRemoveCategory();

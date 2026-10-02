@@ -69,6 +69,8 @@ add_library(AmazonTemplate3Lib STATIC
   TreeProductWarnings.cpp
   TreeBrandCategories.h
   TreeBrandCategories.cpp
+  TreeDeletedProducts.h
+  TreeDeletedProducts.cpp
   StorePlacements.h
   StorePlacements.cpp
   TableStoreAsin.h
@@ -205,6 +207,8 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   TreeProductWarnings.cpp
   TreeBrandCategories.h
   TreeBrandCategories.cpp
+  TreeDeletedProducts.h
+  TreeDeletedProducts.cpp
   StorePlacements.h
   StorePlacements.cpp
   TableStoreAsin.h

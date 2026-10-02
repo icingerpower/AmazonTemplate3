@@ -1,6 +1,7 @@
 #include "gui/panes/PaneStore.h"
 #include "TableStoreAsin.h"
 #include "TreeBrandCategories.h"
+#include "TreeDeletedProducts.h"
 #include "workingdirectory/WorkingDirectoryManager.h"
 #include <QAbstractItemModelTester>
 #include <QApplication>
@@ -456,7 +457,116 @@ private slots:
         selectPump(pane);
         confirmButton(pane, "buttonRemoveProducts");
         QCOMPARE(pane.m_items.size(), 1);
+        roundTrip(pane);
+        pane._applyItems(fresh);
+        QCOMPARE(pane.m_items.size(), 1); // last duplicate deletion cannot resurrect the original
+        QCOMPARE(pane.m_deletedProducts->items().size(), 3);
     }
+    void deletedProductsPersistAndRestore()
+    {
+        PaneStore pane;
+        setup(pane);
+        QAbstractItemModelTester tester(pane.m_deletedProducts,
+            QAbstractItemModelTester::FailureReportingMode::QtTest);
+        selectNode(pane, category("Pumps"));
+        selectPump(pane);
+        confirmButton(pane, "buttonRemoveProducts", false);
+        QVERIFY(pane.m_deletedProducts->items().isEmpty());
+        confirmButton(pane, "buttonRemoveProducts");
+        QCOMPARE(pane.m_deletedProducts->items().size(), 3);
+        roundTrip(pane);
+        pane._applyItems(catalog()); // same filtering boundary as Retrieve
+        QCOMPARE(pane.m_items.size(), 1);
+        roundTrip(pane);
+        QCOMPARE(pane.m_deletedProducts->items().size(), 3);
+
+        bool restored = false;
+        QTimer::singleShot(0, this, [&] {
+            auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            auto *tree = dialog->findChild<QTreeView *>();
+            tree->setCurrentIndex(pane.m_deletedProducts->index(0, 0));
+            auto *button = dialog->findChild<QPushButton *>("buttonRestoreDeleted");
+            restored = button && button->isEnabled();
+            if (restored) button->click();
+            dialog->reject();
+        });
+        pane.findChild<QPushButton *>("buttonViewDeleted")->click();
+        QVERIFY(restored);
+        QCOMPARE(pane.m_items.size(), 4);
+        QVERIFY(pane.m_deletedProducts->items().isEmpty());
+        roundTrip(pane);
+        pane._applyItems(catalog());
+        QCOMPARE(pane.m_items.size(), 4);
+        selectNode(pane, category("Pumps"));
+        QCOMPARE(pane.m_storeModel->rowCount(), 2);
+
+        selectPump(pane);
+        confirmButton(pane, "buttonRemoveProducts");
+        pane._loadFromDisk("other-marketplace");
+        QVERIFY(pane.m_deletedProducts->items().isEmpty());
+        pane._loadFromDisk(pane._marketplaceId());
+        QCOMPARE(pane.m_deletedProducts->items().size(), 3);
+        QTemporaryDir other;
+        pane.setWorkingDir(QDir(other.path()));
+        QVERIFY(pane.m_deletedProducts->items().isEmpty());
+    }
+
+    void duplicateDeletionNeverArchived()
+    {
+        PaneStore pane;
+        setup(pane);
+        selectNode(pane, category("Pumps"));
+        selectPump(pane);
+        transfer(pane, true, category("Low heels"));
+        selectPump(pane);
+        confirmButton(pane, "buttonRemoveProducts");
+        QVERIFY(pane.m_deletedProducts->items().isEmpty());
+        roundTrip(pane);
+        pane._applyItems(catalog());
+        selectNode(pane, category("Low heels"));
+        QCOMPARE(pane.m_storeModel->rowCount(), 0);
+
+        selectNode(pane, category("Pumps"));
+        selectPump(pane);
+        transfer(pane, true, category("Low heels"));
+        selectNode(pane, category("Pumps"));
+        selectPump(pane);
+        confirmButton(pane, "buttonRemoveProducts");
+        QCOMPARE(pane.m_deletedProducts->items().size(), 3);
+        roundTrip(pane);
+        pane._restoreDeleted(pumpAsins());
+        selectNode(pane, category("Pumps"));
+        QCOMPARE(pane.m_storeModel->rowCount(), 2);
+        selectNode(pane, category("Low heels"));
+        QCOMPARE(pane.m_storeModel->rowCount(), 1);
+        QVERIFY(pane.m_storeModel->rows().first().duplicate);
+    }
+
+    void categoryRemovalKeepsExpansion()
+    {
+        PaneStore pane;
+        setup(pane);
+        auto *tree = pane.findChild<QTreeView *>("treeViewBrandCategory");
+        QAbstractItemModelTester tester(pane.m_treeModel,
+            QAbstractItemModelTester::FailureReportingMode::QtTest);
+        tree->expandAll();
+        const QPersistentModelIndex brand(node(pane.m_treeModel, {"Brand"}));
+        const QPersistentModelIndex pumps(node(pane.m_treeModel, category("Pumps")));
+        const QPersistentModelIndex gender(node(pane.m_treeModel, {"Brand", "Pumps", "female"}));
+        tree->collapse(gender);
+        QSignalSpy resets(pane.m_treeModel, &QAbstractItemModel::modelReset);
+        selectNode(pane, category("Low heels"));
+        confirmButton(pane, "buttonRemoveCategory");
+        QCOMPARE(resets.size(), 0);
+        QVERIFY(brand.isValid());
+        QVERIFY(pumps.isValid());
+        QVERIFY(tree->isExpanded(brand));
+        QVERIFY(tree->isExpanded(pumps));
+        QVERIFY(!tree->isExpanded(gender));
+        QVERIFY(!node(pane.m_treeModel, category("Low heels")).isValid());
+    }
+
     void originalMoveAndDestinationCollision()
     {
         PaneStore pane;

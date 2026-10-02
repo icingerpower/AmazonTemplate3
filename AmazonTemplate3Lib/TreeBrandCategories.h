@@ -25,6 +25,7 @@ public:
     void setItems(const QList<AmazonCatalogApi::StoreItem> &items,
                   const QList<QStringList> &customPaths = {}, bool preserveNodes = false);
     void clear();
+    void removeSubtree(const QModelIndex &index);
 
     // Returns all ASINs for the node at index (aggregated across children).
     QStringList asinsForIndex(const QModelIndex &index) const;

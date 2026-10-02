@@ -4,6 +4,7 @@
 #include "SettingsTable.h"
 #include "TableStoreAsin.h"
 #include "TreeBrandCategories.h"
+#include "TreeDeletedProducts.h"
 #include "AmazonMarketplace.h"
 #include "AbstractCli.h"
 #include "AbstractInventorySource.h"
@@ -67,6 +68,8 @@ PaneStore::PaneStore(QWidget *parent)
     , ui(new Ui::PaneStore)
 {
     ui->setupUi(this);
+    m_deletedProducts = new TreeDeletedProducts(this);
+    connect(ui->buttonViewDeleted, &QPushButton::clicked, this, &PaneStore::_onViewDeleted);
     ui->splitterMain->setStretchFactor(0, 1);
     ui->splitterMain->setStretchFactor(1, 3);
 
@@ -213,6 +216,7 @@ PaneStore::~PaneStore()
 void PaneStore::setWorkingDir(const QDir &workingDir)
 {
     m_workingDir = workingDir;
+    m_deletedProducts->reset();
     m_placements.clear();
     m_savedOrder.clear();
     m_nodeOrders.clear();
@@ -414,6 +418,8 @@ bool PaneStore::eventFilter(QObject *obj, QEvent *event)
 
 void PaneStore::_loadFromDisk(const QString &marketplaceId)
 {
+    m_deletedProducts->reset();
+    m_placements.clear();
     const QString path = m_workingDir.filePath(
         QStringLiteral("stores/%1.json").arg(marketplaceId));
     QFile f(path);
@@ -424,9 +430,9 @@ void PaneStore::_loadFromDisk(const QString &marketplaceId)
     }
 
     const QJsonArray arr = QJsonDocument::fromJson(f.readAll()).array();
-    m_placements.clear();
     QList<AmazonCatalogApi::StoreItem> items;
     items.reserve(arr.size());
+    QList<AmazonCatalogApi::StoreItem> deleted;
     for (const QJsonValue &v : arr) {
         const QJsonObject obj = v.toObject();
         AmazonCatalogApi::StoreItem item;
@@ -447,10 +453,15 @@ void PaneStore::_loadFromDisk(const QString &marketplaceId)
         for (const QJsonValue &mpv : obj.value(QStringLiteral("existsIn")).toArray())
             item.existsInMarketplaces.insert(mpv.toString());
         item.manuallyMoved = obj.value(QStringLiteral("manuallyMoved")).toBool(false);
+        if (obj.value(QStringLiteral("deleted")).toBool()) {
+            deleted.append(item);
+            continue;
+        }
         if (obj.contains(QStringLiteral("placements")))
             m_placements.load(item.asin, obj.value(QStringLiteral("placements")).toArray());
         items.append(item);
     }
+    m_deletedProducts->record(deleted);
     _applyItems(items);
     _loadOrder();
 }
@@ -463,8 +474,13 @@ void PaneStore::_saveToDisk(const QString &marketplaceId,
         QStringLiteral("stores/%1.json").arg(marketplaceId));
 
     QJsonArray arr;
-    for (const AmazonCatalogApi::StoreItem &item : items) {
+    const auto archived = m_deletedProducts->items();
+    const auto allItems = items + archived;
+    for (qsizetype i = 0; i < allItems.size(); ++i) {
+        const auto &item = allItems.at(i);
+        const bool deleted = i >= items.size();
         QJsonObject obj;
+        if (deleted) obj[QStringLiteral("deleted")] = true;
         obj[QStringLiteral("asin")]      = item.asin;
         obj[QStringLiteral("sku")]       = item.sku;
         obj[QStringLiteral("title")]     = item.title;
@@ -487,7 +503,7 @@ void PaneStore::_saveToDisk(const QString &marketplaceId,
         }
         if (item.manuallyMoved)
             obj[QStringLiteral("manuallyMoved")] = true;
-        if (m_placements.hasOverride(item.asin))
+        if (!deleted && m_placements.hasOverride(item.asin))
             obj[QStringLiteral("placements")] = m_placements.toJson(item);
         arr.append(obj);
     }
@@ -502,8 +518,13 @@ void PaneStore::_saveToDisk(const QString &marketplaceId,
 void PaneStore::_applyItems(const QList<AmazonCatalogApi::StoreItem> &items)
 {
     m_items = items;
+    m_items.removeIf([&](const auto &item) {
+        // Existing duplicate placements remain visible; a deleted original must
+        // never fall back to the default placement on a fresh catalog entry.
+        return m_deletedProducts->contains(item.asin) && !m_placements.hasOverride(item.asin);
+    });
     m_asinToItem.clear();
-    for (const AmazonCatalogApi::StoreItem &item : items)
+    for (const AmazonCatalogApi::StoreItem &item : std::as_const(m_items))
         m_asinToItem.insert(item.asin, item);
 
     // Pre-load cached images: sizing folder first, then stores/thumbs/ fallback.
@@ -511,7 +532,7 @@ void PaneStore::_applyItems(const QList<AmazonCatalogApi::StoreItem> &items)
     if (!m_workingDir.path().isEmpty()) {
         const QDir sizingDir(m_workingDir.filePath(QStringLiteral("sizing")));
         const QDir thumbsDir(m_workingDir.filePath(QStringLiteral("stores/thumbs")));
-        for (const AmazonCatalogApi::StoreItem &item : items) {
+        for (const AmazonCatalogApi::StoreItem &item : std::as_const(m_items)) {
             // 1) Check sizing/{ASIN}-*/{ASIN}_main.jpg
             const QStringList dirs = sizingDir.entryList(
                 {item.asin + QStringLiteral("-*")}, QDir::Dirs);
@@ -533,7 +554,7 @@ void PaneStore::_applyItems(const QList<AmazonCatalogApi::StoreItem> &items)
         }
     }
 
-    m_treeModel->setItems(m_placements.treeItems(items), m_customPaths);
+    m_treeModel->setItems(m_placements.treeItems(m_items), m_customPaths);
     m_storeModel->clear();
 }
 
@@ -930,12 +951,23 @@ void PaneStore::_onRemoveProducts()
     const auto res = QMessageBox::question(
         this, tr("Remove products"),
         tr("Remove %n product(s) (%2 ASIN(s)) from this node?\n"
-           "Placements inside this node will be removed. Other categories and Amazon listings are unchanged.",
+           "Original products can be restored using View deleted. Duplicate placements are removed permanently.\n"
+           "Other categories and Amazon listings are unchanged.",
            "", repAsins.size()).arg(asinsToRemove.size()),
         QMessageBox::Yes | QMessageBox::Cancel);
     if (res != QMessageBox::Yes) return;
 
-    m_placements.remove(m_items, asinsToRemove, _rawPath(_currentNodePath()));
+    const auto scope = _rawPath(_currentNodePath());
+    QList<AmazonCatalogApi::StoreItem> deleted;
+    for (const auto &item : std::as_const(m_items)) {
+        if (!asinsToRemove.contains(item.asin)) continue;
+        for (const auto &placement : m_placements.placements(item)) {
+            if (!placement.duplicate && StorePlacements::within(placement.path, scope))
+                deleted.append(item);
+        }
+    }
+    m_deletedProducts->record(deleted);
+    m_placements.remove(m_items, asinsToRemove, scope);
 
     _refreshAfterProductAction();
 }
@@ -1159,8 +1191,8 @@ void PaneStore::_onRemoveCategory()
         return p.mid(0, path.size()) == path;
     });
     _saveCustomPaths();
-    m_treeModel->setItems(m_placements.treeItems(m_items), m_customPaths);
-    m_storeModel->clear();
+    m_treeModel->removeSubtree(current.siblingAtColumn(0));
+    _refreshAfterProductAction();
 }
 
 QList<int> PaneStore::_selectedTableRows() const
@@ -1429,8 +1461,8 @@ QCoro::Task<void> PaneStore::_onRetrieve()
     // after a retrieve (avoids serving a wrong cached thumb for a newly-fetched ASIN).
     for (const auto &item : std::as_const(items))
         m_asinToPixmap.remove(item.asin);
-    _saveToDisk(marketplaceId, items);
-    appendLog(tr("Saved %1 item(s) to stores/%2.json.").arg(items.size()).arg(marketplaceId));
+    _saveToDisk(marketplaceId, m_items);
+    appendLog(tr("Saved %1 item(s) to stores/%2.json.").arg(m_items.size()).arg(marketplaceId));
 
     if (statusLabelPtr) statusLabelPtr->setText(tr("Done."));
     if (closeBtnPtr)    closeBtnPtr->setEnabled(true);
@@ -2238,4 +2270,60 @@ void PaneStore::_onExportProducts()
         QMessageBox::information(this, tr("Export"),
             tr("Exported image and ASINS.txt to:\n%1").arg(QFileInfo(destImagePath).absolutePath()));
     });
+}
+
+void PaneStore::_restoreDeleted(const QSet<QString> &asins)
+{
+    for (const auto &archived : m_deletedProducts->items()) {
+        if (!asins.contains(archived.asin)) continue;
+        auto it = std::find_if(m_items.begin(), m_items.end(), [&](const auto &item) {
+            return item.asin == archived.asin;
+        });
+        QJsonArray placements;
+        if (it != m_items.end()) placements = m_placements.toJson(*it);
+        else { m_items.append(archived); it = std::prev(m_items.end()); }
+        it->brand = archived.brand;
+        it->category = archived.category;
+        it->gender = archived.gender;
+        it->age = archived.age;
+        it->manuallyMoved = true;
+        placements.append(QJsonObject{
+            {QStringLiteral("path"), QJsonArray::fromStringList(StorePlacements::path(archived))},
+            {QStringLiteral("duplicate"), false}});
+        m_placements.load(archived.asin, placements);
+    }
+    m_deletedProducts->forget(asins);
+    _refreshAfterProductAction();
+}
+
+void PaneStore::_onViewDeleted()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Deleted products"));
+    dialog.resize(800, 550);
+    auto *layout = new QVBoxLayout(&dialog);
+    layout->addWidget(new QLabel(tr("Select products or categories to cancel their deletion."), &dialog));
+    auto *tree = new QTreeView(&dialog);
+    tree->setModel(m_deletedProducts);
+    tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    tree->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    tree->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tree->expandAll();
+    tree->setColumnWidth(0, 450);
+    layout->addWidget(tree);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    auto *restore = buttons->addButton(tr("Cancel deletion"), QDialogButtonBox::ActionRole);
+    restore->setObjectName(QStringLiteral("buttonRestoreDeleted"));
+    restore->setEnabled(false);
+    connect(tree->selectionModel(), &QItemSelectionModel::selectionChanged, &dialog, [=, this] {
+        restore->setEnabled(!m_deletedProducts->asinsForIndexes(tree->selectionModel()->selectedRows()).isEmpty());
+    });
+    connect(restore, &QPushButton::clicked, &dialog, [=, this] {
+        _restoreDeleted(m_deletedProducts->asinsForIndexes(tree->selectionModel()->selectedRows()));
+        tree->expandAll();
+        restore->setEnabled(false);
+    });
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+    dialog.exec();
 }

@@ -288,3 +288,14 @@ TreeBrandCategories::TreeNode *TreeBrandCategories::_findOrCreate(
     if (notifyInsertion) endInsertRows();
     return node;
 }
+
+void TreeBrandCategories::removeSubtree(const QModelIndex &index)
+{
+    if (!index.isValid()) return;
+    auto *node = static_cast<TreeNode *>(index.internalPointer());
+    auto *parentNode = node->parent;
+    beginRemoveRows(index.parent(), index.row(), index.row());
+    parentNode->children.removeAt(index.row());
+    delete node;
+    endRemoveRows();
+}
