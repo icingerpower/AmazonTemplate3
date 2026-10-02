@@ -38,6 +38,8 @@ private slots:
     
     void testConvertShoeSize_data();
     void testConvertShoeSize();
+    void testConvertSizeShoe_data();
+    void testConvertSizeShoe();
     void testConvertUnit_data();
     void testConvertUnit();
 };
@@ -162,10 +164,71 @@ void FillerSizeTests::testConvertShoeSize_data()
         << (int)AbstractFiller::Female << (int)AbstractFiller::Adult
         << "SHOES" << QVariant("37") << QVariant(6.0);
         
-   QTest::newRow("EU38_to_US_Male_Adult") 
+    QTest::newRow("EU38_to_US_Male_Adult") 
         << "FR" << "COM" 
         << (int)AbstractFiller::Male << (int)AbstractFiller::Adult
         << "SHOES" << QVariant("42") << QVariant(9.0);
+
+    // Female Adult Shoes FR 30 to 33
+    QTest::newRow("EU30_to_US_Female_Adult") 
+        << "FR" << "COM" 
+        << (int)AbstractFiller::Female << (int)AbstractFiller::Adult
+        << "SHOES" << QVariant("30") << QVariant(1.0);
+
+    QTest::newRow("EU30_to_DE_Female_Adult") 
+        << "FR" << "DE" 
+        << (int)AbstractFiller::Female << (int)AbstractFiller::Adult
+        << "SHOES" << QVariant("30") << QVariant(30.0);
+
+    QTest::newRow("EU30_to_UK_Female_Adult") 
+        << "FR" << "UK" 
+        << (int)AbstractFiller::Female << (int)AbstractFiller::Adult
+        << "SHOES" << QVariant("30") << QVariant(-1.0);
+
+    QTest::newRow("EU30_to_JP_Female_Adult") 
+        << "FR" << "JP" 
+        << (int)AbstractFiller::Female << (int)AbstractFiller::Adult
+        << "SHOES" << QVariant("30") << QVariant("18.0 cm");
+
+    QTest::newRow("EU31_to_US_Female_Adult") 
+        << "FR" << "COM" 
+        << (int)AbstractFiller::Female << (int)AbstractFiller::Adult
+        << "SHOES" << QVariant("31") << QVariant(1.5);
+
+    QTest::newRow("EU31_to_UK_Female_Adult") 
+        << "FR" << "UK" 
+        << (int)AbstractFiller::Female << (int)AbstractFiller::Adult
+        << "SHOES" << QVariant("31") << QVariant(0.0);
+
+    QTest::newRow("EU32_to_US_Female_Adult") 
+        << "FR" << "COM" 
+        << (int)AbstractFiller::Female << (int)AbstractFiller::Adult
+        << "SHOES" << QVariant("32") << QVariant(2.0);
+
+    QTest::newRow("EU32_to_UK_Female_Adult") 
+        << "FR" << "UK" 
+        << (int)AbstractFiller::Female << (int)AbstractFiller::Adult
+        << "SHOES" << QVariant("32") << QVariant(0.5);
+
+    QTest::newRow("EU33_to_US_Female_Adult") 
+        << "FR" << "COM" 
+        << (int)AbstractFiller::Female << (int)AbstractFiller::Adult
+        << "SHOES" << QVariant("33") << QVariant(2.5);
+
+    QTest::newRow("EU33_to_UK_Female_Adult") 
+        << "FR" << "UK" 
+        << (int)AbstractFiller::Female << (int)AbstractFiller::Adult
+        << "SHOES" << QVariant("33") << QVariant(1.0);
+
+    QTest::newRow("EU33_to_JP_Female_Adult") 
+        << "FR" << "JP" 
+        << (int)AbstractFiller::Female << (int)AbstractFiller::Adult
+        << "SHOES" << QVariant("33") << QVariant("19.5 cm");
+
+    QTest::newRow("EU34_to_UK_Female_Adult") 
+        << "FR" << "UK" 
+        << (int)AbstractFiller::Female << (int)AbstractFiller::Adult
+        << "SHOES" << QVariant("34") << QVariant(1.5);
         
     // Logic Male:
     // firstSizeEu = 38
@@ -199,6 +262,37 @@ void FillerSizeTests::testConvertShoeSize()
     } else {
         QCOMPARE(result, expected);
     }
+}
+
+void FillerSizeTests::testConvertSizeShoe_data()
+{
+    QTest::addColumn<QString>("origSize");
+    QTest::addColumn<QString>("from");
+    QTest::addColumn<QString>("to");
+    QTest::addColumn<QString>("expected");
+
+    QTest::newRow("FR30_to_DE") << "30" << "FR" << "DE" << "30";
+    QTest::newRow("FR30_to_US") << "30" << "FR" << "COM" << "1";
+    QTest::newRow("FR30_to_UK") << "30" << "FR" << "UK" << "-1";
+    QTest::newRow("FR31_to_US") << "31" << "FR" << "COM" << "1.5";
+    QTest::newRow("FR31_to_UK") << "31" << "FR" << "UK" << "0";
+    QTest::newRow("FR32_to_US") << "32" << "FR" << "COM" << "2";
+    QTest::newRow("FR32_to_UK") << "32" << "FR" << "UK" << "0.5";
+    QTest::newRow("FR33_to_US") << "33" << "FR" << "COM" << "2.5";
+    QTest::newRow("FR33_to_UK") << "33" << "FR" << "UK" << "1";
+    QTest::newRow("FR34_to_US") << "34" << "FR" << "COM" << "3";
+    QTest::newRow("FR34_to_UK") << "34" << "FR" << "UK" << "1.5";
+}
+
+void FillerSizeTests::testConvertSizeShoe()
+{
+    QFETCH(QString, origSize);
+    QFETCH(QString, from);
+    QFETCH(QString, to);
+    QFETCH(QString, expected);
+
+    const QString result = FillerSize::convertSize(origSize, from, to, QStringLiteral("female"), true);
+    QCOMPARE(result, expected);
 }
 
 void FillerSizeTests::testConvertUnit_data()

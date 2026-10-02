@@ -93,11 +93,40 @@ const QList<QHash<QString, double>> FillerSize::SHOE_FEMALE_ADULT_SIZES = []() {
     QSet<QString> groupUs{"COM", "CA", "SA", "SG", "AE"};
     QSet<QString> groupUk{"UK", "IE", "AU"};
     QSet<QString> groupJp{"JP", "MX"};
+
+    // Sizes EU 30 to 34 (petite / small adult & youth)
+    struct SmallShoeSize {
+        double eu;
+        double us;
+        double uk;
+        double jp;
+    };
+    const QList<SmallShoeSize> smallSizes = {
+        {30., 1.0, -1.0, 18.0},
+        {31., 1.5,  0.0, 18.5},
+        {32., 2.0,  0.5, 19.0},
+        {33., 2.5,  1.0, 19.5},
+        {34., 3.0,  1.5, 20.0},
+    };
+    for (const auto &s : smallSizes)
+    {
+        QHash<QString, double> countrycode_size;
+        for (const auto &countryCode : groupEu)
+            countrycode_size[countryCode] = s.eu;
+        for (const auto &countryCode : groupUs)
+            countrycode_size[countryCode] = s.us;
+        for (const auto &countryCode : groupUk)
+            countrycode_size[countryCode] = s.uk;
+        for (const auto &countryCode : groupJp)
+            countrycode_size[countryCode] = s.jp;
+        _list_countryCode_size << countrycode_size;
+    }
+
     QSet<double> corEu_other{40., 41., 43., 44.};
-    double firstSizeEu = 34.;
-    double curSizeUs = 3.-1.;
-    double curSizeUk = 1.-1.;
-    double curSizeJp = 20.-1.;
+    double firstSizeEu = 35.;
+    double curSizeUs = 4.-1.;
+    double curSizeUk = 2.-1.;
+    double curSizeJp = 21.-1.;
     for (double curSizeEu=firstSizeEu; curSizeEu<55; ++curSizeEu)
     {
         QHash<QString, double> countrycode_size;
