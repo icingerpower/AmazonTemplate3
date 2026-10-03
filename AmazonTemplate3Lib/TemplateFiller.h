@@ -142,6 +142,7 @@ private:
     QSet<QString> _get_fieldIdMandatory(QXlsx::Document &doc) const;
     QSet<QString> _get_fieldIdMandatoryAll() const;
     QSet<QString> _get_fieldIdMandatoryPrevious() const;
+    QSet<QString> _getFieldIdsToProcess(const QHash<QString, int> &fieldId_index_from = {}) const;
     QHash<QString, QSet<QString>> _get_fieldId_possibleValues(QXlsx::Document &doc) const;
     QHash<QString, QSet<QString>> _get_parentSku_skus(QXlsx::Document &doc) const;
     QSet<QString> _get_partialUpdateSkus(QXlsx::Document &doc) const;
@@ -178,6 +179,7 @@ private:
     void _saveTemplates();
     QHash<QString, QString> m_sku_imagePreviewFilePath;
     QMap<QString, QString> m_skuPattern_customInstructions;
+    friend class TemplateFillerTests;
 };
 
 #endif // TEMPLATEFILLER_H

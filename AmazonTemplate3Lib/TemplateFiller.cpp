@@ -621,10 +621,42 @@ TemplateFiller::checkPossibleValues()
     return marketplace_countryCode_langCode_productType_fieldId_possibleValues;
 }
 
+QSet<QString> TemplateFiller::_getFieldIdsToProcess(
+        const QHash<QString, int> &fieldId_index_from) const
+{
+    auto fieldIds = m_mandatoryAttributesTable->getMandatoryIds();
+    const auto &marketplaceFrom = _get_marketplaceFrom();
+    if (fieldId_index_from.isEmpty())
+    {
+        QXlsx::Document docFrom(m_templateFromPath);
+        const auto &fieldIndex = _get_fieldId_index(docFrom);
+        for (auto it = fieldIndex.cbegin(); it != fieldIndex.cend(); ++it)
+        {
+            const auto &fieldId = it.key();
+            if (m_attributeFlagsTable->hasFlag(marketplaceFrom, fieldId, Attribute::Copy))
+            {
+                fieldIds.insert(fieldId);
+            }
+        }
+    }
+    else
+    {
+        for (auto it = fieldId_index_from.cbegin(); it != fieldId_index_from.cend(); ++it)
+        {
+            const auto &fieldId = it.key();
+            if (m_attributeFlagsTable->hasFlag(marketplaceFrom, fieldId, Attribute::Copy))
+            {
+                fieldIds.insert(fieldId);
+            }
+        }
+    }
+    return fieldIds;
+}
+
 void TemplateFiller::buildAttributes()
 {
     const auto &marketplace = _get_marketplaceFrom();
-    const auto &mandatoryIds = m_mandatoryAttributesTable->getMandatoryIds();
+    const auto &fieldIdsToProcess = _getFieldIdsToProcess();
     const auto &marketplace_countryCode_langCode_fieldId_possibleValues = checkPossibleValues();
     struct TemplateInfo{
         QString marketplace;
@@ -645,17 +677,21 @@ void TemplateFiller::buildAttributes()
         templatePath_infos[templatePath] = infos;
     }
 
-    for (const auto &mandatoryId : mandatoryIds)
+    for (const auto &fieldId : fieldIdsToProcess)
     {
         const auto &marketplace_fieldId
-                = m_attributeFlagsTable->get_marketplace_id(marketplace, mandatoryId);
+                = m_attributeFlagsTable->get_marketplace_id(marketplace, fieldId);
         auto attribute = QSharedPointer<Attribute>::create();
         for (auto it = marketplace_fieldId.begin();
              it != marketplace_fieldId.end(); ++it)
         {
             m_marketplace_attributeId_attributeInfos[it.key()][it.value()] = attribute;
         }
-        attribute->setFlag(m_attributeFlagsTable->getFlags(marketplace, mandatoryId));
+        if (!m_marketplace_attributeId_attributeInfos[marketplace].contains(fieldId))
+        {
+            m_marketplace_attributeId_attributeInfos[marketplace][fieldId] = attribute;
+        }
+        attribute->setFlag(m_attributeFlagsTable->getFlags(marketplace, fieldId));
         for (const auto &templatePath : templatePaths)
         {
             const auto &infos = templatePath_infos[templatePath];
@@ -667,7 +703,7 @@ void TemplateFiller::buildAttributes()
                     && marketplace_countryCode_langCode_fieldId_possibleValues[infos.marketplace][infos.countryCode][infos.langCode].contains(
                         infos.productType)
                     && marketplace_countryCode_langCode_fieldId_possibleValues[infos.marketplace][infos.countryCode][infos.langCode][infos.productType].contains(
-                        mandatoryId)
+                        fieldId)
                     )
             {
                 attribute->setPossibleValues(
@@ -676,7 +712,7 @@ void TemplateFiller::buildAttributes()
                             infos.langCode,
                             infos.productType,
                             marketplace_countryCode_langCode_fieldId_possibleValues
-                            [infos.marketplace][infos.countryCode][infos.langCode][infos.productType][mandatoryId]
+                            [infos.marketplace][infos.countryCode][infos.langCode][infos.productType][fieldId]
                         );
             }
         }
@@ -828,11 +864,12 @@ QCoro::Task<void> TemplateFiller::fillValues()
     co_await _readAgeGender();
     _fillValuesSources();
     m_sku_fieldId_fromValues = _get_sku_fieldId_fromValues(m_templateFromPath);
-    const auto &mandatoryFieldIds = m_mandatoryAttributesTable->getMandatoryIds();
-    QStringList sortedFieldIds{mandatoryFieldIds.begin(), mandatoryFieldIds.end()};
+    QXlsx::Document document(m_templateFromPath);
+    const auto &fieldId_index_from = _get_fieldId_index(document);
+    const auto &fieldIdsToProcess = _getFieldIdsToProcess(fieldId_index_from);
+    QStringList sortedFieldIds{fieldIdsToProcess.begin(), fieldIdsToProcess.end()};
     sortedFieldIds.sort();
 
-    QXlsx::Document document(m_templateFromPath);
     const auto &parentSku_variation_skus = _get_parentSku_variation_skus(document);
     const auto &marketplaceFrom = _get_marketplace(document);
     const auto &productTypeFrom = _get_productType(document);
@@ -866,7 +903,11 @@ QCoro::Task<void> TemplateFiller::fillValues()
             for (const auto &fieldIdFrom : sortedFieldIds)
             {
                 const auto &attribute =  m_marketplace_attributeId_attributeInfos[marketplaceFrom][fieldIdFrom].data();
-                if (fieldId_index.contains(fieldIdFrom) && filler->canFill(this, attribute, marketplaceFrom, fieldIdFrom))
+                const auto &fieldIdTo = m_attributeFlagsTable->getFieldId(
+                            marketplaceFrom, fieldIdFrom, marketplaceTo);
+                const QString &targetFieldId = !fieldIdTo.isEmpty() ? fieldIdTo : fieldIdFrom;
+                if (attribute && (fieldId_index.contains(fieldIdFrom) || fieldId_index.contains(targetFieldId))
+                        && filler->canFill(this, attribute, marketplaceFrom, fieldIdFrom))
                 {
                     if (m_attributeFlagsTable->hasFlag(marketplaceFrom, fieldIdFrom, Attribute::FillIfPresent))
                     {
@@ -882,8 +923,6 @@ QCoro::Task<void> TemplateFiller::fillValues()
                         if (!anySkuHasValue)
                             continue;
                     }
-                    const auto &fieldIdTo = m_attributeFlagsTable->getFieldId(
-                                marketplaceFrom, fieldIdFrom, marketplaceTo);
                     qDebug() << "TemplateFiller Loop. Filler:" << filler << countryCodeTo << langCodeTo << "Field:" << fieldIdFrom << "START";
                     try
                     {
@@ -936,7 +975,7 @@ QCoro::Task<void> TemplateFiller::fillValues()
 
 void TemplateFiller::_fillValuesSources()
 {
-    const auto &mandatoryFieldIds = m_mandatoryAttributesTable->getMandatoryIds();
+    const auto &fieldIdsToProcess = _getFieldIdsToProcess();
     const auto &marketplaceFrom = _get_marketplaceFrom();
     if (m_templateSourcePaths.size() > 0)
     {
@@ -947,12 +986,12 @@ void TemplateFiller::_fillValuesSources()
             QSet<QString> whiteListSourceFieldIds;
             QXlsx::Document document(templateSourcePath);
             const auto &marketplaceSource = _get_marketplace(document);
-            for (const auto &mandatoryFieldId : mandatoryFieldIds)
+            for (const auto &fieldId : fieldIdsToProcess)
             {
-                if (m_attributeFlagsTable->hasFlag(marketplaceFrom, mandatoryFieldId, Attribute::ReadablePreviousTemplates))
+                if (m_attributeFlagsTable->hasFlag(marketplaceFrom, fieldId, Attribute::ReadablePreviousTemplates))
                 {
                     const auto &mandatoryFieldIdSource = m_attributeFlagsTable->getFieldId(
-                            marketplaceFrom, mandatoryFieldId, marketplaceSource);
+                            marketplaceFrom, fieldId, marketplaceSource);
                     whiteListSourceFieldIds.insert(mandatoryFieldIdSource);
                 }
             }
@@ -1004,8 +1043,8 @@ void TemplateFiller::_saveTemplates()
 
         // Map target field IDs back to source field IDs
         QHash<QString, QString> mapFieldIdTo_FieldIdFrom;
-        const auto &mandatoryFieldIds = m_mandatoryAttributesTable->getMandatoryIds();
-        for (const auto &fieldIdFrom : mandatoryFieldIds)
+        const auto &fieldIdsToProcess = _getFieldIdsToProcess(fieldId_index_from);
+        for (const auto &fieldIdFrom : fieldIdsToProcess)
         {
             const auto &fieldIdTo = m_attributeFlagsTable->getFieldId(
                         marketplaceFrom, fieldIdFrom, marketplaceTo);

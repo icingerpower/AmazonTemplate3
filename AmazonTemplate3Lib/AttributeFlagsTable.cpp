@@ -83,14 +83,19 @@ QHash<QString, QString> AttributeFlagsTable::get_marketplace_id(
         const QString &marketplace, const QString &fieldId) const
 {
     QHash<QString, QString> marketplace_id;
+    if (!m_marketplace_fieldId_indRow.contains(marketplace) ||
+        !m_marketplace_fieldId_indRow[marketplace].contains(fieldId))
+    {
+        return marketplace_id;
+    }
     int rowIndex = m_marketplace_fieldId_indRow[marketplace][fieldId];
     for (int i=0; i<m_indFirstFlag; ++i)
     {
         const auto &curMarketplace = m_colNames[i];
-        const auto &fieldId = m_listOfVariantList[rowIndex][i].toString();
-        if (!fieldId.isEmpty())
+        const auto &curFieldId = m_listOfVariantList[rowIndex][i].toString();
+        if (!curFieldId.isEmpty())
         {
-            marketplace_id[curMarketplace] = fieldId;
+            marketplace_id[curMarketplace] = curFieldId;
         }
     }
     return marketplace_id;

@@ -6,6 +6,7 @@
 #include <QSet>
 #include "xlsxdocument.h"
 #include "TemplateFiller.h"
+#include "AttributesMandatoryTable.h"
 
 class TemplateFillerTests : public QObject
 {
@@ -15,6 +16,7 @@ private slots:
     void initTestCase();
     void cleanupTestCase();
     void test_getAllFieldIds();
+    void test_getFieldIdsToProcess();
 
 private:
     QTemporaryDir m_tempDir;
@@ -130,6 +132,131 @@ void TemplateFillerTests::test_getAllFieldIds() {
     QVERIFY(fieldIds.contains("size_name"));
     QVERIFY(fieldIds.contains("external_product_id"));
     QCOMPARE(fieldIds.size(), expected.size());
+}
+
+void TemplateFillerTests::test_getFieldIdsToProcess() {
+    QTemporaryDir testDir;
+    QVERIFY(testDir.isValid());
+
+    // Create attributeFlags.csv
+    QFile flagsFile(testDir.filePath("attributeFlags.csv"));
+    QVERIFY(flagsFile.open(QIODevice::WriteOnly | QIODevice::Text));
+    QTextStream out(&flagsFile);
+    out << "Amazon V01,Amazon V02,Temu,ChildOnly,ChildSameValue,Copy,FillIfPresent,ForCustomInstructions,MandatoryAmazon,MandatoryPartialUpdate,MandatoryTemu,NoAI,ReadablePreviousTemplates,SameValue,Size\n";
+    out << "main_image_url,main_product_image_locator#1.media_location,,true,false,true,false,false,true,false,false,true,false,false,false\n";
+    out << "other_image_url1,other_product_image_locator_1#1.media_location,,true,false,true,true,false,false,false,false,true,false,false,false\n";
+    out << "other_image_url2,other_product_image_locator_2#1.media_location,,true,false,true,true,false,false,false,false,true,false,false,false\n";
+    out << ",some_optional_no_copy,,false,false,false,false,false,false,false,false,false,false,false,false\n";
+    flagsFile.close();
+
+    // Create mandatoryFieldIds.ini
+    QFile mandFile(testDir.filePath("mandatoryFieldIds.ini"));
+    QVERIFY(mandFile.open(QIODevice::WriteOnly | QIODevice::Text));
+    QTextStream mandOut(&mandFile);
+    mandOut << "[General]\n";
+    mandOut << "attrMandatoryAlways=main_product_image_locator#1.media_location\n";
+    mandFile.close();
+
+    QString fromPath = testDir.filePath("TEST-001-TOFILL-FR.xlsx");
+    {
+        QXlsx::Document doc(fromPath);
+        doc.addSheet("Template");
+        doc.selectSheet("Template");
+        doc.write(1, 1, "Settings");
+        QStringList headers = {
+            "item_sku",
+            "product_type#1.value",
+            "main_product_image_locator#1.media_location",
+            "other_product_image_locator_1#1.media_location",
+            "other_product_image_locator_2#1.media_location",
+            "some_optional_no_copy"
+        };
+        for (int i = 0; i < headers.size(); ++i) {
+            doc.write(5, i + 1, headers[i]);
+        }
+        doc.write(6, 1, "ABC123");
+        doc.write(7, 1, "PARENT_SKU");
+        doc.write(7, 2, "shirt");
+        doc.write(8, 1, "CHILD_SKU");
+        doc.write(8, 2, "shirt");
+        doc.write(8, 3, "https://example.com/main.jpg");
+        doc.write(8, 4, "https://example.com/other1.jpg");
+        doc.write(8, 5, "https://example.com/other2.jpg");
+        doc.addSheet("Data Definitions");
+        doc.selectSheet("Data Definitions");
+        doc.write(2, 2, "Field Name");
+        doc.write(2, 3, "Mandatory");
+        doc.write(3, 2, "main_product_image_locator#1.media_location");
+        doc.write(3, 3, "Required");
+        doc.addSheet("Valid Values");
+        doc.selectSheet("Template");
+        doc.save();
+    }
+
+    QString toPath = testDir.filePath("TEST-001-TOFILL-COM.xlsx");
+    {
+        QXlsx::Document doc(toPath);
+        doc.addSheet("Template");
+        doc.selectSheet("Template");
+        doc.write(1, 1, "Settings");
+        QStringList headers = {
+            "item_sku",
+            "product_type#1.value",
+            "main_product_image_locator#1.media_location",
+            "other_product_image_locator_1#1.media_location",
+            "other_product_image_locator_2#1.media_location"
+        };
+        for (int i = 0; i < headers.size(); ++i) {
+            doc.write(5, i + 1, headers[i]);
+        }
+        doc.write(6, 1, "ABC123");
+        doc.write(7, 2, "shirt");
+        doc.addSheet("Data Definitions");
+        doc.addSheet("Valid Values");
+        doc.selectSheet("Template");
+        doc.save();
+    }
+
+    TemplateFiller filler(testDir.path(), fromPath, {toPath}, {}, {});
+
+    // Verify that mandatory IDs do not contain secondary images or optional fields
+    const auto mandatoryIds = filler.m_mandatoryAttributesTable->getMandatoryIds();
+    QVERIFY(!mandatoryIds.contains("other_product_image_locator_1#1.media_location"));
+    QVERIFY(!mandatoryIds.contains("other_product_image_locator_2#1.media_location"));
+    QVERIFY(!mandatoryIds.contains("some_optional_no_copy"));
+
+    // Verify that _getFieldIdsToProcess() DOES include optional fields with Copy flag,
+    // but excludes optional fields without Copy flag
+    const auto processIds = filler._getFieldIdsToProcess();
+    QVERIFY(processIds.contains("other_product_image_locator_1#1.media_location"));
+    QVERIFY(processIds.contains("other_product_image_locator_2#1.media_location"));
+    QVERIFY(!processIds.contains("some_optional_no_copy"));
+
+    // Verify buildAttributes registers Attribute for secondary images
+    filler.buildAttributes();
+    QVERIFY(filler.m_marketplace_attributeId_attributeInfos["Amazon V02"].contains("other_product_image_locator_1#1.media_location"));
+
+    // Verify _get_sku_fieldId_fromValues reads secondary images from source template
+    filler.m_sku_fieldId_fromValues = filler._get_sku_fieldId_fromValues(fromPath);
+    QVERIFY(filler.m_sku_fieldId_fromValues["CHILD_SKU"].contains("other_product_image_locator_1#1.media_location"));
+    QCOMPARE(filler.m_sku_fieldId_fromValues["CHILD_SKU"]["other_product_image_locator_1#1.media_location"], QString("https://example.com/other1.jpg"));
+
+    // Simulate FillerCopy writing to toValues
+    filler.m_countryCode_langCode_sku_fieldId_toValues["COM"]["EN"]["CHILD_SKU"]["other_product_image_locator_1#1.media_location"] = "https://example.com/other1.jpg";
+
+    // Verify _saveTemplates writes optional copied attribute into target FILLED file
+    filler._saveTemplates();
+
+    QString filledPath = testDir.filePath("TEST-001-FILLED-COM.xlsx");
+    QVERIFY(QFile::exists(filledPath));
+    QXlsx::Document docFilled(filledPath);
+    docFilled.selectSheet("Template");
+    const auto &fieldIdIndexFilled = filler._get_fieldId_index(docFilled);
+    int colOther1 = fieldIdIndexFilled.value("other_product_image_locator_1#1.media_location", -1);
+    QVERIFY(colOther1 != -1);
+    auto cell = docFilled.cellAt(8, colOther1 + 1);
+    QVERIFY(cell != nullptr);
+    QCOMPARE(cell->value().toString(), QString("https://example.com/other1.jpg"));
 }
 
 QTEST_MAIN(TemplateFillerTests)
