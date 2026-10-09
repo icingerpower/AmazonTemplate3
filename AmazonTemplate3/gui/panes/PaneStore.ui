@@ -132,7 +132,7 @@
             <bool>false</bool>
            </property>
            <property name="toolTip">
-            <string>Move selected product to top</string>
+            <string>Move selected products to top</string>
            </property>
            <property name="text">
             <string>▲▲</string>
@@ -171,7 +171,7 @@
             <bool>false</bool>
            </property>
            <property name="toolTip">
-            <string>Move selected product to bottom</string>
+            <string>Move selected products to bottom</string>
            </property>
            <property name="text">
             <string>▼▼</string>
@@ -318,7 +318,11 @@
          <property name="orientation">
           <enum>Qt::Orientation::Vertical</enum>
          </property>
-         <widget class="QTableView" name="tableViewAsins"/>
+         <widget class="QTableView" name="tableViewAsins">
+          <property name="toolTip">
+           <string>One row per product and color, covering all sizes. The title and ASIN show a representative size. Move, Duplicate and Remove apply to the whole group.</string>
+          </property>
+         </widget>
          <widget class="QWidget" name="widgetStorefront" native="true">
           <layout class="QVBoxLayout" name="vLayoutStorefront">
            <property name="spacing">

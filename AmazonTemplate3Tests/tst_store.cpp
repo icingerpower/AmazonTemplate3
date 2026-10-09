@@ -72,6 +72,20 @@ class StoreTests : public QObject
         return items;
     }
     static QSet<QString> pumpAsins() { return {"A38", "A39", "A40"}; }
+    static QList<Item> shoeCatalog()
+    {
+        QList<Item> items;
+        for (int size : {37, 44, 45}) {
+            auto item = catalog().first();
+            item.asin = QStringLiteral("A%1").arg(size);
+            item.sku = QStringLiteral("CJNS2269160-BLACK-%1").arg(size);
+            item.category = "THIGH BOOTS";
+            item.sizeValue = QString::number(size == 37 ? 4 : size == 44 ? 9 : 10);
+            item.title = QStringLiteral("Black thigh boots (Black, %1)").arg(size);
+            items.append(item);
+        }
+        return items;
+    }
     static QStringList category(const QString &name) { return {"Brand", name}; }
 
     QModelIndex node(TreeBrandCategories *model, const QStringList &path)
@@ -585,6 +599,194 @@ private slots:
         QVERIFY(!pane.m_storeModel->rows().first().duplicate);
         for (const auto &item : pane.m_items)
             if (item.asin.startsWith('A')) QCOMPARE(pane.m_placements.placements(item).size(), 1);
+    }
+    void representativeShoeSize_data()
+    {
+        QTest::addColumn<QString>("sizeSource");
+        QTest::addColumn<int>("stockedSize");
+        QTest::addColumn<QString>("expectedAsin");
+        QTest::newRow("regional-catalog-size") << "sku" << 0 << "A45";
+        QTest::newRow("opaque-sku-title-size") << "title" << 0 << "A45";
+        QTest::newRow("eu-catalog-size") << "catalog" << 0 << "A45";
+        QTest::newRow("only-44-in-stock") << "sku" << 44 << "A44";
+        QTest::newRow("only-37-in-stock") << "sku" << 37 << "A37";
+        QTest::newRow("45-in-stock") << "sku" << 45 << "A45";
+        QTest::newRow("several-sizes-in-stock") << "sku" << -1 << "A45";
+        QTest::newRow("44-fallback") << "without45" << 0 << "A44";
+        QTest::newRow("half-size-is-not-45") << "half" << 0 << "A45";
+    }
+    void representativeShoeSize()
+    {
+        QFETCH(QString, sizeSource);
+        QFETCH(int, stockedSize);
+        QFETCH(QString, expectedAsin);
+        auto items = shoeCatalog();
+        if (sizeSource == "without45") items.removeLast();
+        if (sizeSource == "half") {
+            auto half = items.last();
+            half.asin = "A455";
+            half.sku = "CJNS2269160-BLACK-45.5";
+            half.sizeValue = "45.5";
+            half.title = "Black thigh boots (Black, 45.5)";
+            items.prepend(half);
+        }
+        for (int i = 0; i < items.size(); ++i) {
+            auto &item = items[i];
+            if (sizeSource == "title" || sizeSource == "catalog") {
+                item.sku = QStringLiteral("CJNS2269160%1AB").arg(i, 2, 10, QLatin1Char('0'));
+                item.sizeValue = sizeSource == "catalog" ? item.asin.mid(1) : QString{};
+                item.title = sizeSource == "title"
+                    ? QStringLiteral("Boots with 14 cm heels (Black, EU-%1)").arg(item.asin.mid(1))
+                    : QStringLiteral("Boots with 14 cm heels");
+            }
+        }
+        PaneStore pane;
+        setup(pane, items);
+        for (const auto &item : items)
+            pane.m_stockAvailableBySkuLower[item.sku.toLower()] =
+                stockedSize == -1 || item.asin == QStringLiteral("A%1").arg(stockedSize) ? 20 : 0;
+        selectNode(pane, category("THIGH BOOTS"));
+        QCOMPARE(pane.m_storeModel->rowCount(), 1);
+        QCOMPARE(pane.m_storeModel->rows().first().asin, expectedAsin);
+        QCOMPARE(pane.m_treeModel->colorCountForIndex(node(pane.m_treeModel, category("THIGH BOOTS"))), 1);
+        QCOMPARE(pane._buildAsinGroups(pane.m_treeModel->asinsForIndex(
+                     node(pane.m_treeModel, category("THIGH BOOTS")))).value(expectedAsin).size(), items.size());
+    }
+    void representativeChangePreservesSavedWork_data()
+    {
+        QTest::addColumn<bool>("legacyOrder");
+        QTest::newRow("legacy-asin-order") << true;
+        QTest::newRow("per-category-order") << false;
+    }
+    void representativeChangePreservesSavedWork()
+    {
+        QFETCH(bool, legacyOrder);
+        auto items = shoeCatalog();
+        for (const QString &family : {QStringLiteral("B"), QStringLiteral("C")}) {
+            for (auto item : shoeCatalog()) {
+                item.asin.replace(0, 1, family);
+                item.sku.prepend(family);
+                items.append(item);
+            }
+        }
+        PaneStore pane;
+        setup(pane, items);
+        const QSet<QString> familyA{"A37", "A44", "A45"};
+        const QSet<QString> familyC{"C37", "C44", "C45"};
+        pane.m_placements.transfer(pane.m_items, familyA, category("THIGH BOOTS"), category("Low heels"), true);
+        QList<Item> deleted;
+        for (const auto &item : items)
+            if (familyC.contains(item.asin)) deleted.append(item);
+        pane.m_deletedProducts->record(deleted);
+        pane.m_placements.remove(pane.m_items, familyC, category("THIGH BOOTS"));
+        pane._saveToDisk(pane._marketplaceId(), pane.m_items);
+
+        const QString nodeKey = category("THIGH BOOTS").join('\x1f');
+        const QJsonArray oldAsins{"B37", "A37", "C37"};
+        const QJsonArray groupKeys{TreeBrandCategories::colorGroupKey(items[3]),
+                                   TreeBrandCategories::colorGroupKey(items[0]),
+                                   TreeBrandCategories::colorGroupKey(items[6])};
+        const QJsonDocument order = legacyOrder ? QJsonDocument(oldAsins)
+            : QJsonDocument(QJsonObject{{"legacy", oldAsins}, {"nodes", QJsonObject{{nodeKey, groupKeys}}}});
+        QFile orderFile(m_dir->filePath("stores/A1PA6795UKMFR9_order.json"));
+        QVERIFY(orderFile.open(QIODevice::WriteOnly));
+        const auto orderBytes = order.toJson();
+        orderFile.write(orderBytes);
+        orderFile.close();
+        QFile catalogFile(m_dir->filePath("stores/A1PA6795UKMFR9.json"));
+        QVERIFY(catalogFile.open(QIODevice::ReadOnly));
+        const auto catalogBytes = catalogFile.readAll();
+        catalogFile.close();
+
+        PaneStore reloaded;
+        reloaded.setWorkingDir(QDir(m_dir->path()));
+        selectNode(reloaded, category("THIGH BOOTS"));
+        QCOMPARE(reloaded.m_storeModel->rowCount(), 2);
+        QCOMPARE(reloaded.m_storeModel->rows()[0].asin, "B45");
+        QCOMPARE(reloaded.m_storeModel->rows()[1].asin, "A45");
+        for (const auto &asin : familyC) QVERIFY(reloaded.m_deletedProducts->contains(asin));
+        QCOMPARE(reloaded.m_deletedProducts->items().size(), 3);
+        selectNode(reloaded, category("Low heels"));
+        QCOMPARE(reloaded.m_storeModel->rowCount(), 1);
+        QVERIFY(reloaded.m_storeModel->rows().first().duplicate);
+        QCOMPARE(reloaded.m_storeModel->rows().first().asin, "A45");
+
+        // Stock changes the representative, never the product's saved position.
+        for (const auto &item : reloaded.m_items)
+            reloaded.m_stockAvailableBySkuLower[item.sku.toLower()] = item.asin.endsWith("44") ? 20 : 0;
+        reloaded._saveStockCache();
+        reloaded.setWorkingDir(QDir(m_dir->path()));
+        selectNode(reloaded, category("THIGH BOOTS"));
+        QCOMPARE(reloaded.m_storeModel->rows()[0].asin, "B44");
+        QCOMPARE(reloaded.m_storeModel->rows()[1].asin, "A44");
+        QCOMPARE(reloaded.m_deletedProducts->items().size(), 3);
+        QVERIFY(orderFile.open(QIODevice::ReadOnly));
+        QCOMPARE(orderFile.readAll(), orderBytes);
+        QVERIFY(catalogFile.open(QIODevice::ReadOnly));
+        QCOMPARE(catalogFile.readAll(), catalogBytes);
+    }
+    void moveSelectionToEdge_data()
+    {
+        QTest::addColumn<bool>("toTop");
+        QTest::addColumn<QList<int>>("selectedRows");
+        for (bool toTop : {true, false}) {
+            const QByteArray prefix = toTop ? "top-" : "bottom-";
+            QTest::newRow((prefix + "disjoint").constData()) << toTop << QList<int>{1, 3};
+            QTest::newRow((prefix + "contiguous").constData()) << toTop << QList<int>{1, 2};
+            QTest::newRow((prefix + "both-edges").constData()) << toTop << QList<int>{0, 4};
+            QTest::newRow((prefix + "already-at-edge").constData()) << toTop
+                << (toTop ? QList<int>{0, 1} : QList<int>{3, 4});
+            QTest::newRow((prefix + "all").constData()) << toTop << QList<int>{0, 1, 2, 3, 4};
+            QTest::newRow((prefix + "single").constData()) << toTop << QList<int>{2};
+            QTest::newRow((prefix + "empty").constData()) << toTop << QList<int>{};
+        }
+    }
+    void moveSelectionToEdge()
+    {
+        QFETCH(bool, toTop);
+        QFETCH(QList<int>, selectedRows);
+        QList<Item> items;
+        for (int i = 0; i < 5; ++i) {
+            auto item = catalog().first();
+            item.asin = QStringLiteral("PRODUCT%1").arg(i);
+            item.sku = QStringLiteral("SHOE%1-BLACK-38").arg(i);
+            items.append(item);
+        }
+        PaneStore pane;
+        setup(pane, items);
+        selectNode(pane, category("Pumps"));
+        QCOMPARE(pane.m_storeModel->rowCount(), 5);
+        QAbstractItemModelTester tester(pane.m_storeModel,
+                                       QAbstractItemModelTester::FailureReportingMode::QtTest);
+        auto *table = pane.findChild<QTableView *>("tableViewAsins");
+        table->clearSelection();
+        QStringList selectedAsins, remainingAsins;
+        for (int row = 0; row < 5; ++row) {
+            const auto asin = pane.m_storeModel->rows()[row].asin;
+            if (selectedRows.contains(row)) selectedAsins.append(asin);
+            else remainingAsins.append(asin);
+        }
+        // Select in reverse click order; movement must preserve table order.
+        for (auto it = selectedRows.crbegin(); it != selectedRows.crend(); ++it)
+            table->selectionModel()->select(pane.m_storeModel->index(*it, 0),
+                                           QItemSelectionModel::Select | QItemSelectionModel::Rows);
+        pane.findChild<QPushButton *>(toTop ? "buttonMoveToTop" : "buttonMoveToBottom")->click();
+        const QStringList expected = toTop ? selectedAsins + remainingAsins
+                                           : remainingAsins + selectedAsins;
+        QStringList actual;
+        for (const auto &row : pane.m_storeModel->rows()) actual.append(row.asin);
+        QCOMPARE(actual, expected);
+        QStringList stillSelected;
+        for (int row : pane._selectedTableRows())
+            stillSelected.append(pane.m_storeModel->rows()[row].asin);
+        QCOMPARE(stillSelected, selectedAsins);
+
+        pane._loadOrder();
+        roundTrip(pane);
+        selectNode(pane, category("Pumps"));
+        actual.clear();
+        for (const auto &row : pane.m_storeModel->rows()) actual.append(row.asin);
+        QCOMPARE(actual, expected);
     }
     void independentOrderingAndLegacyMigration()
     {

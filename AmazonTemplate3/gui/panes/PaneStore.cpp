@@ -950,7 +950,8 @@ void PaneStore::_onRemoveProducts()
 
     const auto res = QMessageBox::question(
         this, tr("Remove products"),
-        tr("Remove %n product(s) (%2 ASIN(s)) from this node?\n"
+        tr("Remove %n product/color group(s), including all %2 size variants, from this node?\n"
+           "Each row displays one representative size for the whole group.\n"
            "Original products can be restored using View deleted. Duplicate placements are removed permanently.\n"
            "Other categories and Amazon listings are unchanged.",
            "", repAsins.size()).arg(asinsToRemove.size()),
@@ -1235,13 +1236,22 @@ void PaneStore::_onMoveToTop()
 {
     const QList<int> sel = _selectedTableRows();
     if (sel.isEmpty()) return;
-    const int row = sel.first();
-    if (!m_storeModel->moveRowToTop(row)) return;
+    QList<QPersistentModelIndex> selected;
+    for (int row : sel)
+        selected.append(m_storeModel->index(row, 0));
+    // Move from last to first so the selected products retain their order.
+    bool moved = false;
+    for (auto it = selected.crbegin(); it != selected.crend(); ++it)
+        moved = m_storeModel->moveRowToTop(it->row()) || moved;
+    if (!moved) return;
 
     _syncSavedOrderFromVisibleRows();
 
-    ui->tableViewAsins->selectionModel()->setCurrentIndex(
-        m_storeModel->index(0, 0), QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+    auto *selection = ui->tableViewAsins->selectionModel();
+    selection->select(QItemSelection(m_storeModel->index(0, 0),
+                                    m_storeModel->index(sel.size() - 1, 0)),
+                      QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+    selection->setCurrentIndex(m_storeModel->index(0, 0), QItemSelectionModel::NoUpdate);
 }
 
 void PaneStore::_onMoveUp()
@@ -1275,14 +1285,23 @@ void PaneStore::_onMoveToBottom()
 {
     const QList<int> sel = _selectedTableRows();
     if (sel.isEmpty()) return;
-    const int row = sel.first();
-    if (!m_storeModel->moveRowToBottom(row)) return;
+    QList<QPersistentModelIndex> selected;
+    for (int row : sel)
+        selected.append(m_storeModel->index(row, 0));
+    // Persistent indexes follow the remaining products as earlier rows move.
+    bool moved = false;
+    for (const auto &index : selected)
+        moved = m_storeModel->moveRowToBottom(index.row()) || moved;
+    if (!moved) return;
 
     _syncSavedOrderFromVisibleRows();
 
-    ui->tableViewAsins->selectionModel()->setCurrentIndex(
-        m_storeModel->index(m_storeModel->rowCount() - 1, 0),
-        QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+    auto *selection = ui->tableViewAsins->selectionModel();
+    const int last = m_storeModel->rowCount() - 1;
+    selection->select(QItemSelection(m_storeModel->index(last - sel.size() + 1, 0),
+                                    m_storeModel->index(last, 0)),
+                      QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+    selection->setCurrentIndex(m_storeModel->index(last, 0), QItemSelectionModel::NoUpdate);
 }
 
 // ---------------------------------------------------------------------------
@@ -1476,11 +1495,33 @@ QCoro::Task<void> PaneStore::_onRetrieve()
 
 void PaneStore::_buildTable(const QStringList &asins)
 {
-    // Build color groups (shoes → EU44, women → FR38, else first ASIN)
+    // Choose a representative within each group; this must never change its
+    // membership or the stable group keys used by saved ordering and removal.
     auto extractSizeInt = [](const QString &raw) -> int {
         static const QRegularExpression re(QStringLiteral(R"(\b(\d+)\b)"));
         const auto m = re.match(raw);
         return m.hasMatch() ? m.captured(1).toInt() : 0;
+    };
+    auto shoeSize = [](const AmazonCatalogApi::StoreItem &item) -> double {
+        // Catalog sizeValue can be UK/US (e.g. 10 for a SKU ending in EU 45).
+        // Prefer an explicit EU-sized SKU suffix over that regional value.
+        static const QRegularExpression skuSize(
+            QStringLiteral(R"([-_](?:EU[-_ ]?)?((?:[34]\d|50)(?:[.,]\d+)?)$)"),
+            QRegularExpression::CaseInsensitiveOption);
+        static const QRegularExpression rawSize(
+            QStringLiteral(R"(^(?:EU[- ]*)?((?:[34]\d|50)(?:[.,]\d+)?)(?:\s*EU)?$)"),
+            QRegularExpression::CaseInsensitiveOption);
+        // Opaque dropship SKUs often have no catalog size, but their title ends
+        // in e.g. "(Black, EU-45)". Do not mistake heel heights for shoe sizes.
+        static const QRegularExpression titleSize(
+            QStringLiteral(R"([,(]\s*(?:EU[- ]*)?((?:[34]\d|50)(?:[.,]\d+)?)\s*\)\s*$)"),
+            QRegularExpression::CaseInsensitiveOption);
+        for (const auto &match : {skuSize.match(item.sku),
+                                  rawSize.match(item.sizeValue.trimmed()),
+                                  titleSize.match(item.title)}) {
+            if (match.hasMatch()) return match.captured(1).replace(',', '.').toDouble();
+        }
+        return 0;
     };
 
     // Grouping key: shared with TreeBrandCategories (whose tree counts must match
@@ -1509,34 +1550,49 @@ void PaneStore::_buildTable(const QStringList &asins)
         const bool isShoes  = catUp.contains(QLatin1String("SHOE"))
                            || catUp.contains(QLatin1String("BOOT"))
                            || catUp.contains(QLatin1String("SANDAL"))
-                           || catUp.contains(QLatin1String("FOOTWEAR"));
+                           || catUp.contains(QLatin1String("FOOTWEAR"))
+                           || catUp.contains(QLatin1String("HEEL"))
+                           || catUp.contains(QLatin1String("PUMP"))
+                           || catUp.contains(QLatin1String("SNEAKER"))
+                           || catUp.contains(QLatin1String("PLATFORM"));
         const QString genLo = first.gender.toLower();
         const bool isWomen  = !isShoes
                            && (genLo.contains(QLatin1String("female"))
                             || genLo.contains(QLatin1String("women")));
 
+        QStringList candidates;
+        for (const QString &asin : group) {
+            const auto &item = m_asinToItem.value(asin);
+            if (m_stockAvailableBySkuLower.value(item.sku.toLower(), -1) > 0)
+                candidates.append(asin);
+        }
+        if (candidates.isEmpty()) candidates = group;
+
         auto findSize = [&](int target) -> QString {
-            for (const QString &a : group)
-                if (extractSizeInt(m_asinToItem.value(a).sizeValue) == target)
+            for (const QString &a : candidates) {
+                const auto &item = m_asinToItem.value(a);
+                if ((isShoes ? shoeSize(item) : extractSizeInt(item.sizeValue)) == target)
                     return a;
+            }
             return {};
         };
 
         QString picked;
         if (isShoes) {
-            picked = findSize(44);
+            picked = findSize(45);
+            if (picked.isEmpty()) picked = findSize(44);
             if (picked.isEmpty()) picked = findSize(39);
         } else if (isWomen) {
             picked = findSize(38);
             if (picked.isEmpty()) {
                 int smallest = INT_MAX;
-                for (const QString &a : group) {
+                for (const QString &a : candidates) {
                     const int n = extractSizeInt(m_asinToItem.value(a).sizeValue);
                     if (n > 0 && n < smallest) { smallest = n; picked = a; }
                 }
             }
         }
-        if (picked.isEmpty()) picked = group.first();
+        if (picked.isEmpty()) picked = candidates.first();
 
         const AmazonCatalogApi::StoreItem &si = m_asinToItem.value(picked);
 

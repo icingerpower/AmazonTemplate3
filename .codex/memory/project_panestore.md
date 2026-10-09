@@ -56,3 +56,16 @@ Historical assessment; superseded by the implementation entry below.
 - Retrieve filters deleted originals without surviving overrides and saves the filtered list. Duplicate removals are never archived; deleting the last duplicate after deleting its original cannot resurrect the original on refresh/reload.
 - Category Remove removes only its model subtree and refreshes membership in place, preserving surviving indexes and expansion. Existing original-to-unknown reassignment remains; category removal itself does not delete originals.
 - Offline StoreTests cover archive/reload/refresh/restore via the dialog, cancellation, duplicate exclusion, surviving duplicates, marketplace/directory isolation, and category expansion with model invariant checks.
+
+## 2026-10-05 — Move full selection to top/bottom
+
+- Both edge-ordering buttons move every selected product row, preserving the relative order of selected and unselected products. Persistent model indexes track rows across moves; the resulting block stays selected, and the existing per-category order persistence is retained.
+- StoreTests adds 14 offline cases covering both directions with disjoint, contiguous, edge, all, single, and empty selections, including selection retention and reloaded ordering. Single-step Up/Down behavior is unchanged.
+
+## 2026-10-05 — Representative footwear sizes and saved work
+
+- A displayed size is a representative for the whole product/color group, not an extra size row. Remove expands it to all visible group ASINs. The table tooltip and existing removal confirmation now explain this.
+- The prior footwear picker compared EU 44/39 directly against regional `sizeValue`, often UK sizes (e.g. SKU suffix `-45` with `sizeValue="10"`), or an empty field on opaque dropship SKUs. It then fell back to the first ASIN, showing EU 37 even with 44/45 available.
+- Representative selection now restricts to positive cached store inventory when available, then prefers footwear EU 45, 44, 39. EU size comes from a numeric SKU suffix, an EU-range catalog value, or a final title variant such as `(Black, EU-45)`. Half sizes are not rounded. Heel/pump/sneaker/platform categories also use footwear selection.
+- Group keys, category placements, deletion snapshots, and order formats are unchanged; no working-directory migration is needed. Offline tests cover regional/catalog/title sizes, stock preference, and legacy/per-node reloads where the representative changes but ordering, duplicate placements, and archived deletions remain intact. Reload tests also compare catalog/order file bytes to ensure read-only loading.
+- The running desktop app inspected on this date used `/home/cedric/ApplicationsBuild/AmazonTemplate3/build/Desktop_Qt_6_8_3-Debug/AmazonTemplate3/AmazonTemplate3`, not the repository's `build-release` executable. Its CMake home points to this repository. Rebuild that configured Debug target as well when the user needs changes through their existing launcher; the running process still requires a restart. Recheck the running executable before assuming this path remains current.
