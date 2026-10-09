@@ -5,6 +5,7 @@
 #include "FillerSize.h"
 
 #include "FillerTitle.h"
+#include "TitleTranslation.h"
 #include "AiFailureTable.h"
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -13,77 +14,6 @@
 bool FillerTitle::canFill(const TemplateFiller *templateFiller, const Attribute *attribute, const QString &marketplaceFrom, const QString &fieldIdFrom) const
 {
     return fieldIdFrom.startsWith("item_name");
-}
-
-// Static helper to avoid ICE in coroutine
-static QSharedPointer<OpenAi2::StepMultipleAskAi> createTranslationStep(
-        const QString &title,
-        const QString &langCodeTo)
-{
-    QSharedPointer<OpenAi2::StepMultipleAskAi> stepTranslation(new OpenAi2::StepMultipleAskAi);
-    stepTranslation->id = "FillerTitle_translation_" + title + "_" + langCodeTo;
-    stepTranslation->name = "Translate product title";
-    stepTranslation->cachingKey = stepTranslation->id;
-    stepTranslation->neededReplies = 2;
-    stepTranslation->gptModel = "gpt-5.2";
-
-    // First prompt: Translate
-    stepTranslation->getPrompt = [title, langCodeTo](int nAttempts) -> QString
-    {
-        Q_UNUSED(nAttempts)
-        return QString("Translate the following title to language '%1'. "
-                       "Each word must start with a capital letter.\n"
-                       "Title: '%2'").arg(langCodeTo, title);
-    };
-
-    // Validation for individual replies
-    stepTranslation->validate = [](
-            const QString &gptReply, const QString &lastWhy) -> bool
-    {
-        Q_UNUSED(lastWhy)
-        const auto &trimmedReply = gptReply.trimmed();
-        return !trimmedReply.isEmpty()
-                && !trimmedReply.contains("(")
-                && !trimmedReply.contains(")");
-    };
-
-    // Second prompt: Choose the best translation
-    stepTranslation->getPromptGetBestReply = [](
-            int nAttempts, const QList<QString> &gptValidReplies) -> QString
-    {
-        Q_UNUSED(nAttempts)
-        QString prompt = "Here are several translations:\n";
-        for (const auto &reply : gptValidReplies)
-        {
-            prompt += QString("- %1\n").arg(reply);
-        }
-        prompt += "Please select the best translation and output ONLY a valid JSON object with the key 'translation' containing the selected text.\n"
-                  "Example: {\"translation\": \"Selected Text\"}";
-        return prompt;
-    };
-
-    stepTranslation->validateBestReply = [](
-            const QString &gptReply, const QString &lastWhy) -> bool
-    {
-        Q_UNUSED(lastWhy)
-        QJsonParseError error;
-        QJsonDocument doc = QJsonDocument::fromJson(gptReply.toUtf8(), &error);
-        if (error.error != QJsonParseError::NoError)
-        {
-            return false;
-        }
-        if (!doc.isObject())
-        {
-            return false;
-        }
-        if (!doc.object().contains("translation"))
-        {
-             return false;
-        }
-        return !doc.object().value("translation").toString().trimmed().isEmpty();
-    };
-    
-    return stepTranslation;
 }
 
 QCoro::Task<void> FillerTitle::fill(
@@ -125,7 +55,7 @@ QCoro::Task<void> FillerTitle::fill(
             }
             QString titleFromFull = it.value()[fieldIdFrom].trimmed();
             _fixTitleFormat(titleFromFull);
-            QString titleFrom = titleFromFull.split(" (")[0];
+            QString titleFrom = TitleTranslation::splitTitle(titleFromFull).body;
             if (!sku_fieldId_toValueslangCommon[sku].contains(fieldIdTo))
             {
                 if (sku_fieldId_toValueslangCommon[sku].contains(fieldIdFrom))
@@ -150,7 +80,7 @@ QCoro::Task<void> FillerTitle::fill(
             if (!sku_fieldId_toValueslangCommon[sku].contains(fieldIdTo))
             {
                 const QString settingsFileName = "aiTitleTranslations.ini";
-                auto stepTranslation = createTranslationStep(titleFrom, langCodeTo);
+                auto stepTranslation = TitleTranslation::createStep(titleFrom, langCodeTo);
                 stepTranslation->onLastError = [templateFiller, marketplaceTo, countryCodeTo, countryCodeFrom, fieldIdTo](const QString &reply, QNetworkReply::NetworkError networkError, const QString &lastWhy) -> bool
                 {
                     QString errorMsg = QString("NetworkError: %1 | Reply: %2 | Error: %3")
@@ -229,9 +159,10 @@ QCoro::Task<void> FillerTitle::fill(
         {
             QString titleFromFull = it.value()[fieldIdFrom].trimmed();
             _fixTitleFormat(titleFromFull);
-            if (titleFromFull.contains(" ("))
+            const auto titleParts = TitleTranslation::splitTitle(titleFromFull);
+            if (!titleParts.variation.isEmpty())
             {
-                auto titleEnd = titleFromFull.split(" (").last().split(")")[0];
+                const auto &titleEnd = titleParts.variation;
                 auto titleSizeParts = titleEnd.split(",");
                 for (auto &titlePart : titleSizeParts)
                 {
@@ -509,7 +440,7 @@ QHash<QString, QSet<QString>> FillerTitle::_get_titleFrom_skus(
         {
             QString titleFromFull = it.value()[fieldIdFrom].trimmed();
             _fixTitleFormat(titleFromFull);
-            QString titleFrom = titleFromFull.split(" (")[0];
+            QString titleFrom = TitleTranslation::splitTitle(titleFromFull).body;
             titleFrom_skus[titleFrom].insert(sku);
         }
     }

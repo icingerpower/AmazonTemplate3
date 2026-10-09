@@ -88,6 +88,12 @@ target_include_directories(FillerSizeTests PRIVATE ../AmazonTemplate3Lib)
 add_test(NAME FillerSizeTests COMMAND FillerSizeTests)
 target_link_libraries(FillerSizeTests PRIVATE Qt${QT_VERSION_MAJOR}::Test Qt${QT_VERSION_MAJOR}::Core QCoro6::Core)
 
+add_executable(FillerTitleTests tst_fillertitle.cpp)
+target_link_libraries(FillerTitleTests PRIVATE AmazonTemplate3Lib_Tests Qt6::Test)
+target_include_directories(FillerTitleTests PRIVATE ../AmazonTemplate3Lib)
+add_test(NAME FillerTitleTests COMMAND FillerTitleTests)
+set_tests_properties(FillerTitleTests PROPERTIES TIMEOUT 15)
+
 
 
 add_executable(AttributeFlagsTableTests tst_attributeflagstable.cpp)

@@ -11,6 +11,8 @@ SET(FILLER_FILES
     ${CMAKE_CURRENT_LIST_DIR}/FillerSelectable.h
     ${CMAKE_CURRENT_LIST_DIR}/FillerTitle.cpp
     ${CMAKE_CURRENT_LIST_DIR}/FillerTitle.h
+    ${CMAKE_CURRENT_LIST_DIR}/TitleTranslation.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/TitleTranslation.h
     ${CMAKE_CURRENT_LIST_DIR}/FillerBulletPoints.cpp
     ${CMAKE_CURRENT_LIST_DIR}/FillerBulletPoints.h
     ${CMAKE_CURRENT_LIST_DIR}/FillerKeywords.cpp

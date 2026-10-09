@@ -1,5 +1,7 @@
 # Memory Index
 
+- [Template title translation](project_title_translation.md) — English inch/cm measurements, protected variation suffixes, versioned cache and offline tests
+
 - [Pricing editor and shared cache](project_pricing_editor.md) — implemented display modes, local-currency proposals, shared cache, zero-sales rule, and validation
 
 - [Amazon SP-API auth lessons](project_spapi_auth.md) — LWA only (no SigV4 since 2023-10-02); refresh tokens must be regenerated after adding app roles; MCF needs the "Amazon Fulfillment" role (no "Multi-Channel Fulfillment" role exists)
