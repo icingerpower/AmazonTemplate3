@@ -98,7 +98,7 @@
          <item>
           <widget class="QSpinBox" name="spinBoxMinDays">
            <property name="toolTip">
-            <string>Only count inventory beyond this number of days. If 60 and Amazon has 10 units = 180 days, the counted stock is 10×(180−60)/180. 0 disables the correction.</string>
+            <string>Only count inventory beyond this number of days. If 60 and Amazon has 10 units = 180 days, the counted stock is 10×(180−60)/180. At or below the threshold, keep 1 unit when Amazon Qty is greater than 5 and % inventory is positive. 0 disables the correction.</string>
            </property>
            <property name="maximum">
             <number>999</number>

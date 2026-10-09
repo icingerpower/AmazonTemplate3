@@ -75,7 +75,7 @@ int TableMarketplaceProducts::_targetQty(const Row &r) const
     // (estDays − minDays) / estDays tends to 1, so leave the stock uncorrected.
     if (m_minDays > 0 && r.estDays >= 0 && r.estDays < kInfiniteDaysOfSupply) {
         if (r.estDays <= m_minDays)
-            corrected = 0;
+            return r.available > 5 && m_pctToTarget > 0 ? 1 : 0;
         else
             corrected = r.available * double(r.estDays - m_minDays) / r.estDays;
     }
@@ -85,10 +85,13 @@ int TableMarketplaceProducts::_targetQty(const Row &r) const
     return target;
 }
 
-int TableMarketplaceProducts::targetQtyForSku(const QString &sku) const
+int TableMarketplaceProducts::targetQtyForSku(const QString &sku, const QString &storeId) const
 {
     const int row = _rowForSku(sku);
-    return (row >= 0) ? _targetQty(m_rows.at(row)) : -1;
+    if (row < 0 || m_rows.at(row).available < 0)
+        return -1;
+    const Row &r = m_rows.at(row);
+    return r.syncOverrides.value(storeId, _targetQty(r));
 }
 
 void TableMarketplaceProducts::_recalcEstDays(Row &row) const
@@ -176,15 +179,24 @@ QVariant TableMarketplaceProducts::data(const QModelIndex &index, int role) cons
     const Row &r = m_rows.at(index.row());
     const int col = index.column();
 
-    // Sync Qty cell in dark red when syncing would DECREASE the store's stock.
+    if (role == Qt::ToolTipRole && col >= k_fixedCols
+        && (col - k_fixedCols) % 3 == 1) {
+        return tr("Double-click to edit the quantity to sync for this store. "
+                  "Manual quantities last until the next Load. "
+                  "Red also indicates that the automatic quantity would reduce the store's stock.");
+    }
+
+    // Preserve the automatic decrease warning even after a manual override.
     if (role == Qt::BackgroundRole) {
         if (col >= k_fixedCols && (col - k_fixedCols) % 3 == 1) {
             const int storeIdx = (col - k_fixedCols) / 3;
             if (storeIdx < m_stores.size()) {
                 const QString &sid = m_stores.at(storeIdx).id;
                 const int target   = _targetQty(r);
+                const int editedTarget = r.syncOverrides.value(sid, target);
                 const int storeQty = r.storeQty.value(sid, -1);
-                if (target >= 0 && storeQty >= 0 && target < storeQty)
+                if (target >= 0 && storeQty >= 0
+                    && (target < storeQty || editedTarget < storeQty))
                     return QBrush(QColor(139, 0, 0)); // dark red
             }
         }
@@ -221,7 +233,7 @@ QVariant TableMarketplaceProducts::data(const QModelIndex &index, int role) cons
         int val = -1;
         switch (sub) {
         case 0: val = r.storeQty.value(sid, -1);   break;
-        case 1: val = _targetQty(r);               break;
+        case 1: val = r.available < 0 ? -1 : r.syncOverrides.value(sid, _targetQty(r)); break;
         case 2: val = r.storeSales.value(sid, -1); break;
         }
         return numOrDash(val);
@@ -262,6 +274,30 @@ QVariant TableMarketplaceProducts::headerData(int section, Qt::Orientation orien
 
 Qt::ItemFlags TableMarketplaceProducts::flags(const QModelIndex &index) const
 {
-    if (!index.isValid()) return Qt::NoItemFlags;
-    return Qt::ItemIsEnabled | Qt::ItemIsEditable | Qt::ItemIsSelectable;
+    if (!index.isValid() || index.model() != this
+        || index.row() >= m_rows.size() || index.column() >= columnCount())
+        return Qt::NoItemFlags;
+    Qt::ItemFlags result = Qt::ItemIsEnabled | Qt::ItemIsSelectable;
+    // Open a text editor for SKU selection/copying, but reject writes in setData.
+    if (index.column() == ColSku
+        || (index.column() >= k_fixedCols && (index.column() - k_fixedCols) % 3 == 1
+            && m_rows.at(index.row()).available >= 0))
+        result |= Qt::ItemIsEditable;
+    return result;
+}
+
+bool TableMarketplaceProducts::setData(const QModelIndex &index, const QVariant &value, int role)
+{
+    if (role != Qt::EditRole || !(flags(index) & Qt::ItemIsEditable)
+        || index.column() == ColSku)
+        return false;
+    bool ok = false;
+    const int quantity = value.toString().toInt(&ok);
+    if (!ok || quantity < 0)
+        return false;
+    Row &r = m_rows[index.row()];
+    const QString &sid = m_stores.at((index.column() - k_fixedCols) / 3).id;
+    r.syncOverrides.insert(sid, quantity);
+    emit dataChanged(index, index, {Qt::DisplayRole, Qt::EditRole, Qt::BackgroundRole});
+    return true;
 }

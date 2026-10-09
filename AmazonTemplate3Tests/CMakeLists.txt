@@ -171,3 +171,9 @@ target_include_directories(StoreTests PRIVATE ../AmazonTemplate3 ../AmazonTempla
 target_link_libraries(StoreTests PRIVATE AmazonTemplate3Lib_Tests Qt6::Test Qt6::Widgets)
 add_test(NAME StoreTests COMMAND StoreTests)
 set_tests_properties(StoreTests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+
+add_executable(TableMarketplaceProductsTests tst_tablemarketplaceproducts.cpp)
+target_include_directories(TableMarketplaceProductsTests PRIVATE ../AmazonTemplate3Lib)
+target_link_libraries(TableMarketplaceProductsTests PRIVATE AmazonTemplate3Lib_Tests Qt6::Test)
+add_test(NAME TableMarketplaceProductsTests COMMAND TableMarketplaceProductsTests)
+set_tests_properties(TableMarketplaceProductsTests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 15)

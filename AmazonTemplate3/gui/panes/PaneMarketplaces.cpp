@@ -699,7 +699,15 @@ QCoro::Task<void> PaneMarketplaces::_onSyncInventory()
         setStatus(tr("Syncing %1…").arg(mkt->displayName()));
         appendLog(tr("─── %1 ───").arg(mkt->displayName()));
 
-        co_await mkt->updateInventory(targetQtyBySku, appendLog);
+        QHash<QString, int> storeTargets = targetQtyBySku;
+        for (auto it = storeTargets.begin(); it != storeTargets.end(); ++it) {
+            const int target = m_model->targetQtyForSku(it.key(), mkt->id());
+            if (target != it.value())
+                appendLog(tr("  %1: manual Sync Qty %2 (automatic %3)")
+                          .arg(it.key()).arg(target).arg(it.value()));
+            it.value() = target;
+        }
+        co_await mkt->updateInventory(storeTargets, appendLog);
         if (!dlgPtr) { setEnabled(true); co_return; }
 
         if (!mkt->lastError().isEmpty())

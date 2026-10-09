@@ -13,7 +13,7 @@ class TableMarketplaceProducts : public QAbstractTableModel
 {
     Q_OBJECT
 public:
-    // Descriptor for one dynamic column group (Qty + Sales 90d).
+    // Descriptor for one dynamic column group (Qty + Sync Qty + Sales 90d).
     struct MarketplaceStore {
         QString id;    // unique key used in QHash (e.g. "temu_FR_Main")
         QString label; // column group header  (e.g. "Temu FR – Main")
@@ -54,10 +54,12 @@ public:
     // minDays > 0: only count units beyond that many days of inventory —
     // corrected = available × (estDays − minDays) / estDays (0 if estDays ≤ minDays).
     // Then target = corrected × pct / 100, capped at maxTarget (0 = no cap).
+    // At/below minDays, keep one unit when available > 5 and pct > 0.
     void setSyncParams(int pctToTarget, int maxTarget, int minDays);
 
     // The quantity "Sync" would upload for this SKU, or -1 if Amazon qty unknown.
-    int targetQtyForSku(const QString &sku) const;
+    // With a storeId, includes that store's manual override (until next Load).
+    int targetQtyForSku(const QString &sku, const QString &storeId = {}) const;
 
     int rowCount   (const QModelIndex &parent = {}) const override;
     int columnCount(const QModelIndex &parent = {}) const override;
@@ -65,6 +67,8 @@ public:
     QVariant headerData(int section, Qt::Orientation orientation,
                         int role = Qt::DisplayRole) const override;
     Qt::ItemFlags flags(const QModelIndex &index) const override;
+    bool setData(const QModelIndex &index, const QVariant &value,
+                 int role = Qt::EditRole) override;
 
 private:
     struct Row {
@@ -76,6 +80,7 @@ private:
         int estDays    = -1;
         QHash<QString,int> storeQty;   // storeId → qty   (-1 via default = unknown)
         QHash<QString,int> storeSales; // storeId → units (-1 via default = unknown)
+        QHash<QString,int> syncOverrides; // storeId → manually selected Sync Qty
     };
 
     QList<Row>              m_rows;
