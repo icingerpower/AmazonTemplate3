@@ -23,6 +23,10 @@ public:
     // Caller takes ownership of returned objects.
     virtual QList<AbstractTargetMarketplace *> createInstances(QSettings *settings) const = 0;
 
+    // Read-only order-count channels. Default: one per configured target store.
+    // Sales-only platforms may override this without entering inventory sync.
+    virtual QList<AbstractSalesChannel *> createSalesChannels(QSettings *settings) const;
+
     // Convenience: iterate all registered factories and collect every instance.
     static QList<AbstractTargetMarketplace *> buildAllInstances(QSettings *settings);
 

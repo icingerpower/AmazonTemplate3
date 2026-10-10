@@ -30,6 +30,8 @@ public:
     // Borrowed manager for offline transport tests; set before starting a request.
     void setNetworkAccessManager(QNetworkAccessManager *manager) { m_nam = manager; }
     static int parseSalesUnits(const QByteArray &body); // -1 for malformed/incomplete responses
+    static int parseOrderCount(const QByteArray &body);
+    QCoro::Task<void> fetchOrderCount(QDateTime from, QDateTime to, int *out);
     struct InventorySummary {
         QString sku;
         QString asin;

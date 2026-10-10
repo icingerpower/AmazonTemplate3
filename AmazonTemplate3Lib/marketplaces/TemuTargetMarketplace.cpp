@@ -52,6 +52,11 @@ QCoro::Task<void> TemuTargetMarketplace::fetchSales(QStringList skus, int days, 
     co_await m_api->fetchSales(skus, days, out);
 }
 
+QCoro::Task<void> TemuTargetMarketplace::fetchOrderCount(QDateTime from, QDateTime to, int *out)
+{
+    co_await m_api->fetchOrderCount(from, to, out);
+}
+
 QCoro::Task<void> TemuTargetMarketplace::updateInventory(QHash<QString,int> qtyBySku, ProgressFn onProgress)
 {
     co_await m_api->updateInventory(qtyBySku, onProgress);

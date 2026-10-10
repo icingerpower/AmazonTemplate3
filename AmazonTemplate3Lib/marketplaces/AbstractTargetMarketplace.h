@@ -10,11 +10,12 @@
 #include <QCoro/QCoroTask>
 
 #include "MarketplaceTypes.h"
+#include "AbstractSalesChannel.h"
 
 // A target marketplace (Temu store, …) where products are listed and orders
 // arrive. Implementations are produced by an AbstractTargetMarketplaceFactory
 // registered via DECLARE_TARGET_MARKETPLACE_FACTORY (Recorder pattern).
-class AbstractTargetMarketplace
+class AbstractTargetMarketplace : public AbstractSalesChannel
 {
 public:
     virtual ~AbstractTargetMarketplace() = default;

@@ -4,6 +4,7 @@
 #include "panes/PaneSizing.h"
 #include "panes/PaneWarnings.h"
 #include "panes/PaneMarketplaces.h"
+#include "panes/PaneSales.h"
 #include "panes/PanePricing.h"
 #include "panes/PanePricingSync.h"
 #include "panes/PaneDiscount.h"
@@ -58,6 +59,7 @@ MainWindow::MainWindow(QWidget *parent)
     ui->tabWidget->addTab(paneWarnings, tr("Warnings"));
 
     ui->tabWidget->addTab(new PaneMarketplaces(this), tr("Marketplaces"));
+    ui->tabWidget->addTab(new PaneSales(this), tr("Sales"));
 
     auto *panePricing = new PanePricing(this);
     ui->tabWidget->addTab(panePricing, tr("Pricing"));

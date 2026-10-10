@@ -129,10 +129,12 @@ QCoro::Task<void> TemuInventoryApi::_postRequest(const QString &method, const QJ
     QString sign = generateSign(reqObj, m_appSecret);
     reqObj.insert(QStringLiteral("sign"), sign);
 
-    qDebug() << "Temu API POST request:" << method << "Payload:" << QJsonDocument(reqObj).toJson(QJsonDocument::Compact);
+    // The signed payload contains credentials; never write it to logs.
+    qDebug() << "Temu API POST request:" << method;
 
     QUrl url(QStringLiteral("https://openapi-b-eu.temu.com/openapi/router"));
     QNetworkRequest req(url);
+    req.setTransferTimeout(30000);
     req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
 
     QJsonDocument doc(reqObj);
@@ -146,11 +148,7 @@ QCoro::Task<void> TemuInventoryApi::_postRequest(const QString &method, const QJ
     reply->deleteLater();
 
     qDebug() << "Temu API POST response status:" << status << "Data size:" << data.size();
-    if (data.size() < 4000) {
-        qDebug() << "Temu API POST response body:" << data;
-    } else {
-        qDebug() << "Temu API POST response body (truncated):" << data.left(4000) << "...";
-    }
+    // Order responses can contain customer data; log status/size only.
 
     if (status != 200) {
         m_lastError = QStringLiteral("HTTP %1: %2").arg(status).arg(QString::fromUtf8(data.left(800)));
@@ -289,6 +287,31 @@ QCoro::Task<void> TemuInventoryApi::fetchInventory(QStringList skus, QHash<QStri
 
     qDebug() << "Temu fetchInventory finished. Final inventory map:" << *out;
     co_return;
+}
+
+QCoro::Task<void> TemuInventoryApi::fetchOrderCount(QDateTime from, QDateTime to, int *out)
+{
+    *out = -1;
+    m_lastError.clear();
+    if (!from.isValid() || !to.isValid() || from.toSecsSinceEpoch() >= to.toSecsSinceEpoch()) {
+        m_lastError = QStringLiteral("Invalid order-count interval");
+        co_return;
+    }
+    // totalItemNum counts parent orders, regardless of line/product quantities.
+    // Temu's upper bound is inclusive; the public abstraction is [from, to).
+    const QJsonObject params{{"pageNumber", 1}, {"pageSize", 1},
+        {"createAfter", from.toSecsSinceEpoch()}, {"createBefore", to.toSecsSinceEpoch() - 1}};
+    QJsonObject result;
+    co_await _postRequest(QStringLiteral("bg.order.list.v2.get"), params, &result);
+    if (!m_lastError.isEmpty())
+        co_return;
+    const auto count = result.value("totalItemNum");
+    const int value = count.toInt(-1);
+    if (!count.isDouble() || value < 0 || count.toDouble() != value) {
+        m_lastError = QStringLiteral("Missing or invalid totalItemNum in Temu response");
+        co_return;
+    }
+    *out = value;
 }
 
 QCoro::Task<void> TemuInventoryApi::fetchSales(QStringList skus, int days, QHash<QString, int> *out)

@@ -17,6 +17,9 @@ class TemuInventoryApi : public QObject
 {
     Q_OBJECT
 public:
+    // Borrowed transport for offline tests; set before starting requests.
+    void setNetworkAccessManager(QNetworkAccessManager *manager) { m_nam = manager; }
+    QCoro::Task<void> fetchOrderCount(QDateTime from, QDateTime to, int *out);
     explicit TemuInventoryApi(QString appKey, QString appSecret, QString accessToken, QObject *parent = nullptr);
     explicit TemuInventoryApi(QString appKey, QString appSecret, QString accessToken,
                               QString proxyHost, int proxyPort, QString proxyUser, QString proxyPassword,

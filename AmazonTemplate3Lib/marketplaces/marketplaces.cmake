@@ -1,4 +1,7 @@
 set(MARKETPLACE_FILES
+    ${CMAKE_CURRENT_LIST_DIR}/AbstractSalesChannel.h
+    ${CMAKE_CURRENT_LIST_DIR}/AmazonSalesChannel.h
+    ${CMAKE_CURRENT_LIST_DIR}/AmazonSalesChannel.cpp
     ${CMAKE_CURRENT_LIST_DIR}/MarketplaceTypes.h
     ${CMAKE_CURRENT_LIST_DIR}/AmazonFbaInventorySource.h
     ${CMAKE_CURRENT_LIST_DIR}/AmazonFbaInventorySource.cpp

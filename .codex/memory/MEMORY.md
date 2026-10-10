@@ -1,5 +1,7 @@
 # Memory Index
 
+- [Sales pane and monthly order counts](project_sales.md) — marketplace factory sales capability, Amazon storefront/Temu store rows, UTC month boundaries, API count semantics, and offline tests
+
 - [Template title translation](project_title_translation.md) — English inch/cm measurements, protected variation suffixes, versioned cache and offline tests
 
 - [Pricing editor and shared cache](project_pricing_editor.md) — implemented display modes, local-currency proposals, shared cache, zero-sales rule, and validation

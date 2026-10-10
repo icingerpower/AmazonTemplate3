@@ -980,6 +980,70 @@ QCoro::Task<void> AmazonInventoryApi::fetchInventoryAgeReport(
 // Sales units
 // ---------------------------------------------------------------------------
 
+int AmazonInventoryApi::parseOrderCount(const QByteArray &body)
+{
+    const auto doc = QJsonDocument::fromJson(body);
+    if (!doc.isObject() || !doc.object().value("payload").isArray()
+        || !doc.object().value("errors").toArray().isEmpty())
+        return -1;
+    const auto payload = doc.object().value("payload").toArray();
+    // A Total query must return exactly one metric, even for zero orders.
+    if (payload.size() != 1)
+        return -1;
+    const auto count = payload.first().toObject().value("orderCount");
+    const int value = count.toInt(-1);
+    return count.isDouble() && value >= 0 && count.toDouble() == value ? value : -1;
+}
+
+QCoro::Task<void> AmazonInventoryApi::fetchOrderCount(QDateTime from, QDateTime to, int *out)
+{
+    *out = -1;
+    m_lastError.clear();
+    if (!from.isValid() || !to.isValid() || from >= to) {
+        m_lastError = QStringLiteral("Invalid order-count interval");
+        co_return;
+    }
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        QString token;
+        co_await _getAccessToken(&token);
+        if (token.isEmpty()) {
+            if (m_lastError.isEmpty())
+                m_lastError = QStringLiteral("No LWA access token available");
+            co_return;
+        }
+        QUrl url(QStringLiteral("https://%1/sales/v1/orderMetrics")
+                     .arg(endpointForMarketplace(m_marketplaceId)));
+        QUrlQuery query;
+        query.addQueryItem("marketplaceIds", m_marketplaceId);
+        query.addQueryItem("interval", from.toUTC().toString(Qt::ISODate) + "--" + to.toUTC().toString(Qt::ISODate));
+        query.addQueryItem("granularity", "Total");
+        query.addQueryItem("granularityTimeZone", "UTC");
+        url.setQuery(query);
+        QNetworkRequest request(url);
+        request.setTransferTimeout(30000);
+        request.setRawHeader("x-amz-access-token", token.toUtf8());
+        request.setRawHeader("Accept", "application/json");
+        auto *reply = _nam()->get(request);
+        co_await AmazonRead::wait(reply, m_cancelled);
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const auto error = reply->error();
+        const auto body = reply->readAll();
+        reply->deleteLater();
+        if ((status == 429 || status >= 500) && attempt < 2) {
+            co_await AmazonRead::delay(2000 * (attempt + 1), m_cancelled);
+            continue;
+        }
+        if (status != 200 || error != QNetworkReply::NoError) {
+            m_lastError = QStringLiteral("Order count failed: HTTP %1").arg(status);
+            co_return;
+        }
+        *out = parseOrderCount(body);
+        if (*out < 0)
+            m_lastError = QStringLiteral("Missing or invalid orderCount in Amazon response");
+        co_return;
+    }
+}
+
 int AmazonInventoryApi::parseSalesUnits(const QByteArray &body)
 {
     QJsonParseError error;

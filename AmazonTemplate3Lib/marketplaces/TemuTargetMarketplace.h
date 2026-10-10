@@ -28,6 +28,7 @@ public:
 
     QCoro::Task<void> fetchInventory(QStringList skus, QHash<QString,int> *out) override;
     QCoro::Task<void> fetchSales(QStringList skus, int days, QHash<QString,int> *out) override;
+    QCoro::Task<void> fetchOrderCount(QDateTime from, QDateTime to, int *out) override;
     QCoro::Task<void> updateInventory(QHash<QString,int> qtyBySku, ProgressFn onProgress) override;
 
     QCoro::Task<QList<MarketOrder>> fetchUnshippedOrders() override;

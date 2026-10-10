@@ -1,6 +1,15 @@
 #include "AbstractTargetMarketplaceFactory.h"
 
 #include "TemuTargetMarketplace.h"
+#include "AmazonSalesChannel.h"
+
+QList<AbstractSalesChannel *> AbstractTargetMarketplaceFactory::createSalesChannels(QSettings *settings) const
+{
+    QList<AbstractSalesChannel *> channels;
+    for (auto *store : createInstances(settings))
+        channels.append(store);
+    return channels;
+}
 
 AbstractTargetMarketplaceFactory::Recorder::Recorder(AbstractTargetMarketplaceFactory *factory)
 {
@@ -27,8 +36,9 @@ QList<AbstractTargetMarketplaceFactory *> &AbstractTargetMarketplaceFactory::get
     // pure static self-registration in the implementation files never runs.
     static QList<AbstractTargetMarketplaceFactory *> list = []() {
         QList<AbstractTargetMarketplaceFactory *> l;
+        static AmazonSalesChannelFactory amazon;
         static TemuTargetMarketplaceFactory temu;
-        l << &temu;
+        l << &amazon << &temu;
         // New target marketplace platforms: add their factory here.
         return l;
     }();
