@@ -89,7 +89,8 @@ struct PaneSales::CountJob
     QList<AbstractSalesChannel *> channels;
     QList<QDate> months;
     QDateTime until;
-    bool cancelled = false;
+    std::shared_ptr<bool> cancelled = std::make_shared<bool>(false);
+    bool retryFailed = false;
     ~CountJob() { qDeleteAll(channels); }
 };
 
@@ -125,6 +126,9 @@ PaneSales::PaneSales(QSharedPointer<QSettings> settings,
     m_count = new QPushButton(tr("Count order"), this);
     m_count->setObjectName("buttonCountOrder");
     left->addWidget(m_count);
+    m_retry = new QPushButton(tr("Retry failed"), this);
+    m_retry->setObjectName("buttonRetrySales");
+    left->addWidget(m_retry);
     m_cancel = new QPushButton(tr("Cancel"), this);
     m_cancel->setObjectName("buttonCancelCount");
     left->addWidget(m_cancel);
@@ -162,11 +166,12 @@ PaneSales::PaneSales(QSharedPointer<QSettings> settings,
     });
     connect(m_table->selectionModel(), &QItemSelectionModel::currentRowChanged, this, [this] { updateChart(); });
     connect(m_counts, &QStandardItemModel::dataChanged, this, [this] { updateChart(); });
-    connect(m_count, &QPushButton::clicked, this, &PaneSales::startCounting);
+    connect(m_count, &QPushButton::clicked, this, [this] { startCounting(); });
+    connect(m_retry, &QPushButton::clicked, this, [this] { startCounting(true); });
     connect(m_cancel, &QPushButton::clicked, this, [this] {
-        if (m_job) m_job->cancelled = true;
+        if (m_job) *m_job->cancelled = true;
         m_cancel->setEnabled(false);
-        m_status->setText(tr("Canceling after the current request…"));
+        m_status->setText(tr("Canceling…"));
     });
     resetTable();
     if (!names.isEmpty())
@@ -176,7 +181,7 @@ PaneSales::PaneSales(QSharedPointer<QSettings> settings,
 
 PaneSales::~PaneSales()
 {
-    if (m_job) m_job->cancelled = true;
+    if (m_job) *m_job->cancelled = true;
 }
 
 void PaneSales::resetTable()
@@ -195,34 +200,56 @@ void PaneSales::setBusy(bool busy)
 {
     m_platforms->setEnabled(!busy);
     m_count->setEnabled(!busy && m_platforms->currentIndex().isValid());
+    bool missing = false;
+    for (int row = 0; row < m_counts->rowCount(); ++row)
+        for (int month = 0; month < m_counts->columnCount(); ++month)
+            missing |= !m_counts->index(row, month).data(Qt::UserRole).isValid();
+    m_retry->setEnabled(!busy && missing);
     m_cancel->setVisible(busy);
     m_cancel->setEnabled(busy);
 }
 
-void PaneSales::startCounting()
+void PaneSales::startCounting(bool retryFailed)
 {
     if (m_job || !m_platforms->currentIndex().isValid()) return;
-    resetTable();
+    if (!retryFailed) {
+        resetTable();
+        m_until = QDateTime::fromSecsSinceEpoch(QDateTime::currentSecsSinceEpoch(), QTimeZone::UTC);
+    }
     auto job = std::make_shared<CountJob>();
     job->months = m_months;
-    job->until = QDateTime::currentDateTimeUtc();
+    job->until = m_until;
+    job->retryFailed = retryFailed;
     job->channels = m_factories.at(m_platforms->currentIndex().row())->createSalesChannels(m_settings.data());
     if (job->channels.isEmpty()) {
         m_status->setText(tr("No configured sales channels. Configure this marketplace in Settings first."));
+        setBusy(false);
         return;
     }
-    for (auto *channel : job->channels) {
-        QList<QStandardItem *> cells;
-        for (int month = 0; month < 12; ++month) {
-            auto *cell = new QStandardItem(QStringLiteral("—"));
-            cell->setTextAlignment(Qt::AlignCenter);
-            cell->setToolTip(tr("Not counted"));
-            cells.append(cell);
+    if (retryFailed) {
+        // Settings may have changed since the first count. Never apply results
+        // to a different store merely because it now occupies the same row.
+        bool same = job->channels.size() == m_counts->rowCount();
+        for (int row = 0; same && row < job->channels.size(); ++row)
+            same = job->channels[row]->displayName() == m_counts->verticalHeaderItem(row)->text();
+        if (!same) {
+            m_status->setText(tr("Configured channels changed. Click Count order to reload them."));
+            return;
         }
-        m_counts->appendRow(cells);
-        m_counts->setVerticalHeaderItem(m_counts->rowCount() - 1, new QStandardItem(channel->displayName()));
+    } else {
+        for (auto *channel : job->channels) {
+            QList<QStandardItem *> cells;
+            for (int month = 0; month < 12; ++month) {
+                auto *cell = new QStandardItem(QStringLiteral("—"));
+                cell->setTextAlignment(Qt::AlignCenter);
+                cell->setToolTip(tr("Not counted"));
+                cells.append(cell);
+            }
+            m_counts->appendRow(cells);
+            m_counts->setVerticalHeaderItem(m_counts->rowCount() - 1, new QStandardItem(channel->displayName()));
+        }
+        m_table->selectRow(0);
     }
-    m_table->selectRow(0);
     m_job = job;
     setBusy(true);
     m_task = countOrders(this, job);
@@ -230,47 +257,62 @@ void PaneSales::startCounting()
 
 QCoro::Task<void> PaneSales::countOrders(QPointer<PaneSales> pane, std::shared_ptr<CountJob> job)
 {
-    int failures = 0;
-    for (int row = 0; row < job->channels.size() && !job->cancelled; ++row) {
+    QString firstError;
+    for (int row = 0; row < job->channels.size() && !*job->cancelled; ++row) {
+        if (!pane) co_return;
         auto *channel = job->channels[row];
-        for (int month = 0; month < job->months.size() && !job->cancelled; ++month) {
-            if (!pane) co_return;
-            pane->m_status->setText(tr("Counting %1 · %2 (%3/%4)…")
-                .arg(channel->displayName(), job->months[month].toString("MMM yyyy"))
-                .arg(row * 12 + month + 1).arg(job->channels.size() * 12));
-            const auto from = job->months[month].startOfDay(QTimeZone::UTC);
-            const auto to = std::min(job->months[month].addMonths(1).startOfDay(QTimeZone::UTC), job->until);
-            int count = -1;
-            QString error;
-            try {
-                co_await channel->fetchOrderCount(from, to, &count);
-                error = channel->lastError();
-            } catch (const std::exception &e) {
-                error = QString::fromUtf8(e.what());
-            } catch (...) {
-                error = tr("Unexpected error while counting orders");
-            }
-            if (!pane) co_return;
-            if (job->cancelled) break;
-            auto *item = pane->m_counts->item(row, month);
-            if (count >= 0 && error.isEmpty()) {
-                item->setData(count, Qt::DisplayRole);
-                item->setData(count, Qt::UserRole);
+        QList<QDate> requested;
+        QList<int> columns;
+        for (int month = 0; month < job->months.size(); ++month) {
+            if (job->retryFailed && pane->m_counts->index(row, month).data(Qt::UserRole).isValid()) continue;
+            requested.append(job->months[month]);
+            columns.append(month);
+        }
+        if (requested.isEmpty()) continue;
+        const QString progress = tr("Counting %1 (%2/%3)")
+            .arg(channel->displayName()).arg(row + 1).arg(job->channels.size());
+        pane->m_status->setText(progress + QStringLiteral("…"));
+        channel->setReadCancellation(job->cancelled);
+        channel->setReadProgress([pane, progress, cancelled = job->cancelled](const QString &message) {
+            if (pane && !*cancelled) pane->m_status->setText(progress + QStringLiteral(" · ") + message);
+        });
+        QList<SalesMonthCount> results;
+        QString error;
+        try {
+            co_await channel->fetchMonthlyOrderCounts(requested, job->until, &results);
+        } catch (const std::exception &e) {
+            error = QString::fromUtf8(e.what());
+        } catch (...) {
+            error = tr("Unexpected error while counting orders");
+        }
+        if (!pane) co_return;
+        for (int i = 0; i < requested.size(); ++i) {
+            const auto result = i < results.size() ? results[i] : SalesMonthCount{-1, error};
+            auto *item = pane->m_counts->item(row, columns[i]);
+            if (result.count >= 0) {
+                item->setData(result.count, Qt::DisplayRole);
+                item->setData(result.count, Qt::UserRole);
+                const auto from = requested[i].startOfDay(QTimeZone::UTC);
+                const auto to = qMin(requested[i].addMonths(1).startOfDay(QTimeZone::UTC), job->until);
                 item->setToolTip(tr("%1 orders · %2 to %3 (exclusive), UTC")
-                    .arg(count).arg(from.toString(Qt::ISODate), to.toString(Qt::ISODate)));
-            } else {
-                ++failures;
+                    .arg(result.count).arg(from.toString(Qt::ISODate), to.toString(Qt::ISODate)));
+            } else if (!*job->cancelled) {
                 item->setText(tr("N/A"));
-                item->setToolTip(error.isEmpty() ? tr("Order count unavailable") : error);
+                const QString detail = result.error.isEmpty() ? tr("Order count unavailable") : result.error;
+                item->setToolTip(detail);
+                if (firstError.isEmpty()) firstError = channel->displayName() + ": " + detail;
             }
         }
     }
     if (!pane) co_return;
-    pane->m_status->setText(job->cancelled ? tr("Canceled. Counts already retrieved are shown.")
-        : failures ? tr("Finished with %1 unavailable months. Hover over N/A for details.").arg(failures)
+    int failures = 0;
+    for (int row = 0; row < pane->m_counts->rowCount(); ++row)
+        for (int month = 0; month < pane->m_counts->columnCount(); ++month)
+            failures += !pane->m_counts->index(row, month).data(Qt::UserRole).isValid();
+    pane->m_status->setText(*job->cancelled ? tr("Canceled. Counts already retrieved are shown. Use Retry failed to resume.")
+        : failures ? tr("%1 unavailable months. Use Retry failed. %2").arg(failures).arg(firstError)
                    : tr("Order counts updated. Select a row to view its chart."));
-    // A completed Task can retain its frame until the next refresh. Release API
-    // clients (and their credentials) now, rather than keeping them in the pane.
+    // Completed Tasks can retain their frames; release clients and credentials.
     qDeleteAll(job->channels);
     job->channels.clear();
     pane->m_job.reset();

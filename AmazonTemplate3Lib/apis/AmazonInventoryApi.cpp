@@ -25,6 +25,7 @@
 #include <QPair>
 #include <QRegularExpression>
 #include <QSet>
+#include <QTimeZone>
 #include <QTimer>
 #include <QDebug>
 
@@ -995,28 +996,129 @@ int AmazonInventoryApi::parseOrderCount(const QByteArray &body)
     return count.isDouble() && value >= 0 && count.toDouble() == value ? value : -1;
 }
 
+namespace {
+// Shared by all sales-pane API instances, including retries and subsequent
+// refreshes. Accessed on the Qt GUI/network thread. Use monotonic time.
+struct SalesRequestGate {
+    QElapsedTimer clock;
+    qint64 nextRequest = 0;
+    int spacingMs = 2100;
+    SalesRequestGate() { clock.start(); }
+};
+SalesRequestGate &salesRequestGate()
+{
+    static SalesRequestGate gate;
+    return gate;
+}
+}
+
+QList<int> AmazonInventoryApi::parseMonthlyOrderCounts(const QByteArray &body,
+                                                       const QList<QDate> &months,
+                                                       const QDateTime &until)
+{
+    QList<int> counts(months.size(), -1);
+    const auto doc = QJsonDocument::fromJson(body);
+    if (!doc.isObject() || !doc.object().value("payload").isArray()
+        || !doc.object().value("errors").toArray().isEmpty())
+        return counts;
+    QSet<int> seen;
+    for (const auto &value : doc.object().value("payload").toArray()) {
+        const auto item = value.toObject();
+        const auto interval = item.value("interval").toString().split("--");
+        if (interval.size() != 2) continue;
+        const auto from = QDateTime::fromString(interval[0], Qt::ISODate).toUTC();
+        const auto to = QDateTime::fromString(interval[1], Qt::ISODate).toUTC();
+        if (!from.isValid() || !to.isValid() || from >= to)
+            continue;
+        const int index = months.indexOf(from.date());
+        if (index < 0) continue; // Retry may request only selected missing months.
+        if (seen.contains(index)) {
+            counts[index] = -1; // Ambiguous month, but keep other sound months.
+            continue;
+        }
+        seen.insert(index);
+        const auto calendarEnd = months[index].addMonths(1).startOfDay(QTimeZone::UTC);
+        const auto expectedEnd = qMin(calendarEnd, until);
+        // Amazon can label a partial current-month aggregate with the full
+        // calendar bucket (Oct 1--Nov 1 for a query ending Oct 10). Accept
+        // either that label or the clipped request boundary, not arbitrary
+        // ranges. The query's end still defines the counted period.
+        if (from != months[index].startOfDay(QTimeZone::UTC) || expectedEnd <= from
+            || (to != expectedEnd && to != calendarEnd))
+            continue;
+        const auto count = item.value("orderCount");
+        const int n = count.toInt(-1);
+        if (count.isDouble() && n >= 0 && count.toDouble() == n)
+            counts[index] = n;
+    }
+    return counts;
+}
+
+QCoro::Task<void> AmazonInventoryApi::fetchMonthlyOrderCounts(QList<QDate> months,
+                                                             QDateTime until, QList<int> *out)
+{
+    *out = QList<int>(months.size(), -1);
+    m_lastError.clear();
+    if (months.isEmpty()) co_return;
+    for (int i = 0; i < months.size(); ++i) {
+        if (!months[i].isValid() || months[i].day() != 1 || (i && months[i] <= months[i-1])) {
+            m_lastError = QStringLiteral("Invalid sales months");
+            co_return;
+        }
+    }
+    // Match the seconds precision sent to Amazon, including the partial month.
+    until = QDateTime::fromSecsSinceEpoch(until.toSecsSinceEpoch(), QTimeZone::UTC);
+    const auto end = qMin(months.last().addMonths(1).startOfDay(QTimeZone::UTC), until);
+    QByteArray body;
+    co_await _fetchOrderMetrics(months.first().startOfDay(QTimeZone::UTC), end, "Month", &body);
+    if (!m_lastError.isEmpty()) co_return;
+    *out = parseMonthlyOrderCounts(body, months, until);
+    if (out->contains(-1))
+        m_lastError = QStringLiteral("Amazon request succeeded, but %1 monthly counts were missing or invalid")
+            .arg(out->count(-1));
+}
+
 QCoro::Task<void> AmazonInventoryApi::fetchOrderCount(QDateTime from, QDateTime to, int *out)
 {
     *out = -1;
+    QByteArray body;
+    co_await _fetchOrderMetrics(from, to, "Total", &body);
+    if (!m_lastError.isEmpty()) co_return;
+    *out = parseOrderCount(body);
+    if (*out < 0)
+        m_lastError = QStringLiteral("Missing or invalid orderCount in Amazon response");
+}
+
+QCoro::Task<void> AmazonInventoryApi::_fetchOrderMetrics(QDateTime from, QDateTime to,
+                                                        QString granularity, QByteArray *out)
+{
+    out->clear();
     m_lastError.clear();
     if (!from.isValid() || !to.isValid() || from >= to) {
         m_lastError = QStringLiteral("Invalid order-count interval");
         co_return;
     }
-    for (int attempt = 0; attempt < 3; ++attempt) {
+    auto &gate = salesRequestGate();
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        if (readCancelled()) { m_lastError = QStringLiteral("Cancelled"); co_return; }
         QString token;
         co_await _getAccessToken(&token);
         if (token.isEmpty()) {
-            if (m_lastError.isEmpty())
-                m_lastError = QStringLiteral("No LWA access token available");
+            if (m_lastError.isEmpty()) m_lastError = QStringLiteral("No LWA access token available");
             co_return;
         }
+        // Recheck after every await so overlapping callers cannot reserve the
+        // same slot. Cancellation also interrupts long server-requested delays.
+        while (gate.nextRequest > gate.clock.elapsed() && !readCancelled())
+            co_await AmazonRead::delay(int(qMin<qint64>(1000, gate.nextRequest - gate.clock.elapsed())), m_cancelled);
+        if (readCancelled()) { m_lastError = QStringLiteral("Cancelled"); co_return; }
+        gate.nextRequest = gate.clock.elapsed() + gate.spacingMs;
         QUrl url(QStringLiteral("https://%1/sales/v1/orderMetrics")
                      .arg(endpointForMarketplace(m_marketplaceId)));
         QUrlQuery query;
         query.addQueryItem("marketplaceIds", m_marketplaceId);
         query.addQueryItem("interval", from.toUTC().toString(Qt::ISODate) + "--" + to.toUTC().toString(Qt::ISODate));
-        query.addQueryItem("granularity", "Total");
+        query.addQueryItem("granularity", granularity);
         query.addQueryItem("granularityTimeZone", "UTC");
         url.setQuery(query);
         QNetworkRequest request(url);
@@ -1027,19 +1129,44 @@ QCoro::Task<void> AmazonInventoryApi::fetchOrderCount(QDateTime from, QDateTime 
         co_await AmazonRead::wait(reply, m_cancelled);
         const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const auto error = reply->error();
+        const auto errorText = reply->errorString();
         const auto body = reply->readAll();
+        const auto retryAfter = reply->rawHeader("Retry-After");
+        const auto requestId = reply->rawHeader("x-amzn-RequestId");
+        const double rate = reply->rawHeader("x-amzn-RateLimit-Limit").toDouble();
+        if (rate > 0 && rate < 0.5) {
+            gate.spacingMs = int(qMin(3600000.0, 1050.0 / rate));
+            gate.nextRequest = qMax(gate.nextRequest, gate.clock.elapsed() + gate.spacingMs);
+        }
         reply->deleteLater();
-        if ((status == 429 || status >= 500) && attempt < 2) {
-            co_await AmazonRead::delay(2000 * (attempt + 1), m_cancelled);
-            continue;
+        if (readCancelled()) { m_lastError = QStringLiteral("Cancelled"); co_return; }
+        if (status == 429 || status >= 500 || status == 0) {
+            qint64 delayMs = 2000LL << qMin(attempt, 3);
+            bool secondsValid = false;
+            const qint64 seconds = retryAfter.toLongLong(&secondsValid);
+            if (secondsValid && seconds > 0)
+                delayMs = qMax(delayMs, qMin<qint64>(seconds, 86400) * 1000);
+            else {
+                const auto date = QDateTime::fromString(QString::fromLatin1(retryAfter), Qt::RFC2822Date);
+                if (date.isValid()) delayMs = qMax(delayMs, QDateTime::currentDateTimeUtc().msecsTo(date));
+            }
+            gate.nextRequest = qMax(gate.nextRequest, gate.clock.elapsed() + delayMs);
+            if (attempt < 4 && m_readProgress)
+                m_readProgress(QStringLiteral("HTTP %1; retry %2/5 in %3 seconds")
+                    .arg(status).arg(attempt + 2).arg((delayMs + 999) / 1000));
+            // Keep the cooldown for other marketplaces even after this one's
+            // final attempt fails.
+            if (attempt < 4) continue;
         }
         if (status != 200 || error != QNetworkReply::NoError) {
-            m_lastError = QStringLiteral("Order count failed: HTTP %1").arg(status);
+            const auto errors = QJsonDocument::fromJson(body).object().value("errors").toArray();
+            const auto detail = errors.isEmpty() ? QJsonObject() : errors.first().toObject();
+            m_lastError = QStringLiteral("Order count failed: HTTP %1 — %2 %3")
+                .arg(status).arg(detail.value("code").toString(), detail.value("message").toString(errorText));
+            if (!requestId.isEmpty()) m_lastError += QStringLiteral(" (request %1)").arg(QString::fromLatin1(requestId));
             co_return;
         }
-        *out = parseOrderCount(body);
-        if (*out < 0)
-            m_lastError = QStringLiteral("Missing or invalid orderCount in Amazon response");
+        *out = body;
         co_return;
     }
 }

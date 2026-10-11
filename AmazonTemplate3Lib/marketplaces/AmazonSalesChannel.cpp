@@ -20,6 +20,17 @@ public:
     {
         co_await m_api.fetchOrderCount(from, to, out);
     }
+    void setReadCancellation(std::shared_ptr<bool> cancelled) override { m_api.setReadCancellation(std::move(cancelled)); }
+    void setReadProgress(std::function<void(const QString &)> progress) override { m_api.setReadProgress(std::move(progress)); }
+    QCoro::Task<void> fetchMonthlyOrderCounts(QList<QDate> months, QDateTime until,
+                                             QList<SalesMonthCount> *out) override
+    {
+        QList<int> counts;
+        co_await m_api.fetchMonthlyOrderCounts(months, until, &counts);
+        out->clear();
+        for (int count : counts)
+            out->append({count, count < 0 ? m_api.lastError() : QString()});
+    }
 private:
     QString m_name;
     AmazonInventoryApi m_api;

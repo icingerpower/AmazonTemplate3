@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDate>
+#include <QDateTime>
 #include <QPointer>
 #include <QSharedPointer>
 #include <QWidget>
@@ -37,13 +38,15 @@ private:
     QStandardItemModel *m_counts;
     QPushButton *m_count;
     QPushButton *m_cancel;
+    QPushButton *m_retry;
+    QDateTime m_until;
     QLabel *m_status;
     SalesChart *m_chart;
     std::shared_ptr<CountJob> m_job;
     QCoro::Task<void> m_task;
 
     void resetTable();
-    void startCounting();
+    void startCounting(bool retryFailed = false);
     void updateChart();
     void setBusy(bool busy);
     static QCoro::Task<void> countOrders(QPointer<PaneSales> pane, std::shared_ptr<CountJob> job);

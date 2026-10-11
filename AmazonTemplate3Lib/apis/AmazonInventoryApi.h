@@ -32,6 +32,9 @@ public:
     static int parseSalesUnits(const QByteArray &body); // -1 for malformed/incomplete responses
     static int parseOrderCount(const QByteArray &body);
     QCoro::Task<void> fetchOrderCount(QDateTime from, QDateTime to, int *out);
+    static QList<int> parseMonthlyOrderCounts(const QByteArray &body, const QList<QDate> &months,
+                                              const QDateTime &until);
+    QCoro::Task<void> fetchMonthlyOrderCounts(QList<QDate> months, QDateTime until, QList<int> *out);
     struct InventorySummary {
         QString sku;
         QString asin;
@@ -150,6 +153,7 @@ private:
     QNetworkAccessManager *_nam();
 
     QCoro::Task<void> _getAccessToken(QString *out);
+    QCoro::Task<void> _fetchOrderMetrics(QDateTime from, QDateTime to, QString granularity, QByteArray *out);
 
     // Create a report of the given type, poll to completion, download and
     // decompress the document. Decompressed bytes written to *outContent
