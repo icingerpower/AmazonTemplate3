@@ -864,7 +864,11 @@ async function fillKatField(page: Page, sel: string, value: string): Promise<boo
 const COUNTRY_ALIASES: Record<string, string> = {
   cn: "China", china: "China", pk: "Pakistan", pakistan: "Pakistan",
   vn: "Vietnam", vietnam: "Vietnam", in: "India", india: "India",
-  tr: "Turkey", turkey: "Turkey",
+  tr: "Turkey", turkey: "Turkey", turkie: "Turkey", turquie: "Turkey",
+  turkiye: "Turkey", türkiye: "Turkey",
+  de: "Germany", germany: "Germany", fr: "France", france: "France",
+  it: "Italy", italy: "Italy", es: "Spain", spain: "Spain",
+  uk: "United Kingdom", gb: "United Kingdom",
 };
 function splitAddress(addr: string) {
   const tokens = addr.split(",").map((t) => t.trim()).filter(Boolean);

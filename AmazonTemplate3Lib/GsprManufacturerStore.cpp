@@ -10,7 +10,7 @@
 
 namespace {
 
-const auto CACHE_FILE = QStringLiteral("gspr-manufacturer-cache-v3.json");
+const auto CACHE_FILE = QStringLiteral("gspr-manufacturer-cache-v4.json");
 
 // Segment labels (validated against all real supplier files — 634/636 rows).
 const QRegularExpression RE_PHONE(
@@ -20,17 +20,20 @@ const QRegularExpression RE_ADDR(
     QStringLiteral("^(address|adresse|add)\\s*:?\\s*(.+)$"),
     QRegularExpression::CaseInsensitiveOption);
 const QRegularExpression RE_EMAIL(
-    QStringLiteral("^e-?mail\\s*:?\\s*(.+)$"),
+    QStringLiteral("^(?:e-?mail(?:\\s*address)?|courriel)\\s*:?\\s*(.+)$"),
     QRegularExpression::CaseInsensitiveOption);
 const QRegularExpression RE_NAME_PREFIX(
     QStringLiteral("^(company\\s*name|name)\\s*:\\s*"),
     QRegularExpression::CaseInsensitiveOption);
 const QRegularExpression RE_BARE_PHONE(
     QStringLiteral("^\\+?[\\d\\s\\-()\\.]{7,}$"));
+const QRegularExpression RE_BARE_EMAIL(
+    QStringLiteral("^(?:mailto:)?<?([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})>?$"),
+    QRegularExpression::CaseInsensitiveOption);
 // Force a segment break before an inline "Label:" glued after a single space.
 const QRegularExpression RE_INLINE_LABEL(
     QStringLiteral("\\s+((?:mobile\\s*phone|t[ée]l[ée]phone|phone|tel|cell\\s*phone|mobile|whatsapp|"
-                   "address|adresse|add|e-?mail|fax)\\s*:)"),
+                   "e-?mail(?:\\s*address)?|courriel|address|adresse|add|fax)\\s*:)"),
     QRegularExpression::CaseInsensitiveOption);
 // Separators: " - ", " – " (en-dash) or runs of 2+ spaces.
 const QRegularExpression RE_SEG_SEP(QStringLiteral("\\s+[-–]\\s+|\\s{2,}"));
@@ -76,6 +79,7 @@ bool GsprManufacturerStore::parseManufacturer(const QString &raw, GsprManufactur
         const auto am = RE_ADDR.match(seg);
         const auto pm = RE_PHONE.match(seg);
         const auto em = RE_EMAIL.match(seg);
+        const auto bem = RE_BARE_EMAIL.match(seg);
         if (am.hasMatch()) {
             QString v = am.captured(2);
             const auto inner = RE_ADDR.match(v); // "Address: address:X" → X
@@ -85,7 +89,11 @@ bool GsprManufacturerStore::parseManufacturer(const QString &raw, GsprManufactur
         } else if (pm.hasMatch() && !RE_BARE_PHONE.match(seg).hasMatch()) {
             phone = pm.captured(2);
         } else if (em.hasMatch()) {
-            email = em.captured(1);
+            const QString v = em.captured(1).trimmed();
+            const auto innerBem = RE_BARE_EMAIL.match(v);
+            email = innerBem.hasMatch() ? innerBem.captured(1) : v;
+        } else if (bem.hasMatch()) {
+            email = bem.captured(1);
         } else if (seg.startsWith(QLatin1String("http"), Qt::CaseInsensitive)) {
             if (url.isEmpty())
                 url = seg; // accepted by Amazon as "primary email address or URL"
@@ -203,11 +211,13 @@ bool GsprManufacturerStore::reload(QString *error)
                 const bool manOk = !man.isEmpty() && parseManufacturer(man, &e);
                 // Amazon's form requires an email or URL — when the
                 // manufacturer line has neither, the Purchase link column is
-                // a valid URL to use.
+                // a valid URL or email to use.
                 if (e.url.isEmpty() && e.email.isEmpty() && colLink > 0) {
                     const QString link = cellText(doc, r, colLink);
                     if (link.startsWith(QLatin1String("http"), Qt::CaseInsensitive))
                         e.url = link;
+                    else if (const auto bemLink = RE_BARE_EMAIL.match(link); bemLink.hasMatch())
+                        e.email = bemLink.captured(1);
                 }
                 const QStringList prefixes = skuPrefixes(sku, &bad);
                 if (!manOk || prefixes.isEmpty() || !bad.isEmpty()) {

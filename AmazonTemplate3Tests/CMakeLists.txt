@@ -192,3 +192,10 @@ target_include_directories(SalesTests PRIVATE ../AmazonTemplate3 ../AmazonTempla
 target_link_libraries(SalesTests PRIVATE AmazonTemplate3Lib_Tests Qt6::Test Qt6::Widgets)
 add_test(NAME SalesTests COMMAND SalesTests)
 set_tests_properties(SalesTests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+
+add_executable(GsprManufacturerStoreTests tst_gspr_manufacturer_store.cpp)
+target_include_directories(GsprManufacturerStoreTests PRIVATE ../AmazonTemplate3Lib)
+target_link_libraries(GsprManufacturerStoreTests PRIVATE AmazonTemplate3Lib_Tests Qt6::Test)
+add_test(NAME GsprManufacturerStoreTests COMMAND GsprManufacturerStoreTests)
+set_tests_properties(GsprManufacturerStoreTests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
+

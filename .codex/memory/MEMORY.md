@@ -1,5 +1,6 @@
 # Memory Index
 
+- [GSPR manufacturer parser and country mapping](project_gspr.md) — bare email detection, "Email address:" label collision fix, cache v4, and country aliases
 - [Sales pane and monthly order counts](project_sales.md) — marketplace factory sales capability, Amazon storefront/Temu store rows, UTC month boundaries, API count semantics, and offline tests
 
 - [Template title translation](project_title_translation.md) — English inch/cm measurements, protected variation suffixes, versioned cache and offline tests
