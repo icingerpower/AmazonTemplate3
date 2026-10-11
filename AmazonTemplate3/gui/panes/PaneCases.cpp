@@ -59,6 +59,21 @@ QStringList accountsForRegion(const QString &region)
             QStringLiteral("Belgium"), QStringLiteral("Ireland"), QStringLiteral("Poland"),
             QStringLiteral("Sweden"), QStringLiteral("Turkey")};
 }
+
+QString caseDomainForRegion(const QString &region)
+{
+    if (region == QLatin1String("eu"))
+        return QStringLiteral("sellercentral.amazon.co.uk");
+    if (region == QLatin1String("jp"))
+        return QStringLiteral("sellercentral.amazon.co.jp");
+    return QStringLiteral("sellercentral.amazon.com");
+}
+
+QString caseUrlForId(const QString &region, const QString &caseId)
+{
+    return QStringLiteral("https://%1/cu/case-dashboard/view-case?ref=sc_cd_lobby_vc_v3&ie=UTF&caseID=%2")
+        .arg(caseDomainForRegion(region), caseId);
+}
 } // namespace
 
 PaneCases::PaneCases(QWidget *parent)
@@ -137,6 +152,7 @@ void PaneCases::_connectSlots()
     connect(ui->buttonAddGroup,      &QPushButton::clicked, this, &PaneCases::_onAddGroup);
     connect(ui->buttonAddCase,       &QPushButton::clicked, this, &PaneCases::_onAddCase);
     connect(ui->buttonMarkCaseDone,  &QPushButton::clicked, this, &PaneCases::_onMarkCaseDone);
+    connect(ui->buttonCopyCaseUrl,   &QPushButton::clicked, this, &PaneCases::_onCopyCaseUrl);
     connect(ui->buttonOpenFolder,    &QPushButton::clicked, this, &PaneCases::_onOpenFolder);
     connect(ui->buttonCopyUrl,       &QPushButton::clicked, this, &PaneCases::_onCopyUrl);
     connect(ui->buttonRunSelected,   &QPushButton::clicked, this, &PaneCases::_onRunSelected);
@@ -322,6 +338,7 @@ void PaneCases::_syncDetailToSelection()
     const bool hasCase  = !_selectedCaseId().isEmpty();
     ui->buttonAddCase->setEnabled(hasGroup);
     ui->buttonMarkCaseDone->setEnabled(hasCase);
+    ui->buttonCopyCaseUrl->setEnabled(hasCase);
     ui->buttonOpenFolder->setEnabled(hasGroup);
     ui->comboBoxAccount->setEnabled(hasGroup);
     // Run needs a group AND a chosen marketplace.
@@ -414,6 +431,15 @@ void PaneCases::_onMarkCaseDone()
     }
     // Toggling the check state triggers the itemChanged handler, which persists.
     item->setCheckState(item->checkState() == Qt::Checked ? Qt::Unchecked : Qt::Checked);
+}
+
+void PaneCases::_onCopyCaseUrl()
+{
+    const QString cid = _selectedCaseId();
+    if (cid.isEmpty()) return;
+    CaseGroup *g = _selectedGroup();
+    const QString region = g ? g->region() : QStringLiteral("na");
+    QGuiApplication::clipboard()->setText(caseUrlForId(region, cid));
 }
 
 void PaneCases::_onOpenFolder()

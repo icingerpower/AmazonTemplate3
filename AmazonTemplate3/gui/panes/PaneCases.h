@@ -94,6 +94,7 @@ private:
     void _onAddGroup();
     void _onAddCase();
     void _onMarkCaseDone();
+    void _onCopyCaseUrl();
     void _onOpenFolder();
     void _onCopyUrl();
     void _onRegionChanged();
