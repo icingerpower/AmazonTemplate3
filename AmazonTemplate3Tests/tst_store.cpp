@@ -1018,6 +1018,195 @@ private slots:
         QCOMPARE(loaded.placements(items.first()).size(), 2);
         QVERIFY(loaded.isDuplicate(items.first(), category("Low heels")));
     }
+
+    void exportImagesAcrossSizesAndOver60Warning()
+    {
+        StoreExportCli cli;
+        QList<Item> items;
+        for (int i = 0; i < 65; ++i) {
+            Item it;
+            it.asin = QStringLiteral("Z%1").arg(i);
+            it.sku = QStringLiteral("SKU-%1").arg(i);
+            it.title = QStringLiteral("Product %1").arg(i);
+            it.brand = "Brand";
+            it.category = "Sneakers";
+            it.gender = "female";
+            it.age = "adult";
+            it.color = QStringLiteral("COLOR_%1").arg(i);
+            it.sizeValue = "40";
+            items.append(it);
+        }
+
+        PaneStore pane;
+        setup(pane, items);
+        pane.setAvailableClis({&cli});
+
+        auto names = pane.m_treeModel->englishNames();
+        names[category("Sneakers").join('\x1f')] = "Sneakers";
+        pane.m_treeModel->setEnglishNames(names);
+        pane._applyItems(items);
+
+        QDir dir(m_dir->path());
+        QVERIFY(dir.mkpath("stores/storefront"));
+        QPixmap imgH(4, 4); imgH.fill(Qt::red);
+        QVERIFY(imgH.save(dir.filePath("stores/storefront/horizontal.jpg")));
+        QPixmap imgS(4, 4); imgS.fill(Qt::blue);
+        QVERIFY(imgS.save(dir.filePath("stores/storefront/square.jpg")));
+
+        QFile versions(dir.filePath("stores/storefront/versions.json"));
+        QVERIFY(versions.open(QIODevice::WriteOnly));
+        versions.write(QJsonDocument(QJsonArray{QJsonObject{
+            {"ts", 2},
+            {"horizontal", "horizontal.jpg"},
+            {"square", "square.jpg"},
+            {"nodePath", QJsonArray{"Brand", "Sneakers"}}
+        }}).toJson());
+        versions.close();
+
+        pane.findChild<QLineEdit *>("lineEditExportFolder")->setText(dir.filePath("exports"));
+        selectNode(pane, category("Sneakers"));
+        pane.findChild<QTableView *>("tableViewAsins")->selectAll();
+        QCOMPARE(pane._selectedTableRows().size(), 65);
+
+        // Case A: Prompted with > 60 warning. User responds No -> export cancelled.
+        {
+            bool promptHandled = false;
+            QTimer handlePrompt;
+            handlePrompt.setSingleShot(true);
+            connect(&handlePrompt, &QTimer::timeout, this, [&] {
+                if (auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+                    QVERIFY(box->text().contains("60"));
+                    promptHandled = true;
+                    if (auto *noBtn = box->button(QMessageBox::No)) {
+                        noBtn->click();
+                    } else {
+                        box->reject();
+                    }
+                }
+            });
+            handlePrompt.start(10);
+            pane.findChild<QPushButton *>("buttonExportProducts")->click();
+            QTRY_VERIFY_WITH_TIMEOUT(promptHandled, 1000);
+            const auto outDir = dir.filePath("exports/Brand/Sneakers");
+            QVERIFY(!QFile::exists(outDir + "/ASINS.txt"));
+            QVERIFY(!QFile::exists(outDir + "/horizontal.jpg"));
+            QVERIFY(!QFile::exists(outDir + "/square.jpg"));
+        }
+
+        // Case B: Prompted with > 60 warning. User responds Yes -> export proceeds, both images copied.
+        {
+            bool promptHandled = false;
+            bool success = false;
+            bool infoHandled = false;
+            QTimer handleDialogs;
+            connect(&handleDialogs, &QTimer::timeout, this, [&] {
+                if (auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+                    if (!promptHandled && box->icon() == QMessageBox::Question) {
+                        promptHandled = true;
+                        if (auto *yesBtn = box->button(QMessageBox::Yes)) {
+                            yesBtn->click();
+                        } else {
+                            box->accept();
+                        }
+                    } else if (box->icon() == QMessageBox::Information) {
+                        infoHandled = true;
+                        success = true;
+                        box->accept();
+                    }
+                }
+            });
+            handleDialogs.start(10);
+            pane.findChild<QPushButton *>("buttonExportProducts")->click();
+            QTRY_VERIFY_WITH_TIMEOUT(infoHandled, 3000);
+            handleDialogs.stop();
+            QVERIFY(promptHandled);
+            QVERIFY(success);
+
+            const auto outDir = dir.filePath("exports/Brand/Sneakers");
+            QVERIFY(QFile::exists(outDir + "/ASINS.txt"));
+            QVERIFY(QFile::exists(outDir + "/horizontal.jpg"));
+            QVERIFY(QFile::exists(outDir + "/square.jpg"));
+        }
+    }
+
+    void oldInBottomMovesOldDeadProductsToBottom()
+    {
+        const QDate now = QDate::currentDate();
+        struct Spec {
+            QString asin;
+            QString sku;
+            QDate created;
+            int sales365;
+            int available;
+        };
+        const QList<Spec> specs = {
+            {"A01", "SKU-A01", now.addYears(-3), 0, 0},
+            {"B01", "SKU-B01", now.addYears(-3), 10, 0},
+            {"C01", "SKU-C01", now.addYears(-3), 0, 5},
+            {"D01", "SKU-D01", now.addMonths(-6), 0, 0},
+            {"E01", "SKU-E01", now.addYears(-4), 0, 0},
+            {"F01", "SKU-F01", now.addYears(-1), 50, 20},
+        };
+
+        QList<Item> items;
+        for (const auto &sp : specs) {
+            Item it;
+            it.asin = sp.asin;
+            it.sku = sp.sku;
+            it.title = QString("Item %1").arg(sp.asin);
+            it.brand = "Brand";
+            it.category = "Boots";
+            it.gender = "female";
+            it.age = "adult";
+            it.color = sp.asin; // distinct color for distinct row
+            it.sizeValue = "39";
+            it.createdDate = sp.created;
+            items.append(it);
+        }
+
+        // Set up stock cache in settings
+        auto s = WorkingDirectoryManager::instance()->settings();
+        QJsonObject availObj, sales365Obj;
+        for (const auto &sp : specs) {
+            availObj.insert(sp.sku.toLower(), sp.available);
+            sales365Obj.insert(sp.sku.toLower(), sp.sales365);
+        }
+        s->setValue(QStringLiteral("PaneStoreStockCache/timestamp"),
+                    static_cast<qlonglong>(QDateTime::currentDateTimeUtc().toSecsSinceEpoch()));
+        s->setValue(QStringLiteral("PaneStoreStockCache/available"),
+                    QString::fromUtf8(QJsonDocument(availObj).toJson(QJsonDocument::Compact)));
+        s->setValue(QStringLiteral("PaneStoreStockCache/sales365"),
+                    QString::fromUtf8(QJsonDocument(sales365Obj).toJson(QJsonDocument::Compact)));
+
+        PaneStore pane;
+        setup(pane, items);
+        selectNode(pane, category("Boots"));
+
+        // Check initial order in table
+        QStringList initialAsins;
+        for (const auto &r : pane.m_storeModel->rows()) initialAsins.append(r.asin);
+        QCOMPARE(initialAsins, (QStringList{"A01", "B01", "C01", "D01", "E01", "F01"}));
+
+        // Click "Old in bottom" button
+        auto *btn = pane.findChild<QPushButton *>("buttonOldInBottom");
+        QVERIFY(btn);
+        QVERIFY(btn->toolTip().contains("2 years"));
+        btn->click();
+
+        // Expected order:
+        // Remaining active products in exact relative order: B01, C01, D01, F01
+        // Old dead products moved to bottom in relative order: A01, E01
+        QStringList resultAsins;
+        for (const auto &r : pane.m_storeModel->rows()) resultAsins.append(r.asin);
+        QCOMPARE(resultAsins, (QStringList{"B01", "C01", "D01", "F01", "A01", "E01"}));
+
+        // Verify saved order persistence across reload
+        roundTrip(pane);
+        selectNode(pane, category("Boots"));
+        QStringList reloadedAsins;
+        for (const auto &r : pane.m_storeModel->rows()) reloadedAsins.append(r.asin);
+        QCOMPARE(reloadedAsins, (QStringList{"B01", "C01", "D01", "F01", "A01", "E01"}));
+    }
 };
 
 QTEST_MAIN(StoreTests)

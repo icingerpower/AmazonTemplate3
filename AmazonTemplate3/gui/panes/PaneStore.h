@@ -125,12 +125,13 @@ private:
     // Save order independently for the selected category path.
     void _syncSavedOrderFromVisibleRows();
     void _onSortBySales();
+    void _onOldInBottom();
 
     QStringList _currentNodePath() const;
 
     void _onGenStorefrontImage();
     void _loadStorefrontVersions();           // refreshes listVersionStrip + image labels
-    void _onStorefrontImageGenerated(const QString &desktopPath, const QString &mobilePath);
+    void _onStorefrontImageGenerated(const QString &horizontalPath, const QString &squarePath);
     void _showStorefrontImage(const QString &absPath);
     void _deleteSelectedVersion();
 

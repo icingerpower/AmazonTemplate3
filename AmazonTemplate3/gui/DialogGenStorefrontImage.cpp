@@ -121,8 +121,8 @@ DialogGenStorefrontImage::DialogGenStorefrontImage(
     sizeRow->addWidget(new QLabel(tr("Size:"), settingsGroup));
     m_comboBoxSize = new QComboBox(settingsGroup);
     m_comboBoxSize->addItems({QStringLiteral("Both"),
-                              QStringLiteral("Desktop (1792×1024)"),
-                              QStringLiteral("Mobile (1024×1024)")});
+                              QStringLiteral("Horizontal (3:1, 3000×1000)"),
+                              QStringLiteral("Square (1:1 1920×1920)")});
     sizeRow->addWidget(m_comboBoxSize, 1);
     settingsLayout->addLayout(sizeRow);
 
@@ -277,7 +277,7 @@ void DialogGenStorefrontImage::_autoFillPrompt()
     }
 
     QString prompt = tr(
-        "Professional horizontal banner for an Amazon storefront, composed from "
+        "Professional image banner for an Amazon storefront, composed from "
         "the exact products shown in the reference photos listed below — one "
         "photo per product. Reproduce each product exactly as it appears in its "
         "own reference photo: same color, pattern, material, and shape. Do not "
@@ -286,8 +286,7 @@ void DialogGenStorefrontImage::_autoFillPrompt()
         "arrangement, background, lighting, and composition freely, with a "
         "background that matches the product's occasion.\n\n"
         "Reference photos:\n%1\n\n"
-        "Clean modern photography, high quality, no text, no watermarks, "
-        "horizontal composition.")
+        "Clean modern photography, high quality, no text, no watermarks.")
         .arg(refLines.join(QLatin1Char('\n')));
 
     if (anyModeled)
@@ -355,10 +354,16 @@ void DialogGenStorefrontImage::_loadVersions()
         for (const QJsonValue &v : obj.value(QStringLiteral("nodePath")).toArray())
             nodePath.append(v.toString());
         if (!nodePathVisible(nodePath, m_nodePath)) continue;
-        const QString desktop = obj.value(QStringLiteral("desktop")).toString();
-        const QString mobile  = obj.value(QStringLiteral("mobile")).toString();
-        if (!desktop.isEmpty()) addItem(obj, desktop, tr("Desktop"));
-        if (!mobile.isEmpty())  addItem(obj, mobile,  tr("Mobile"));
+        QString horizontal = obj.value(QStringLiteral("horizontal")).toString();
+        if (horizontal.isEmpty())
+            horizontal = obj.value(QStringLiteral("desktop")).toString();
+
+        QString square = obj.value(QStringLiteral("square")).toString();
+        if (square.isEmpty())
+            square = obj.value(QStringLiteral("mobile")).toString();
+
+        if (!horizontal.isEmpty()) addItem(obj, horizontal, tr("Horizontal (3:1)"));
+        if (!square.isEmpty())     addItem(obj, square,     tr("Square (1:1 1920×1920)"));
     }
 }
 
@@ -423,10 +428,16 @@ void DialogGenStorefrontImage::_viewImage()
     // Build list of available images for this version.
     struct ImageEntry { QString label; QString absPath; };
     QList<ImageEntry> images;
-    const QString desktopFile = ver.value(QStringLiteral("desktop")).toString();
-    const QString mobileFile  = ver.value(QStringLiteral("mobile")).toString();
-    if (!desktopFile.isEmpty()) images.append({tr("Desktop"), sfDir.filePath(desktopFile)});
-    if (!mobileFile.isEmpty())  images.append({tr("Mobile"),  sfDir.filePath(mobileFile)});
+    QString horizontalFile = ver.value(QStringLiteral("horizontal")).toString();
+    if (horizontalFile.isEmpty())
+        horizontalFile = ver.value(QStringLiteral("desktop")).toString();
+
+    QString squareFile = ver.value(QStringLiteral("square")).toString();
+    if (squareFile.isEmpty())
+        squareFile = ver.value(QStringLiteral("mobile")).toString();
+
+    if (!horizontalFile.isEmpty()) images.append({tr("Horizontal (3:1)"), sfDir.filePath(horizontalFile)});
+    if (!squareFile.isEmpty())     images.append({tr("Square (1:1 1920×1920)"), sfDir.filePath(squareFile)});
     if (images.isEmpty()) return;
 
     auto *dlg = new QDialog(this);
@@ -535,7 +546,7 @@ void DialogGenStorefrontImage::_deleteSelectedVersion()
 
     // Remove image files.
     const QDir sfDir(_storefrontDir());
-    for (const char *key : {"desktop", "mobile"}) {
+    for (const char *key : {"horizontal", "square", "desktop", "mobile"}) {
         const QString fname = victim.value(QLatin1String(key)).toString();
         if (!fname.isEmpty())
             QFile::remove(sfDir.filePath(fname));
@@ -571,28 +582,30 @@ void DialogGenStorefrontImage::_generate()
     const QString prompt   = m_promptEdit->toPlainText().trimmed();
     const QString sizeSel  = m_comboBoxSize->currentText();
 
-    const bool wantDesktop = sizeSel.startsWith(QStringLiteral("Desktop"))
-                          || sizeSel == QStringLiteral("Both");
-    const bool wantMobile  = sizeSel.startsWith(QStringLiteral("Mobile"))
-                          || sizeSel == QStringLiteral("Both");
+    const bool wantHorizontal = sizeSel.startsWith(QStringLiteral("Horizontal"))
+                             || sizeSel.startsWith(QStringLiteral("Desktop"))
+                             || sizeSel == QStringLiteral("Both");
+    const bool wantSquare     = sizeSel.startsWith(QStringLiteral("Square"))
+                             || sizeSel.startsWith(QStringLiteral("Mobile"))
+                             || sizeSel == QStringLiteral("Both");
 
     m_workingDir.mkpath(QStringLiteral("stores/storefront"));
     const QDir sfDir(_storefrontDir());
     const qint64 ts = QDateTime::currentSecsSinceEpoch();
 
-    const QString desktopFile = QStringLiteral("%1_desktop.jpg").arg(ts);
-    const QString mobileFile  = QStringLiteral("%1_mobile.jpg").arg(ts);
-    const QString desktopAbs  = sfDir.filePath(desktopFile);
-    const QString mobileAbs   = sfDir.filePath(mobileFile);
+    const QString horizontalFile = QStringLiteral("%1_horizontal.jpg").arg(ts);
+    const QString squareFile     = QStringLiteral("%1_square.jpg").arg(ts);
+    const QString horizontalAbs  = sfDir.filePath(horizontalFile);
+    const QString squareAbs      = sfDir.filePath(squareFile);
 
     QString fullPrompt = prompt;
     fullPrompt += QStringLiteral("\n\n");
-    if (wantDesktop)
-        fullPrompt += tr("Save the desktop image as JPEG to \"%1\" (1792×1024 pixels).\n")
-                      .arg(desktopAbs);
-    if (wantMobile)
-        fullPrompt += tr("Save the mobile image as JPEG to \"%1\" (1024×1024 pixels).\n")
-                      .arg(mobileAbs);
+    if (wantHorizontal)
+        fullPrompt += tr("Save the horizontal banner image as JPEG to \"%1\" (3000×1000 pixels, 3:1 aspect ratio).\n")
+                      .arg(horizontalAbs);
+    if (wantSquare)
+        fullPrompt += tr("Save the square image as JPEG to \"%1\" (1920×1920 pixels, 1:1 aspect ratio).\n")
+                      .arg(squareAbs);
 
     m_buttonGenerate->setEnabled(false);
     _log(tr("Running %1…").arg(m_cli->getName()));
@@ -601,8 +614,8 @@ void DialogGenStorefrontImage::_generate()
     // frame involved — avoids the QCoroSignal dangling-pointer crash.
     m_cli->runPromptAsync(fullPrompt, sfDir.absolutePath(), this,
         [this, ts, prompt, sfDir,
-         wantDesktop, wantMobile,
-         desktopFile, mobileFile, desktopAbs, mobileAbs,
+         wantHorizontal, wantSquare,
+         horizontalFile, squareFile, horizontalAbs, squareAbs,
          nodePath = m_nodePath]
         (CliRunResult result)
     {
@@ -620,27 +633,27 @@ void DialogGenStorefrontImage::_generate()
             return;
         }
 
-        QString savedDesktop, savedMobile, savedDesktopAbs, savedMobileAbs;
-        if (wantDesktop) {
-            if (QFile::exists(desktopAbs)) {
-                savedDesktop    = desktopFile;
-                savedDesktopAbs = desktopAbs;
-                _log(tr("Saved %1").arg(desktopFile));
+        QString savedHorizontal, savedSquare, savedHorizontalAbs, savedSquareAbs;
+        if (wantHorizontal) {
+            if (QFile::exists(horizontalAbs)) {
+                savedHorizontal    = horizontalFile;
+                savedHorizontalAbs = horizontalAbs;
+                _log(tr("Saved %1").arg(horizontalFile));
             } else {
-                _log(tr("⚠ Desktop image not produced: %1").arg(desktopAbs));
+                _log(tr("⚠ Horizontal image not produced: %1").arg(horizontalAbs));
             }
         }
-        if (wantMobile) {
-            if (QFile::exists(mobileAbs)) {
-                savedMobile    = mobileFile;
-                savedMobileAbs = mobileAbs;
-                _log(tr("Saved %1").arg(mobileFile));
+        if (wantSquare) {
+            if (QFile::exists(squareAbs)) {
+                savedSquare    = squareFile;
+                savedSquareAbs = squareAbs;
+                _log(tr("Saved %1").arg(squareFile));
             } else {
-                _log(tr("⚠ Mobile image not produced: %1").arg(mobileAbs));
+                _log(tr("⚠ Square image not produced: %1").arg(squareAbs));
             }
         }
 
-        if (savedDesktop.isEmpty() && savedMobile.isEmpty()) {
+        if (savedHorizontal.isEmpty() && savedSquare.isEmpty()) {
             _log(tr("⚠ No output images were produced."));
             return;
         }
@@ -654,14 +667,17 @@ void DialogGenStorefrontImage::_generate()
             }
         }
         QJsonObject entry;
-        entry[QStringLiteral("ts")]       = static_cast<double>(ts);
-        entry[QStringLiteral("cli")]      = m_cli ? m_cli->getName() : QString{};
-        entry[QStringLiteral("prompt")]   = prompt;
-        entry[QStringLiteral("desktop")]  = savedDesktop;
-        entry[QStringLiteral("mobile")]   = savedMobile;
+        entry[QStringLiteral("ts")]         = static_cast<double>(ts);
+        entry[QStringLiteral("cli")]        = m_cli ? m_cli->getName() : QString{};
+        entry[QStringLiteral("prompt")]     = prompt;
+        entry[QStringLiteral("horizontal")] = savedHorizontal;
+        entry[QStringLiteral("square")]     = savedSquare;
+        // Keep desktop and mobile keys populated too for backward-compatibility:
+        entry[QStringLiteral("desktop")]    = savedHorizontal;
+        entry[QStringLiteral("mobile")]     = savedSquare;
         QJsonArray pathArr;
         for (const QString &s : nodePath) pathArr.append(s);
-        entry[QStringLiteral("nodePath")] = pathArr;
+        entry[QStringLiteral("nodePath")]   = pathArr;
         arr.append(entry);
 
         QSaveFile sf(_versionsJsonPath());
@@ -672,6 +688,6 @@ void DialogGenStorefrontImage::_generate()
 
         _loadVersions();
         _log(tr("Done."));
-        emit imageGenerated(savedDesktopAbs, savedMobileAbs);
+        emit imageGenerated(savedHorizontalAbs, savedSquareAbs);
     });
 }

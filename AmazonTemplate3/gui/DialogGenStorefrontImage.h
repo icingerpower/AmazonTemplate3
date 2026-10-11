@@ -33,7 +33,7 @@ public:
     ~DialogGenStorefrontImage() override;
 
 signals:
-    void imageGenerated(const QString &desktopPath, const QString &mobilePath);
+    void imageGenerated(const QString &horizontalPath, const QString &squarePath);
 
 private:
     // --- widgets ---

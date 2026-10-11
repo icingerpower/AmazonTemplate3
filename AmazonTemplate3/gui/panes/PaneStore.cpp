@@ -119,6 +119,7 @@ PaneStore::PaneStore(QWidget *parent)
         m_stockRefreshTask = _onRefreshSalesStock();
     });
     connect(ui->buttonSortBySales, &QPushButton::clicked, this, &PaneStore::_onSortBySales);
+    connect(ui->buttonOldInBottom, &QPushButton::clicked, this, &PaneStore::_onOldInBottom);
     connect(ui->buttonOpenStorefrontFolder, &QPushButton::clicked, this, [this]() {
         m_workingDir.mkpath(QStringLiteral("stores/storefront"));
         QDesktopServices::openUrl(QUrl::fromLocalFile(
@@ -1604,12 +1605,22 @@ void PaneStore::_buildTable(const QStringList &asins)
         });
         row.image                 = m_asinToPixmap.value(picked);
         row.createdDate           = si.createdDate;
+        if (!row.createdDate.isValid()) {
+            for (const QString &asin : group) {
+                const auto &it = m_asinToItem.value(asin);
+                if (it.createdDate.isValid()) {
+                    row.createdDate = it.createdDate;
+                    break;
+                }
+            }
+        }
         row.existsInMarketplaces  = si.existsInMarketplaces;
 
         int available = -1, sales90 = -1, sales365 = -1;
         _aggregateStock(group, &available, &sales90, &sales365);
         row.salesYear      = sales365;
         row.stockDays      = estimatedDaysOfSupply(available, sales90, 90);
+        row.stockAvailable = available;
         row.recommended4mo = recommendedInventoryForDays(sales90, 90, kFourMonthCoverageDays);
 
         unsortedRows.append(row);
@@ -1881,6 +1892,34 @@ void PaneStore::_onSortBySales()
 }
 
 // ---------------------------------------------------------------------------
+// _onOldInBottom — moves older products (> 2 years old) with no sales and no
+// inventory to the bottom of the visible category, preserving the relative
+// order of all other products (stable partition), and saves the new order.
+// ---------------------------------------------------------------------------
+
+void PaneStore::_onOldInBottom()
+{
+    QList<TableStoreAsin::Row> rows = m_storeModel->rows();
+    if (rows.isEmpty()) return;
+
+    const QDate twoYearsAgo = QDate::currentDate().addYears(-2);
+    auto isOldDead = [&](const TableStoreAsin::Row &r) {
+        const bool isOld = r.createdDate.isValid() && r.createdDate < twoYearsAgo;
+        const bool noSale = (r.salesYear <= 0);
+        const bool noInventory = (r.stockAvailable <= 0 && r.stockDays <= 0);
+        return isOld && noSale && noInventory;
+    };
+
+    std::stable_partition(rows.begin(), rows.end(),
+                          [&](const TableStoreAsin::Row &r) {
+        return !isOldDead(r);
+    });
+
+    m_storeModel->setRows(rows);
+    _syncSavedOrderFromVisibleRows();
+}
+
+// ---------------------------------------------------------------------------
 // _loadImages — async download of CDN thumbnails for ASINs lacking a cached image
 // ---------------------------------------------------------------------------
 
@@ -1981,11 +2020,11 @@ void PaneStore::_onGenStorefrontImage()
     dlg->show();
 }
 
-void PaneStore::_onStorefrontImageGenerated(const QString &desktopPath,
-                                            const QString &mobilePath)
+void PaneStore::_onStorefrontImageGenerated(const QString &horizontalPath,
+                                            const QString &squarePath)
 {
-    Q_UNUSED(desktopPath);
-    Q_UNUSED(mobilePath);
+    Q_UNUSED(horizontalPath);
+    Q_UNUSED(squarePath);
     _loadStorefrontVersions();
 }
 
@@ -2048,10 +2087,17 @@ void PaneStore::_loadStorefrontVersions()
         for (const QJsonValue &v : obj.value(QStringLiteral("nodePath")).toArray())
             nodePath.append(v.toString());
         if (!nodePathVisible(nodePath, currentPath)) continue;
-        const QString desktop = obj.value(QStringLiteral("desktop")).toString();
-        const QString mobile  = obj.value(QStringLiteral("mobile")).toString();
-        if (!desktop.isEmpty()) addItem(obj, desktop, tr("Desktop"));
-        if (!mobile.isEmpty())  addItem(obj, mobile,  tr("Mobile"));
+
+        QString horizontal = obj.value(QStringLiteral("horizontal")).toString();
+        if (horizontal.isEmpty())
+            horizontal = obj.value(QStringLiteral("desktop")).toString();
+
+        QString square = obj.value(QStringLiteral("square")).toString();
+        if (square.isEmpty())
+            square = obj.value(QStringLiteral("mobile")).toString();
+
+        if (!horizontal.isEmpty()) addItem(obj, horizontal, tr("Horizontal (3:1)"));
+        if (!square.isEmpty())     addItem(obj, square,     tr("Square (1:1 1920×1920)"));
     }
 
     if (ui->listVersionStrip->count() > 0) {
@@ -2105,7 +2151,7 @@ void PaneStore::_deleteSelectedVersion()
     if (victim.isEmpty()) return;
 
     const QDir sfDir(m_workingDir.filePath(QStringLiteral("stores/storefront")));
-    for (const char *key : {"desktop", "mobile"}) {
+    for (const char *key : {"horizontal", "square", "desktop", "mobile"}) {
         const QString fname = victim.value(QLatin1String(key)).toString();
         if (!fname.isEmpty())
             QFile::remove(sfDir.filePath(fname));
@@ -2147,6 +2193,17 @@ void PaneStore::_onExportProducts()
         asins << m_storeModel->data(
             m_storeModel->index(row, TableStoreAsin::ColAsin)).toString();
 
+    if (asins.size() > 60) {
+        const auto res = QMessageBox::question(
+            this, tr("Export products"),
+            tr("You selected %1 products to export (more than 60).\n\n"
+               "Do you want to proceed and force export of more than 60 products?").arg(asins.size()),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No);
+        if (res != QMessageBox::Yes)
+            return;
+    }
+
     const QString exportRoot = ui->lineEditExportFolder->text();
     if (exportRoot.isEmpty()) {
         QMessageBox::warning(this, tr("Export"), tr("Pick an export folder first."));
@@ -2174,39 +2231,45 @@ void PaneStore::_onExportProducts()
         return;
     }
 
-    const int verRow = ui->listVersionStrip->currentRow();
-    if (verRow < 0) {
-        QMessageBox::warning(this, tr("Export"),
-            tr("No generated image selected — generate or select one first."));
-        return;
-    }
-    const qint64 ts = ui->listVersionStrip->item(verRow)->data(Qt::UserRole + 1).toLongLong();
     const QString versionsJsonPath =
         m_workingDir.filePath(QStringLiteral("stores/storefront/versions.json"));
-    QString desktopFile;
+    const QDir sfDir(m_workingDir.filePath(QStringLiteral("stores/storefront")));
+
+    auto nodePathVisible = [](const QStringList &stored, const QStringList &current) {
+        if (stored.isEmpty()) return true;
+        if (current.size() < stored.size()) return false;
+        for (int i = 0; i < stored.size(); ++i)
+            if (current[i] != stored[i]) return false;
+        return true;
+    };
+
+    QStringList imageFilesToExport;
     {
         QFile f(versionsJsonPath);
         if (f.open(QIODevice::ReadOnly)) {
-            for (const QJsonValue &v : QJsonDocument::fromJson(f.readAll()).array()) {
+            const QJsonArray rawArr = QJsonDocument::fromJson(f.readAll()).array();
+            f.close();
+            for (const QJsonValue &v : rawArr) {
                 const QJsonObject o = v.toObject();
-                if (o.value(QStringLiteral("ts")).toVariant().toLongLong() == ts) {
-                    desktopFile = o.value(QStringLiteral("desktop")).toString();
-                    break;
+                QStringList storedPath;
+                for (const QJsonValue &pv : o.value(QStringLiteral("nodePath")).toArray())
+                    storedPath.append(pv.toString());
+                if (!nodePathVisible(storedPath, nodePath)) continue;
+
+                for (const char *key : {"horizontal", "square", "desktop", "mobile"}) {
+                    const QString fname = o.value(QLatin1String(key)).toString();
+                    if (!fname.isEmpty() && !imageFilesToExport.contains(fname)) {
+                        if (QFile::exists(sfDir.filePath(fname)))
+                            imageFilesToExport.append(fname);
+                    }
                 }
             }
         }
     }
-    if (desktopFile.isEmpty()) {
+
+    if (imageFilesToExport.isEmpty()) {
         QMessageBox::warning(this, tr("Export"),
-            tr("No desktop image available for the selected generated version "
-               "(only a mobile image was generated)."));
-        return;
-    }
-    const QString desktopAbs = m_workingDir.filePath(
-        QStringLiteral("stores/storefront/%1").arg(desktopFile));
-    if (!QFile::exists(desktopAbs)) {
-        QMessageBox::warning(this, tr("Export"),
-            tr("Desktop image file is missing on disk: %1").arg(desktopAbs));
+            tr("No generated images available for this category — generate images first."));
         return;
     }
 
@@ -2227,11 +2290,21 @@ void PaneStore::_onExportProducts()
         }
     }
 
-    const QString destImagePath = dest.filePath(QFileInfo(desktopAbs).fileName());
-    QFile::remove(destImagePath); // QFile::copy refuses to overwrite an existing file
-    if (!QFile::copy(desktopAbs, destImagePath)) {
+    QStringList copiedImages;
+    for (const QString &fname : std::as_const(imageFilesToExport)) {
+        const QString srcPath = sfDir.filePath(fname);
+        const QString destPath = dest.filePath(fname);
+        QFile::remove(destPath); // QFile::copy refuses to overwrite an existing file
+        if (QFile::copy(srcPath, destPath)) {
+            copiedImages.append(destPath);
+        } else {
+            qWarning() << "Failed to copy image to" << destPath;
+        }
+    }
+
+    if (copiedImages.isEmpty()) {
         QMessageBox::warning(this, tr("Export"),
-            tr("Failed to copy the image to %1").arg(destImagePath));
+            tr("Failed to copy generated images to %1").arg(dest.absolutePath()));
         return;
     }
 
@@ -2301,8 +2374,10 @@ void PaneStore::_onExportProducts()
         }
     };
 
-    cli->runPromptAsync(prompt, dest.absolutePath(), this,
-        [this, asinsPath, destImagePath, origText, cli, appendAsinsLine](CliRunResult result)
+    const QString destDirPath = dest.absolutePath();
+    const int copiedCount = copiedImages.size();
+    cli->runPromptAsync(prompt, destDirPath, this,
+        [this, asinsPath, destDirPath, copiedCount, origText, cli, appendAsinsLine](CliRunResult result)
     {
         ui->buttonExportProducts->setText(origText);
         ui->buttonExportProducts->setEnabled(!_selectedTableRows().isEmpty());
@@ -2324,7 +2399,7 @@ void PaneStore::_onExportProducts()
             return;
         }
         QMessageBox::information(this, tr("Export"),
-            tr("Exported image and ASINS.txt to:\n%1").arg(QFileInfo(destImagePath).absolutePath()));
+            tr("Exported %n image(s) and ASINS.txt to:\n%1", "", copiedCount).arg(destDirPath));
     });
 }
 

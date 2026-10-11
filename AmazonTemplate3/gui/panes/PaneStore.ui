@@ -257,6 +257,16 @@
           </widget>
          </item>
          <item>
+          <widget class="QPushButton" name="buttonOldInBottom">
+           <property name="toolTip">
+            <string>Move older products (&gt; 2 years old) with no sales and no inventory to the bottom, preserving the relative order of all other products</string>
+           </property>
+           <property name="text">
+            <string>Old in bottom</string>
+           </property>
+          </widget>
+         </item>
+         <item>
           <widget class="QPushButton" name="buttonOpenStorefrontFolder">
            <property name="toolTip">
             <string>Open the stores/storefront folder in the file manager, to copy generated image paths</string>
