@@ -19,6 +19,7 @@
 
 #include <QClipboard>
 #include <QComboBox>
+#include <QCryptographicHash>
 #include <QDesktopServices>
 #include <QMessageBox>
 #include <QRadioButton>
@@ -211,11 +212,13 @@ PaneStore::PaneStore(QWidget *parent)
 
 PaneStore::~PaneStore()
 {
+    if (m_salesCancelled) *m_salesCancelled = true;
     delete ui;
 }
 
 void PaneStore::setWorkingDir(const QDir &workingDir)
 {
+    if (m_salesCancelled) *m_salesCancelled = true;
     m_workingDir = workingDir;
     m_deletedProducts->reset();
     m_placements.clear();
@@ -225,6 +228,7 @@ void PaneStore::setWorkingDir(const QDir &workingDir)
     m_workingDir.mkpath(QStringLiteral("stores"));
     _loadCustomPaths();
     _loadStockCache();
+    m_sales.load(m_workingDir, _salesScope());
     // Must run before _loadFromDisk(), which triggers the first
     // m_treeModel->setItems() — that's when nodes pick up their English name.
     _loadEnglishCategoryNames();
@@ -1361,32 +1365,56 @@ QCoro::Task<void> PaneStore::_onRetrieve()
     progressDlg->show();
     setEnabled(false);
 
-    // Build the list of all configured marketplace IDs in the same region as the primary.
-    // These are passed to fetchListingAttributes so a single call detects existence in all.
-    QStringList sameRegionMpIds;
-    if (const AmazonMarketplace *primaryMp = AmazonMarketplace::forMarketplaceId(marketplaceId)) {
-        for (const AmazonMarketplace *rmp : AmazonMarketplace::forRegion(primaryMp->region())) {
-            if (!_catalogApi()->sellerIdForMarketplace(rmp->marketplaceId()).isEmpty())
-                sameRegionMpIds << rmp->marketplaceId();
+    // Keep the primary catalog/cache, but discover NA and JP listings separately.
+    // Each ASIN has one canonical item, even when countries use different SKUs.
+    QStringList discoveryMpIds{marketplaceId};
+    for (const QString &country : {QStringLiteral("US"), QStringLiteral("CA"), QStringLiteral("JP")}) {
+        const QString id = AmazonMarketplace::forCountryCode(country)->marketplaceId();
+        if (!discoveryMpIds.contains(id)) discoveryMpIds.append(id);
+    }
+    struct ListingSource {
+        QString marketplaceId;
+        QString sku;
+        int inventory;
+    };
+    QHash<QString, QList<ListingSource>> asinSources;
+    QStringList asins;
+    bool incomplete = false;
+    for (const QString &sourceMpId : std::as_const(discoveryMpIds)) {
+        if (!_catalogApi()->isConfiguredForMarketplace(sourceMpId)) {
+            appendLog(tr("⚠ Skipping %1: regional credentials are not configured.").arg(sourceMpId));
+            incomplete = true;
+            continue;
         }
+        appendLog(tr("Fetching merchant listings report for %1…").arg(sourceMpId));
+        if (statusLabelPtr) statusLabelPtr->setText(tr("Fetching SKU list: %1…").arg(sourceMpId));
+        QHash<QString, QString> reportSkus;
+        QHash<QString, int> reportInventory;
+        _catalogApi()->clearLastError();
+        co_await _catalogApi()->fetchAllSkusViaReport(sourceMpId, &reportSkus, &reportInventory);
+        if (!_catalogApi()->lastError().isEmpty()) {
+            appendLog(tr("⚠ Report failed for %1: %2").arg(sourceMpId, _catalogApi()->lastError()));
+            incomplete = true;
+            continue;
+        }
+        QStringList reportAsins = reportSkus.keys();
+        reportAsins.sort();
+        for (const QString &asin : std::as_const(reportAsins)) {
+            if (!asinSources.contains(asin)) asins.append(asin);
+            asinSources[asin].append({sourceMpId, reportSkus.value(asin), reportInventory.value(asin)});
+        }
+        appendLog(tr("%1: %2 listings; %3 unique ASINs so far.")
+                  .arg(sourceMpId).arg(reportSkus.size()).arg(asins.size()));
     }
 
-    appendLog(tr("Fetching all SKUs via merchant listings report…"));
-    if (statusLabelPtr) statusLabelPtr->setText(tr("Fetching SKU list…"));
-
-    QHash<QString, QString> asinToSku;
-    QHash<QString, int>    asinToInventory;
-    co_await _catalogApi()->fetchAllSkusViaReport(marketplaceId, &asinToSku, &asinToInventory);
-
-    if (asinToSku.isEmpty()) {
-        appendLog(tr("⚠ No listings found. Check credentials and marketplace (current: %1).").arg(marketplaceId));
+    if (asins.isEmpty()) {
+        appendLog(tr("⚠ No listings retrieved. The saved catalog has been kept."));
         if (statusLabelPtr) statusLabelPtr->setText(tr("Failed — no listings found."));
         if (closeBtnPtr)    closeBtnPtr->setEnabled(true);
         setEnabled(true);
         co_return;
     }
 
-    const QList<QString> asins = asinToSku.keys();
     const int total = asins.size();
     appendLog(tr("Found %1 listing(s). Fetching attributes…").arg(total));
     if (progressBarPtr) { progressBarPtr->setRange(0, total); progressBarPtr->setValue(0); }
@@ -1398,16 +1426,39 @@ QCoro::Task<void> PaneStore::_onRetrieve()
 
     for (int i = 0; i < asins.size(); ++i) {
         const QString &asin = asins.at(i);
+        const AmazonCatalogApi::StoreItem prev = m_asinToItem.value(asin);
+        auto sources = asinSources.value(asin);
+        // Keep the existing SKU when it is still present, so saved grouping/order
+        // remains stable when an ASIN first becomes available in another country.
+        const auto previousSource = std::find_if(sources.begin(), sources.end(), [&](const auto &source) {
+            return source.sku == prev.sku;
+        });
+        if (previousSource != sources.end()) std::rotate(sources.begin(), previousSource, previousSource + 1);
         AmazonCatalogApi::StoreItem item;
         item.asin      = asin;
-        item.sku       = asinToSku.value(asin);
-        item.inventory = asinToInventory.value(asin, 0);
-
-        co_await _catalogApi()->fetchListingAttributes(marketplaceId, item.sku, &item, sameRegionMpIds);
+        // Report membership is also evidence of availability, across regions.
+        for (const auto &source : std::as_const(sources))
+            item.existsInMarketplaces.insert(source.marketplaceId);
+        item.sku = sources.first().sku;
+        // Do not sum quantities: US/CA reports can describe shared stock.
+        item.inventory = sources.first().inventory;
+        for (const auto &source : std::as_const(sources)) {
+            QStringList sameRegionMpIds;
+            if (const auto *mp = AmazonMarketplace::forMarketplaceId(source.marketplaceId)) {
+                for (const auto *rmp : AmazonMarketplace::forRegion(mp->region())) {
+                    if (_catalogApi()->isConfiguredForMarketplace(rmp->marketplaceId()))
+                        sameRegionMpIds.append(rmp->marketplaceId());
+                }
+            }
+            co_await _catalogApi()->fetchListingAttributes(source.marketplaceId, source.sku, &item, sameRegionMpIds);
+            if (item.isParent || !item.title.isEmpty() || !item.brand.isEmpty() || !item.category.isEmpty())
+                break;
+        }
+        const bool attributesMissing = item.brand.isEmpty() && item.category.isEmpty() && item.title.isEmpty();
+        if (incomplete) item.existsInMarketplaces.unite(prev.existsInMarketplaces);
 
         // If the user manually moved this item, keep their placement regardless of what
         // the API returns — only update fields that don't affect tree position.
-        const AmazonCatalogApi::StoreItem &prev = m_asinToItem.value(asin);
         if (prev.manuallyMoved) {
             item.brand         = prev.brand;
             item.category      = prev.category;
@@ -1418,9 +1469,8 @@ QCoro::Task<void> PaneStore::_onRetrieve()
 
         // If the whole call came back empty (API error / rate-limit), restore all
         // previously-cached fields so the item stays correctly categorised.
-        if (!item.manuallyMoved
-                && item.brand.isEmpty() && item.category.isEmpty() && item.title.isEmpty()) {
-            if (!prev.brand.isEmpty()) {
+        if (attributesMissing) {
+            if (!prev.asin.isEmpty()) {
                 ++emptyBrandCount;
                 item.brand    = prev.brand;
                 item.category = prev.category;
@@ -1431,7 +1481,7 @@ QCoro::Task<void> PaneStore::_onRetrieve()
                 item.title    = prev.title;
                 item.mainImageUrl = prev.mainImageUrl;
                 item.createdDate  = prev.createdDate;
-                item.existsInMarketplaces = prev.existsInMarketplaces;
+                item.existsInMarketplaces.unite(prev.existsInMarketplaces);
                 if (emptyBrandCount <= 5)
                     appendLog(tr("  ⚠ [%1/%2] %3 — API returned nothing, kept cached data (brand=%4)")
                               .arg(i + 1).arg(total).arg(item.sku, item.brand));
@@ -1476,6 +1526,16 @@ QCoro::Task<void> PaneStore::_onRetrieve()
         appendLog(tr("⚠ %1/%2 item(s) had empty brand — possible API error or rate limit.")
                   .arg(emptyBrandCount).arg(total));
 
+    if (incomplete) {
+        int retained = 0;
+        for (const auto &previous : std::as_const(m_items)) {
+            if (!asinSources.contains(previous.asin)) {
+                items.append(previous);
+                ++retained;
+            }
+        }
+        appendLog(tr("⚠ Retrieval was incomplete; retained %1 additional cached product(s).").arg(retained));
+    }
     _applyItems(items);
     // Invalidate stale disk thumbnails so _loadImages always re-downloads fresh images
     // after a retrieve (avoids serving a wrong cached thumb for a newly-fetched ASIN).
@@ -1484,7 +1544,7 @@ QCoro::Task<void> PaneStore::_onRetrieve()
     _saveToDisk(marketplaceId, m_items);
     appendLog(tr("Saved %1 item(s) to stores/%2.json.").arg(m_items.size()).arg(marketplaceId));
 
-    if (statusLabelPtr) statusLabelPtr->setText(tr("Done."));
+    if (statusLabelPtr) statusLabelPtr->setText(incomplete ? tr("Done with warnings — some marketplaces were unavailable.") : tr("Done."));
     if (closeBtnPtr)    closeBtnPtr->setEnabled(true);
     setEnabled(true);
 }
@@ -1616,9 +1676,11 @@ void PaneStore::_buildTable(const QStringList &asins)
         }
         row.existsInMarketplaces  = si.existsInMarketplaces;
 
-        int available = -1, sales90 = -1, sales365 = -1;
-        _aggregateStock(group, &available, &sales90, &sales365);
-        row.salesYear      = sales365;
+        int available = -1, sales90 = -1;
+        _aggregateStock(group, &available, &sales90);
+        const auto sales = m_sales.total(group);
+        row.salesYear      = sales.units;
+        row.salesComplete  = sales.complete;
         row.stockDays      = estimatedDaysOfSupply(available, sales90, 90);
         row.stockAvailable = available;
         row.recommended4mo = recommendedInventoryForDays(sales90, 90, kFourMonthCoverageDays);
@@ -1677,23 +1739,22 @@ void PaneStore::_buildTable(const QStringList &asins)
 // ---------------------------------------------------------------------------
 
 void PaneStore::_aggregateStock(const QStringList &groupAsins,
-                                 int *availableOut, int *sales90Out, int *sales365Out) const
+                                 int *availableOut, int *sales90Out) const
 {
-    int available = -1, sales90 = -1, sales365 = -1;
+    int available = -1, sales90 = -1;
+    QSet<QString> seenSkus;
     for (const QString &asin : groupAsins) {
         const QString sku = m_asinToItem.value(asin).sku.toLower();
-        if (sku.isEmpty()) continue;
+        if (sku.isEmpty() || seenSkus.contains(sku)) continue;
+        seenSkus.insert(sku);
 
         const int a = m_stockAvailableBySkuLower.value(sku, -1);
         if (a >= 0) available = (available < 0 ? 0 : available) + a;
         const int s90 = m_stockSales90BySkuLower.value(sku, -1);
         if (s90 >= 0) sales90 = (sales90 < 0 ? 0 : sales90) + s90;
-        const int s365 = m_stockSales365BySkuLower.value(sku, -1);
-        if (s365 >= 0) sales365 = (sales365 < 0 ? 0 : sales365) + s365;
     }
     if (availableOut) *availableOut = available;
     if (sales90Out)   *sales90Out   = sales90;
-    if (sales365Out)  *sales365Out  = sales365;
 }
 
 void PaneStore::_loadStockCache()
@@ -1710,7 +1771,6 @@ void PaneStore::_loadStockCache()
     };
     loadIntMap(QStringLiteral("PaneStoreStockCache/available"), &m_stockAvailableBySkuLower);
     loadIntMap(QStringLiteral("PaneStoreStockCache/sales90"),   &m_stockSales90BySkuLower);
-    loadIntMap(QStringLiteral("PaneStoreStockCache/sales365"),  &m_stockSales365BySkuLower);
 }
 
 void PaneStore::_saveStockCache() const
@@ -1726,11 +1786,12 @@ void PaneStore::_saveStockCache() const
     };
     saveIntMap(QStringLiteral("PaneStoreStockCache/available"), m_stockAvailableBySkuLower);
     saveIntMap(QStringLiteral("PaneStoreStockCache/sales90"),   m_stockSales90BySkuLower);
-    saveIntMap(QStringLiteral("PaneStoreStockCache/sales365"),  m_stockSales365BySkuLower);
 }
 
 // ---------------------------------------------------------------------------
-// _onRefreshSalesStock — fetches Amazon FBA qty + 90d/365d sales for every SKU
+// _onRefreshSalesStock — global annual sales, followed by source-specific
+// inventory and 90-day demand. Global sales must not drive EU stock coverage.
+// Fetches Amazon FBA qty + 90d sales for every SKU
 // in the currently selected tree node, via the same AbstractInventorySource
 // abstraction PaneMarketplaces uses (so "days of supply" here can never
 // silently disagree with the number driving the Temu sync there — both call
@@ -1760,6 +1821,10 @@ QCoro::Task<void> PaneStore::_onRefreshSalesStock()
         skus << sku;
     }
     if (skus.isEmpty()) co_return;
+
+    QPointer<PaneStore> self(this);
+    co_await _refreshSales(false);
+    if (!self || (m_salesCancelled && *m_salesCancelled)) co_return;
 
     auto *progressDlg = new QDialog(parentWidget());
     progressDlg->setAttribute(Qt::WA_DeleteOnClose);
@@ -1836,8 +1901,7 @@ QCoro::Task<void> PaneStore::_onRefreshSalesStock()
         if (progressBarPtr) progressBarPtr->setValue(i + 1);
 
         const bool needSales90  = cacheStale || m_stockSales90BySkuLower.value(skuLower, -1) < 0;
-        const bool needSales365 = cacheStale || m_stockSales365BySkuLower.value(skuLower, -1) < 0;
-        if (!needSales90 && !needSales365) continue;
+        if (!needSales90) continue;
 
         if (statusLabelPtr)
             statusLabelPtr->setText(tr("SKU %1/%2: %3 — fetching sales…").arg(i + 1).arg(skus.size()).arg(sku));
@@ -1848,15 +1912,8 @@ QCoro::Task<void> PaneStore::_onRefreshSalesStock()
             if (!dlgPtr) { setEnabled(true); co_return; }
             m_stockSales90BySkuLower.insert(skuLower, units);
         }
-        if (needSales365) {
-            int units = -1;
-            co_await source->fetchSalesUnits(sku, 365, &units);
-            if (!dlgPtr) { setEnabled(true); co_return; }
-            m_stockSales365BySkuLower.insert(skuLower, units);
-        }
-        appendLog(tr("  ✓ %1: 90d=%2 365d=%3").arg(sku)
-                  .arg(m_stockSales90BySkuLower.value(skuLower, -1))
-                  .arg(m_stockSales365BySkuLower.value(skuLower, -1)));
+        appendLog(tr("  %1: inventory-source sales (90d)=%2").arg(sku)
+                  .arg(m_stockSales90BySkuLower.value(skuLower, -1)));
     }
 
     m_stockCacheTimestampUtc = nowUtc;
@@ -1878,6 +1935,123 @@ QCoro::Task<void> PaneStore::_onRefreshSalesStock()
 // ---------------------------------------------------------------------------
 
 void PaneStore::_onSortBySales()
+{
+    if (m_storeModel->rowCount() == 0) return;
+    m_salesTask = _refreshSales(true);
+}
+
+QList<QStringList> PaneStore::_salesRegions()
+{
+    QList<QStringList> result;
+    for (const auto region : {AmazonMarketplace::Region::Europe,
+                             AmazonMarketplace::Region::NorthAmerica, AmazonMarketplace::Region::Japan}) {
+        QStringList ids;
+        for (const auto *mp : AmazonMarketplace::forRegion(region))
+            if (_catalogApi()->isConfiguredForMarketplace(mp->marketplaceId())) ids.append(mp->marketplaceId());
+        if (!ids.isEmpty()) result.append(ids);
+    }
+    return result;
+}
+
+QString PaneStore::_salesScope()
+{
+    QStringList parts;
+    for (const auto &ids : _salesRegions())
+        for (const auto &id : ids) parts.append(id + ':' + _catalogApi()->sellerIdForMarketplace(id));
+    parts.sort();
+    return QString::fromLatin1(QCryptographicHash::hash(parts.join('|').toUtf8(), QCryptographicHash::Sha256).toHex());
+}
+
+QCoro::Task<void> PaneStore::_refreshSales(bool sortAfterwards)
+{
+    m_salesCancelled = std::make_shared<bool>(false);
+    const auto regions = _salesRegions();
+    m_sales.load(m_workingDir, _salesScope());
+    bool forceRefresh = false;
+    if (m_sales.total({}).complete) {
+        if (m_sales.refreshSuggested()) {
+            const int daysOld = int(m_sales.endTime().secsTo(QDateTime::currentDateTimeUtc()) / 86400);
+            forceRefresh = QMessageBox::question(this, tr("Refresh sales data?"),
+                tr("The cached sales data is %1 days old. Refresh it now?\n\n"
+                   "Choose No to use the cached totals. Data older than 30 days is refreshed automatically.")
+                    .arg(daysOld), QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
+        }
+        if (!forceRefresh) {
+            _updateTableForCurrentSelection();
+            if (sortAfterwards) _sortByCachedSales();
+            co_return;
+        }
+    }
+    auto *dialog = new QDialog(parentWidget());
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(tr("Counting Amazon sales — all configured countries"));
+    dialog->resize(650, 400);
+    auto *layout = new QVBoxLayout(dialog);
+    auto *label = new QLabel(tr("Counting the last 365 days, including Canada, US and Japan when configured…"), dialog);
+    label->setWordWrap(true);
+    layout->addWidget(label);
+    auto *progressBar = new QProgressBar(dialog);
+    progressBar->setObjectName(QStringLiteral("storeSalesProgress"));
+    progressBar->setRange(0, 1);
+    progressBar->setValue(0);
+    progressBar->setFormat(tr("%v / %m report periods complete (%p%)"));
+    layout->addWidget(progressBar);
+    auto *log = new QTextEdit(dialog);
+    log->setReadOnly(true);
+    layout->addWidget(log);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, dialog);
+    layout->addWidget(buttons);
+    const auto cancelled = m_salesCancelled;
+    const auto finishedConnection = connect(dialog, &QDialog::finished, dialog, [cancelled] { *cancelled = true; });
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    QPointer<QDialog> dlg(dialog);
+    QPointer<QLabel> status(label);
+    QPointer<QTextEdit> logPtr(log);
+    QPointer<QProgressBar> progressPtr(progressBar);
+    QPointer<PaneStore> self(this);
+    const QDir salesDirectory = m_workingDir;
+    auto sales = std::make_shared<StoreSales>(m_sales);
+    // The job owns its API and cache across awaits, even if the pane is closed.
+    std::unique_ptr<AmazonCatalogApi> api(_catalogApi());
+    api->setParent(nullptr);
+    m_catalogApi = nullptr;
+    setEnabled(false);
+    dialog->show();
+    co_await sales->refresh(api.get(), regions, cancelled, [status, logPtr](const QString &message) {
+        if (status) status->setText(message);
+        if (logPtr) logPtr->append(message);
+    }, [progressPtr](int completed, int total) {
+        if (!progressPtr) return;
+        progressPtr->setRange(0, total);
+        progressPtr->setValue(completed);
+    }, forceRefresh);
+    if (!self) { if (dlg) dlg->close(); co_return; }
+    if (!m_catalogApi) {
+        m_catalogApi = api.release();
+        m_catalogApi->setParent(this);
+    }
+    if (m_workingDir != salesDirectory) {
+        if (dlg) dlg->close();
+        setEnabled(true);
+        co_return;
+    }
+    m_sales = *sales;
+    _updateTableForCurrentSelection();
+    if (sortAfterwards && !*cancelled) _sortByCachedSales();
+    const bool complete = m_sales.total({}).complete;
+    if (status) status->setText(complete ? tr("Done — sales include all configured Amazon countries.")
+        : tr("Incomplete sales totals are marked with *. Retry to fetch the missing periods."));
+    if (logPtr && !m_sales.error().isEmpty()) logPtr->append(m_sales.error());
+    if (dlg) {
+        buttons->setStandardButtons(QDialogButtonBox::Close);
+        // Close after completion must not cancel a subsequent inventory refresh.
+        disconnect(finishedConnection);
+        if (complete) dlg->close();
+    }
+    setEnabled(true);
+}
+
+void PaneStore::_sortByCachedSales()
 {
     QList<TableStoreAsin::Row> rows = m_storeModel->rows();
     if (rows.isEmpty()) return;
@@ -1905,7 +2079,7 @@ void PaneStore::_onOldInBottom()
     const QDate twoYearsAgo = QDate::currentDate().addYears(-2);
     auto isOldDead = [&](const TableStoreAsin::Row &r) {
         const bool isOld = r.createdDate.isValid() && r.createdDate < twoYearsAgo;
-        const bool noSale = (r.salesYear <= 0);
+        const bool noSale = r.salesComplete && r.salesYear == 0;
         const bool noInventory = (r.stockAvailable <= 0 && r.stockDays <= 0);
         return isOld && noSale && noInventory;
     };

@@ -12,6 +12,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMessageBox>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
@@ -22,8 +24,119 @@
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QTreeView>
+#include <QUrlQuery>
 #include <QtTest>
 #include <memory>
+
+class StoreReply : public QNetworkReply
+{
+public:
+    StoreReply(const QNetworkRequest &request, QByteArray body, int status, QObject *parent)
+        : QNetworkReply(parent), m_body(std::move(body))
+    {
+        setRequest(request);
+        setUrl(request.url());
+        setAttribute(QNetworkRequest::HttpStatusCodeAttribute, status);
+        open(QIODevice::ReadOnly);
+        QTimer::singleShot(0, this, [this] { setFinished(true); emit readyRead(); emit finished(); });
+    }
+    void abort() override { setFinished(true); emit finished(); }
+    qint64 bytesAvailable() const override { return m_body.size() - m_offset + QNetworkReply::bytesAvailable(); }
+protected:
+    qint64 readData(char *data, qint64 size) override
+    {
+        const qint64 n = qMin(size, m_body.size() - m_offset);
+        if (n <= 0) return -1;
+        memcpy(data, m_body.constData() + m_offset, n);
+        m_offset += n;
+        return n;
+    }
+private:
+    QByteArray m_body;
+    qint64 m_offset = 0;
+};
+
+// Full report + Listings HTTP fixture. Any unexpected request fails offline.
+class StoreNetwork : public QNetworkAccessManager
+{
+public:
+    QHash<QString, QList<AmazonCatalogApi::StoreItem>> listings;
+    QStringList reports;
+    QSet<QString> failedReports, failedAttributes;
+    QList<QUrl> attributeRequests;
+    QList<QJsonObject> salesReports;
+    QHash<QString, QByteArray> salesDocuments;
+    std::function<QByteArray(const QJsonObject &)> salesBody;
+    std::function<void()> onSalesReport;
+    QSet<QString> failedSalesRegions;
+protected:
+    QNetworkReply *createRequest(Operation operation, const QNetworkRequest &request, QIODevice *data) override
+    {
+        const QString path = request.url().path();
+        QByteArray body;
+        int status = 200;
+        if (path == "/auth/o2/token") {
+            body = R"({"access_token":"offline-token","expires_in":3600})";
+        } else if (operation == PostOperation && path == "/reports/2021-06-30/reports") {
+            const auto requestBody = QJsonDocument::fromJson(data->readAll()).object();
+            const auto ids = requestBody["marketplaceIds"].toArray();
+            const QString mp = ids.first().toString();
+            for (const auto &id : ids)
+                if (request.url().host() != AmazonMarketplace::forMarketplaceId(id.toString())->endpoint())
+                    qFatal("Wrong report region");
+            if (requestBody["reportType"].toString() == "GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL") {
+                salesReports.append(requestBody);
+                const QString reportId = "sales-" + QString::number(salesReports.size());
+                salesDocuments.insert(reportId, salesBody ? salesBody(requestBody) : QByteArray());
+                if (onSalesReport) onSalesReport();
+                return new StoreReply(request, QJsonDocument(QJsonObject{{"reportId", reportId}}).toJson(),
+                    failedSalesRegions.contains(AmazonCatalogApi::lwaRegionForMarketplace(mp)) ? 403 : 202, this);
+            }
+            if (ids.size() != 1) qFatal("Expected one marketplace per listing report");
+            reports.append(mp);
+            status = failedReports.contains(mp) ? 500 : 202;
+            body = QJsonDocument(QJsonObject{{"reportId", mp}}).toJson();
+        } else if (path.startsWith("/reports/2021-06-30/reports/")) {
+            body = QJsonDocument(QJsonObject{{"processingStatus", "DONE"},
+                {"reportDocumentId", path.section('/', -1)}}).toJson();
+        } else if (path.startsWith("/reports/2021-06-30/documents/")) {
+            body = QJsonDocument(QJsonObject{{"url", "https://offline.invalid/download/" + path.section('/', -1)}}).toJson();
+        } else if (path.startsWith("/download/")) {
+            if (salesDocuments.contains(path.section('/', -1)))
+                return new StoreReply(request, salesDocuments.value(path.section('/', -1)), 200, this);
+            body = "seller-sku\tasin1\tquantity\n";
+            for (const auto &item : listings.value(path.section('/', -1)))
+                body += item.sku.toUtf8() + '\t' + item.asin.toUtf8() + '\t' + QByteArray::number(item.inventory) + '\n';
+        } else if (path.startsWith("/listings/2021-08-01/items/")) {
+            attributeRequests.append(request.url());
+            const auto ids = QUrlQuery(request.url()).queryItemValue("marketplaceIds").split(',');
+            const QString sku = path.section('/', -1);
+            QJsonArray summaries;
+            AmazonCatalogApi::StoreItem found;
+            for (const QString &mp : ids) {
+                if (request.url().host() != AmazonMarketplace::forMarketplaceId(mp)->endpoint())
+                    qFatal("Mixed regions in attributes request");
+                for (const auto &item : listings.value(mp)) {
+                    if (item.sku != sku) continue;
+                    if (found.asin.isEmpty()) found = item;
+                    summaries.append(QJsonObject{{"marketplaceId", mp}, {"itemName", item.title},
+                                                 {"productType", item.category}});
+                }
+            }
+            QJsonObject attrs;
+            const QMap<QString, QString> values{{"brand", found.brand}, {"color", found.color},
+                {"size", found.sizeValue}, {"target_gender", found.gender}, {"age_range_description", found.age},
+                {"parentage_level", found.isParent ? "parent" : "child"}};
+            for (auto it = values.begin(); it != values.end(); ++it)
+                attrs[it.key()] = QJsonArray{QJsonObject{{"value", it.value()}}};
+            body = QJsonDocument(QJsonObject{{"summaries", summaries}, {"attributes", attrs}}).toJson();
+            if (failedAttributes.contains(sku)) status = 500;
+        } else {
+            qFatal("Unexpected request in offline store test");
+        }
+        return new StoreReply(request, body, status, this);
+    }
+};
 
 // Successful local no-op in place of an AI CLI. The app must append the exact
 // selected ASINs itself, regardless of generated category text.
@@ -47,6 +160,23 @@ class StoreTests : public QObject
     Q_OBJECT
     using Item = StorePlacements::Item;
     std::unique_ptr<QTemporaryDir> m_dir;
+
+    static QByteArray salesHeader()
+    {
+        return "amazon-order-id\torder-item-id\tpurchase-date\torder-status\tsales-channel\tsku\tasin\tquantity\n";
+    }
+    void seedSales(PaneStore &pane, const QHash<QString, int> &counts, int daysOld = 0)
+    {
+        QJsonObject byAsin;
+        for (auto it = counts.cbegin(); it != counts.cend(); ++it) byAsin[it.key()] = it.value();
+        QFile file(m_dir->filePath("stores/sales_v2.json"));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write(QJsonDocument(QJsonObject{{"version", 2}, {"scope", pane._salesScope()},
+            {"endUtc", QDateTime::currentDateTimeUtc().addDays(-daysOld).toString(Qt::ISODate)},
+            {"expected", QJsonArray{"fixture"}}, {"slices", QJsonObject{{"fixture", byAsin}}}}).toJson());
+        file.close();
+        pane.m_sales.load(QDir(m_dir->path()), pane._salesScope());
+    }
 
     static QList<Item> catalog()
     {
@@ -191,6 +321,223 @@ class StoreTests : public QObject
     }
 
 private slots:
+    void salesReportParserCountsCountriesAndSkusOnce()
+    {
+        const auto from = QDateTime::fromString("2026-09-01T00:00:00Z", Qt::ISODate);
+        const auto to = from.addDays(30);
+        QByteArray tsv = salesHeader();
+        const QByteArray ca = "order-ca\ti1\t2026-09-01T00:00:00Z\tShipped\tAmazon.ca\tSKU-CA\tB0DCZLPXTY\t5\n";
+        tsv += ca + ca; // duplicate report line
+        tsv += "order-ca\ti2\t2026-09-02T00:00:00Z\tShipped\tAmazon.ca\tOTHER-SKU\tB0DCZLPXTY\t3\n";
+        tsv += "order-us\ti1\t2026-09-02T00:00:00Z\tPending\tAmazon.com\tSKU-US\tB0DCZLPXTY\t2\n";
+        tsv += "cancel\ti1\t2026-09-02T00:00:00Z\tCancelled\tAmazon.ca\tSKU-CA\tB0DCZLPXTY\t99\n";
+        tsv += "boundary\ti1\t2026-10-01T00:00:00Z\tShipped\tAmazon.ca\tSKU-CA\tB0DCZLPXTY\t99\n";
+        tsv += "mcf\ti1\t2026-09-02T00:00:00Z\tShipped\tNon-Amazon\tSKU-CA\tB0DCZLPXTY\t99\n";
+        QHash<QString, QHash<QString, int>> out;
+        QString error;
+        QVERIFY(AmazonCatalogApi::parseSalesReport(tsv, {"A2EUQ1WTGCTBG2", "ATVPDKIKX0DER", "A1AM78C64UM0Y8"}, from, to, &out, &error));
+        QCOMPARE(out["A2EUQ1WTGCTBG2"].value("B0DCZLPXTY"), 8);
+        QCOMPARE(out["ATVPDKIKX0DER"].value("B0DCZLPXTY"), 2);
+        QVERIFY(out.contains("A1AM78C64UM0Y8"));
+        QVERIFY(out["A1AM78C64UM0Y8"].isEmpty());
+        QVERIFY(!AmazonCatalogApi::parseSalesReport(tsv + "broken\trow\n", {"A2EUQ1WTGCTBG2"}, from, to, &out, &error));
+        QVERIFY(out.isEmpty());
+        QVERIFY(!error.isEmpty());
+        QVERIFY(!AmazonCatalogApi::parseSalesReport({}, {"A2EUQ1WTGCTBG2"}, from, to, &out, &error));
+    }
+
+    void globalSalesRetryCacheAndRanking()
+    {
+        PaneStore pane;
+        auto tennis = catalog().first(); tennis.asin = "B0DCZLPXTY";
+        auto secondSize = tennis; secondSize.asin = "B0DCZP4B8X"; secondSize.sku = "PUMP-BLACK-39";
+        setup(pane, {tennis, secondSize, catalog().last()});
+        delete pane.m_catalogApi;
+        pane.m_catalogApi = new AmazonCatalogApi("offline", "offline", "eu", "na", "jp", "eu-seller", "na-seller", "jp-seller", {}, &pane);
+        auto *network = new StoreNetwork;
+        pane.m_catalogApi->setNetworkAccessManagerForTests(network);
+        network->failedSalesRegions.insert("JP");
+        network->salesBody = [](const QJsonObject &request) {
+            QByteArray body = salesHeader();
+            const QString date = request["dataStartTime"].toString();
+            for (const auto &id : request["marketplaceIds"].toArray()) {
+                const auto *market = AmazonMarketplace::forMarketplaceId(id.toString());
+                const int qty = market->countryCode() == "CA" ? 10 : 1;
+                body += ("order-" + market->countryCode() + "\ti1\t" + date + "\tShipped\t" + market->salesChannelName()
+                         + "\tREGIONAL-SKU\tB0DCZLPXTY\t" + QString::number(qty) + '\n').toUtf8();
+                if (market->countryCode() == "CA")
+                    body += ("size-2\ti2\t" + date + "\tShipped\tAmazon.ca\tDIFFERENT-SKU\tB0DCZP4B8X\t2\n").toUtf8();
+            }
+            return body;
+        };
+        selectNode(pane, category("Pumps"));
+        pane._onSortBySales();
+        QTRY_VERIFY_WITH_TIMEOUT(pane.isEnabled(), 10000);
+        QCOMPARE(network->salesReports.size(), 27); // 13 EU + 13 NA + failed JP
+        QVERIFY(!pane.m_sales.total({tennis.asin}).complete);
+        const int expectedPartial = 13 * (10 + 2 + 10 + 2); // EU10 + NA(US1,MX1,CA10), plus second size2
+        QCOMPARE(pane.m_storeModel->rows().first().salesYear, expectedPartial);
+        QVERIFY(!pane.m_storeModel->rows().first().salesComplete);
+        QVERIFY(pane.m_storeModel->data(pane.m_storeModel->index(0, TableStoreAsin::ColSalesYear)).toString().endsWith('*'));
+        network->failedSalesRegions.clear();
+        pane._onSortBySales();
+        QTRY_VERIFY_WITH_TIMEOUT(pane.isEnabled(), 10000);
+        QCOMPARE(network->salesReports.size(), 40); // Only the 13 missing JP slices retried
+        QCOMPARE(pane.m_storeModel->rows().first().salesYear, expectedPartial + 13);
+        QVERIFY(pane.m_storeModel->rows().first().salesComplete);
+        QCOMPARE(pane.m_sales.total({tennis.asin, tennis.asin}).units, 13 * 23);
+        pane._onSortBySales();
+        QCOMPARE(network->salesReports.size(), 40); // fresh cache, no requests
+        roundTrip(pane);
+        selectNode(pane, category("Pumps"));
+        QCOMPARE(pane.m_storeModel->rows().first().salesYear, expectedPartial + 13);
+        StoreSales reloaded;
+        reloaded.load(QDir(m_dir->path()), pane._salesScope());
+        QVERIFY(reloaded.total({tennis.asin}).complete);
+        QCOMPARE(reloaded.total({tennis.asin}).units, 13 * 23);
+        reloaded.load(QDir(m_dir->path()), "different-account");
+        QCOMPARE(reloaded.total({tennis.asin}).units, -1);
+        for (const auto &request : network->salesReports) {
+            const auto from = QDateTime::fromString(request["dataStartTime"].toString(), Qt::ISODate);
+            const auto to = QDateTime::fromString(request["dataEndTime"].toString(), Qt::ISODate);
+            QVERIFY(from < to);
+            QVERIFY(from.secsTo(to) <= 30 * 86400);
+        }
+        for (auto *widget : QApplication::topLevelWidgets())
+            if (auto *dialog = qobject_cast<QDialog *>(widget)) dialog->close();
+    }
+
+    void salesCancellationAndMissingDataAreNotZero()
+    {
+        PaneStore pane;
+        setup(pane);
+        delete pane.m_catalogApi;
+        pane.m_catalogApi = new AmazonCatalogApi("offline", "offline", {}, "na", {}, {}, "na-seller", {}, {}, &pane);
+        auto *network = new StoreNetwork;
+        pane.m_catalogApi->setNetworkAccessManagerForTests(network);
+        network->salesBody = [](const QJsonObject &) { return salesHeader(); };
+        network->onSalesReport = [&pane] { *pane.m_salesCancelled = true; };
+        selectNode(pane, category("Pumps"));
+        pane._onSortBySales();
+        QTRY_VERIFY_WITH_TIMEOUT(pane.isEnabled(), 10000);
+        QVERIFY(!pane.m_sales.total({"A38"}).complete);
+        QCOMPARE(pane.m_sales.total({"A38"}).units, -1);
+        QCOMPARE(network->salesReports.size(), 1);
+        network->onSalesReport = {};
+        pane._onSortBySales();
+        QTRY_VERIFY_WITH_TIMEOUT(pane.isEnabled(), 10000);
+        QVERIFY(pane.m_sales.total({"A38"}).complete);
+        QCOMPARE(pane.m_sales.total({"A38"}).units, 0); // successful empty reports are real zeros
+        for (auto *widget : QApplication::topLevelWidgets())
+            if (auto *dialog = qobject_cast<QDialog *>(widget)) dialog->close();
+    }
+
+    void salesProgressResumesFromSuccessfulPeriods()
+    {
+        AmazonCatalogApi api("offline", "offline", {}, "na", "jp", {}, "na-seller", "jp-seller");
+        auto *network = new StoreNetwork;
+        api.setNetworkAccessManagerForTests(network);
+        network->salesBody = [](const QJsonObject &) { return salesHeader(); };
+        network->failedSalesRegions.insert("JP");
+        StoreSales sales;
+        sales.load(QDir(m_dir->path()), "progress-fixture");
+        QList<QPair<int, int>> counts;
+        QStringList messages;
+        const QList<QStringList> regions{{"A2EUQ1WTGCTBG2"}, {"A1VC38T7YXB528"}};
+        const auto cancelled = std::make_shared<bool>(false);
+        bool done = false;
+        auto run = [&]() -> QCoro::Task<void> {
+            co_await sales.refresh(&api, regions, cancelled,
+                [&](const QString &message) { messages.append(message); },
+                [&](int completed, int total) { counts.append({completed, total}); });
+            done = true;
+        };
+        auto task = run();
+        QTRY_VERIFY_WITH_TIMEOUT(done, 3000);
+        QCOMPARE(counts.first(), qMakePair(0, 26));
+        QCOMPARE(counts.last(), qMakePair(13, 26)); // failed region does not advance the bar
+        QVERIFY(messages.join('\n').contains("CA —"));
+        QVERIFY(messages.join('\n').contains("Waiting for Amazon"));
+        QVERIFY(messages.join('\n').contains("Downloading sales report"));
+        sales.load(QDir(m_dir->path()), "progress-fixture");
+        network->failedSalesRegions.clear();
+        counts.clear();
+        done = false;
+        task = run();
+        QTRY_VERIFY_WITH_TIMEOUT(done, 3000);
+        QCOMPARE(counts.first(), qMakePair(13, 26));
+        QCOMPARE(counts.last(), qMakePair(26, 26));
+        QCOMPARE(network->salesReports.size(), 27); // 13 CA, failed JP, then 13 JP
+    }
+
+    void salesCacheAgePolicy_data()
+    {
+        QTest::addColumn<int>("daysOld");
+        QTest::addColumn<bool>("acceptRefresh");
+        QTest::addColumn<bool>("expectPrompt");
+        QTest::addColumn<bool>("expectRefresh");
+        QTest::newRow("under-two-weeks") << 13 << false << false << false;
+        QTest::newRow("two-weeks-decline") << 15 << false << true << false;
+        QTest::newRow("two-weeks-accept") << 15 << true << true << true;
+        QTest::newRow("under-thirty-days-decline") << 29 << false << true << false;
+        QTest::newRow("over-thirty-days") << 31 << false << false << true;
+    }
+
+    void salesCacheAgePolicy()
+    {
+        QFETCH(int, daysOld);
+        QFETCH(bool, acceptRefresh);
+        QFETCH(bool, expectPrompt);
+        QFETCH(bool, expectRefresh);
+        PaneStore pane;
+        setup(pane);
+        delete pane.m_catalogApi;
+        pane.m_catalogApi = new AmazonCatalogApi("offline", "offline", {}, "na", {}, {}, "na-seller", {}, {}, &pane);
+        auto *network = new StoreNetwork;
+        pane.m_catalogApi->setNetworkAccessManagerForTests(network);
+        network->salesBody = [](const QJsonObject &) { return salesHeader(); };
+        seedSales(pane, {{"A38", 123}}, daysOld);
+        const auto oldEnd = pane.m_sales.endTime();
+        QCOMPARE(pane.m_sales.fresh(), daysOld <= 30);
+        QCOMPARE(pane.m_sales.refreshSuggested(), expectPrompt);
+        selectNode(pane, category("Pumps"));
+        int prompts = 0;
+        QTimer answer;
+        connect(&answer, &QTimer::timeout, this, [&] {
+            if (auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+                ++prompts;
+                box->button(acceptRefresh ? QMessageBox::Yes : QMessageBox::No)->click();
+            }
+        });
+        answer.start(10);
+        pane._onSortBySales();
+        QTRY_VERIFY_WITH_TIMEOUT(pane.isEnabled(), 10000);
+        answer.stop();
+        QCOMPARE(prompts, expectPrompt ? 1 : 0);
+        QCOMPARE(network->salesReports.size(), expectRefresh ? 13 : 0);
+        QVERIFY(pane.m_sales.total({"A38"}).complete);
+        QCOMPARE(pane.m_sales.total({"A38"}).units, expectRefresh ? 0 : 123);
+        if (expectRefresh) QVERIFY(pane.m_sales.endTime() > oldEnd);
+        else QCOMPARE(pane.m_sales.endTime(), oldEnd);
+    }
+
+    void salesJobSurvivesPaneDestruction()
+    {
+        auto *pane = new PaneStore;
+        setup(*pane);
+        delete pane->m_catalogApi;
+        pane->m_catalogApi = new AmazonCatalogApi("offline", "offline", {}, "na", {}, {}, "na-seller", {}, {}, pane);
+        auto *network = new StoreNetwork;
+        pane->m_catalogApi->setNetworkAccessManagerForTests(network);
+        QPointer<StoreNetwork> networkGuard(network);
+        QPointer<PaneStore> paneGuard(pane);
+        network->salesBody = [](const QJsonObject &) { return salesHeader(); };
+        network->onSalesReport = [pane] { QTimer::singleShot(0, [pane] { delete pane; }); };
+        selectNode(*pane, category("Pumps"));
+        pane->_onSortBySales();
+        QTRY_VERIFY_WITH_TIMEOUT(paneGuard.isNull(), 2000);
+        QTRY_VERIFY_WITH_TIMEOUT(networkGuard.isNull(), 2000);
+    }
     void initTestCase()
     {
         QCoreApplication::setOrganizationName("AmazonTemplate3OfflineTests");
@@ -204,6 +551,115 @@ private slots:
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_dir->path());
         QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, m_dir->path());
         WorkingDirectoryManager::instance()->setWorkingDir(QDir(m_dir->path()));
+    }
+    void retrieveMergesCountriesAndPreservesSavedWork()
+    {
+        PaneStore pane;
+        auto shared = catalog().first();
+        shared.category = "Low heels";
+        shared.manuallyMoved = true;
+        setup(pane, {shared});
+        pane.m_placements.transfer(pane.m_items, {shared.asin}, category("Low heels"), category("Square heels"), true);
+        const auto placements = pane.m_placements.toJson(shared);
+        const QString groupKey = TreeBrandCategories::colorGroupKey(shared);
+        pane.m_nodeOrders.insert("Brand\x1fLow heels", {groupKey});
+        pane._saveOrder();
+        auto deleted = catalog().last();
+        pane.m_deletedProducts->record({deleted});
+        const QString de = "A1PA6795UKMFR9", us = "ATVPDKIKX0DER", ca = "A2EUQ1WTGCTBG2", jp = "A1VC38T7YXB528";
+        delete pane.m_catalogApi;
+        pane.m_catalogApi = new AmazonCatalogApi("offline", "offline", "eu", "na", "jp", "eu-seller", "na-seller", "jp-seller", {}, &pane);
+        auto *network = new StoreNetwork;
+        pane.m_catalogApi->setNetworkAccessManagerForTests(network);
+        shared.category = "Pumps";
+        shared.inventory = 7;
+        auto alternative = shared;
+        alternative.sku = "US-OTHER-SKU";
+        alternative.inventory = 20;
+        auto onlyUs = shared; onlyUs.asin = "US1"; onlyUs.sku = "US-BLACK-38";
+        auto onlyCa = shared; onlyCa.asin = "B0DCZLPXTY"; onlyCa.sku = "TENNIS-BLACK-38";
+        auto onlyJp = shared; onlyJp.asin = "JP1"; onlyJp.sku = "JP-BLACK-38";
+        auto parent = shared; parent.asin = "PARENT"; parent.sku = "PARENT"; parent.isParent = true;
+        network->listings[de] = {shared, parent};
+        // FR summary follows DE: it must not be lost by an early return.
+        network->listings["A13V1IB3VIYZZH"] = {shared};
+        network->listings[us] = {alternative, onlyUs};
+        network->listings[ca] = {shared, onlyCa, deleted};
+        network->listings[jp] = {shared, onlyJp};
+        for (int pass = 0; pass < 2; ++pass) {
+            pane.m_retrieveTask = pane._onRetrieve();
+            QTRY_VERIFY_WITH_TIMEOUT(pane.isEnabled(), 10000);
+            QCOMPARE(pane.m_items.size(), 4);
+            QCOMPARE(pane.m_asinToItem.size(), 4);
+            QVERIFY(pane.m_asinToItem.contains(onlyCa.asin));
+            QVERIFY(pane.m_asinToItem.contains(onlyUs.asin));
+            QVERIFY(pane.m_asinToItem.contains(onlyJp.asin));
+            QVERIFY(!pane.m_asinToItem.contains(parent.asin));
+            QVERIFY(!pane.m_asinToItem.contains(deleted.asin));
+            const auto merged = pane.m_asinToItem.value(shared.asin);
+            QCOMPARE(merged.sku, shared.sku);
+            QCOMPARE(merged.inventory, 7); // shared country stock is not added
+            QCOMPARE(merged.category, "Low heels");
+            QCOMPARE(merged.existsInMarketplaces, (QSet<QString>{de, us, ca, jp, "A13V1IB3VIYZZH"}));
+            QCOMPARE(pane.m_placements.toJson(merged), placements);
+            roundTrip(pane);
+            QCOMPARE(pane.m_items.size(), 4);
+            QCOMPARE(pane.m_nodeOrders.value("Brand\x1fLow heels"), QStringList{groupKey});
+            QVERIFY(pane.m_deletedProducts->contains(deleted.asin));
+        }
+        QCOMPARE(network->reports, (QStringList{de, us, ca, jp, de, us, ca, jp}));
+    }
+    void retrieveFallsBackToCanadaAndDeduplicatesPrimary_data()
+    {
+        QTest::addColumn<bool>("knownCanadianSku");
+        QTest::newRow("new-product-falls-back") << false;
+        QTest::newRow("existing-canadian-sku-remains-canonical") << true;
+    }
+    void retrieveFallsBackToCanadaAndDeduplicatesPrimary()
+    {
+        QFETCH(bool, knownCanadianSku);
+        QSettings().setValue("store/marketplaceId", "ATVPDKIKX0DER");
+        PaneStore pane;
+        setup(pane, {});
+        delete pane.m_catalogApi;
+        pane.m_catalogApi = new AmazonCatalogApi("offline", "offline", "eu", "na", "jp", "eu-seller", "na-seller", "jp-seller", {}, &pane);
+        auto *network = new StoreNetwork;
+        pane.m_catalogApi->setNetworkAccessManagerForTests(network);
+        auto usItem = catalog().first();
+        auto caItem = usItem; caItem.sku = "CANADA-SKU"; caItem.title = "Canadian title";
+        if (knownCanadianSku) pane._applyItems({caItem});
+        network->listings["ATVPDKIKX0DER"] = {usItem};
+        network->listings["A2EUQ1WTGCTBG2"] = {caItem};
+        network->failedAttributes.insert(usItem.sku);
+        pane.m_retrieveTask = pane._onRetrieve();
+        QTRY_VERIFY_WITH_TIMEOUT(pane.isEnabled(), 10000);
+        QCOMPARE(network->reports, (QStringList{"ATVPDKIKX0DER", "A2EUQ1WTGCTBG2", "A1VC38T7YXB528"}));
+        QCOMPARE(pane.m_items.size(), 1);
+        QCOMPARE(pane.m_items.first().sku, knownCanadianSku ? caItem.sku : usItem.sku);
+        QCOMPARE(pane.m_items.first().title, caItem.title);
+        QCOMPARE(pane.m_items.first().existsInMarketplaces, (QSet<QString>{"ATVPDKIKX0DER", "A2EUQ1WTGCTBG2"}));
+        QCOMPARE(network->attributeRequests.size(), knownCanadianSku ? 1 : 2);
+    }
+    void retrieveKeepsCacheWhenRegionsAreUnavailable()
+    {
+        PaneStore pane;
+        auto cached = catalog().last();
+        cached.existsInMarketplaces = {"A2EUQ1WTGCTBG2"};
+        setup(pane, {cached});
+        delete pane.m_catalogApi;
+        // Seller ID alone must not trigger reports without a refresh token.
+        pane.m_catalogApi = new AmazonCatalogApi("offline", "offline", "eu", {}, "jp", "eu-seller", "na-seller", "jp-seller", {}, &pane);
+        auto *network = new StoreNetwork;
+        pane.m_catalogApi->setNetworkAccessManagerForTests(network);
+        network->listings["A1PA6795UKMFR9"] = {catalog().first()};
+        network->failedReports.insert("A1VC38T7YXB528");
+        pane.m_retrieveTask = pane._onRetrieve();
+        QTRY_VERIFY_WITH_TIMEOUT(pane.isEnabled(), 10000);
+        QCOMPARE(network->reports, (QStringList{"A1PA6795UKMFR9", "A1VC38T7YXB528"}));
+        QCOMPARE(pane.m_items.size(), 2);
+        QCOMPARE(pane.m_asinToItem.value(cached.asin).existsInMarketplaces, cached.existsInMarketplaces);
+        roundTrip(pane);
+        QCOMPARE(pane.m_items.size(), 2);
     }
     void legacyGroupingMoveRemoveAndCopy()
     {
@@ -418,8 +874,10 @@ private slots:
         for (const auto &item : items) {
             pane.m_stockAvailableBySkuLower[item.sku.toLower()] = 10;
             pane.m_stockSales90BySkuLower[item.sku.toLower()] = 90;
-            pane.m_stockSales365BySkuLower[item.sku.toLower()] = 365;
         }
+        QHash<QString, int> counts;
+        for (const auto &item : items) counts.insert(item.asin, 365);
+        seedSales(pane, counts);
         selectNode(pane, {"Brand"});
         QCOMPARE(pane.m_treeModel->asinsForIndex(node(pane.m_treeModel, {"Brand"})).size(), 4);
         QCOMPARE(pane.m_treeModel->colorCountForIndex(node(pane.m_treeModel, {"Brand"})), 2);
@@ -1180,6 +1638,9 @@ private slots:
 
         PaneStore pane;
         setup(pane, items);
+        QHash<QString, int> counts;
+        for (const auto &sp : specs) counts.insert(sp.asin, sp.sales365);
+        seedSales(pane, counts);
         selectNode(pane, category("Boots"));
 
         // Check initial order in table

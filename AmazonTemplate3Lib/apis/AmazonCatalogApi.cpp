@@ -33,6 +33,7 @@
 #include <QCoro/QCoroNetworkReply>
 #include <QCoro/QCoroTimer>
 #include <zlib.h>
+#include <limits>
 
 // ---------------------------------------------------------------------------
 // Static helpers
@@ -159,6 +160,14 @@ QNetworkAccessManager* AmazonCatalogApi::_nam()
 void AmazonCatalogApi::setMockForTests(MockFn mock)
 {
     m_mock = std::move(mock);
+}
+
+void AmazonCatalogApi::setNetworkAccessManagerForTests(QNetworkAccessManager* manager)
+{
+    if (m_nam && m_nam != manager) m_nam->deleteLater();
+    m_nam = manager;
+    manager->setParent(this);
+    m_immediateReportPollForTests = true;
 }
 
 void AmazonCatalogApi::resetForTests()
@@ -1043,6 +1052,15 @@ QString AmazonCatalogApi::sellerIdForMarketplace(const QString& marketplaceId) c
     if (region == "NA") return m_sellerIdNa;
     if (region == "JP") return m_sellerIdJp;
     return m_sellerIdEu;
+}
+
+bool AmazonCatalogApi::isConfiguredForMarketplace(const QString& marketplaceId) const
+{
+    const QString region = lwaRegionForMarketplace(marketplaceId);
+    const QString &refreshToken = region == "NA" ? m_lwaRefreshTokenNa
+                                : region == "JP" ? m_lwaRefreshTokenJp : m_lwaRefreshTokenEu;
+    return !m_lwaClientId.isEmpty() && !m_lwaClientSecret.isEmpty()
+        && !refreshToken.isEmpty() && !sellerIdForMarketplace(marketplaceId).isEmpty();
 }
 
 // ---------------------------------------------------------------------------
@@ -3926,7 +3944,10 @@ QCoro::Task<void> AmazonCatalogApi::fetchAllSkusViaReport(QString marketplaceId,
 
         // --- Step 2: Poll until DONE (max 3 minutes, 5-second intervals) ---
         static const int kMaxPolls = 36; // 36 × 5 s = 3 min
-        static const int kPollMs = 5000;
+        int kPollMs = 5000;
+#ifdef AMAZONCATALOGAPI_UNIT_TESTS
+        if (m_immediateReportPollForTests) kPollMs = 0;
+#endif
         QString reportDocumentId;
 
         for (int poll = 0; poll < kMaxPolls; ++poll) {
@@ -4559,20 +4580,15 @@ QCoro::Task<void> AmazonCatalogApi::_fetchListingAttributesFull(
     // Use the primary marketplace's summary for title/category/mainImage/createdDate;
     // fall back to the first available summary if the primary isn't found.
     const QJsonArray summaries = root.value(QStringLiteral("summaries")).toArray();
-    const QJsonObject primarySummary = [&]() -> QJsonObject {
-        QJsonObject first;
-        for (const QJsonValue &sv : summaries) {
-            const QJsonObject s = sv.toObject();
-            const QString mpId = s.value(QStringLiteral("marketplaceId")).toString();
-            if (!mpId.isEmpty())
-                item->existsInMarketplaces.insert(mpId);
-            if (first.isEmpty())
-                first = s;
-            if (mpId == marketplaceId)
-                return s;
-        }
-        return first; // primary not found — use first available
-    }();
+    QJsonObject primarySummary;
+    for (const QJsonValue &sv : summaries) {
+        const QJsonObject s = sv.toObject();
+        const QString mpId = s.value(QStringLiteral("marketplaceId")).toString();
+        if (!mpId.isEmpty())
+            item->existsInMarketplaces.insert(mpId);
+        if (primarySummary.isEmpty() || mpId == marketplaceId)
+            primarySummary = s;
+    }
 
     if (!primarySummary.isEmpty()) {
         item->title    = primarySummary.value(QStringLiteral("itemName")).toString();
@@ -4622,24 +4638,114 @@ QCoro::Task<void> AmazonCatalogApi::_fetchListingAttributesFull(
 
 // ---------------------------------------------------------------------------
 // fetchSalesReport — Reports API GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL
-// Aggregates units shipped per ASIN across all given marketplace IDs.
+// Aggregates non-canceled units ordered by ASIN, across every seller SKU.
 // ---------------------------------------------------------------------------
+bool AmazonCatalogApi::parseSalesReport(const QByteArray &tsv, const QStringList &marketplaceIds,
+                                        QDateTime from, QDateTime to,
+                                        QHash<QString, QHash<QString,int>> *out, QString *error)
+{
+    out->clear();
+    error->clear();
+    const auto fail = [&](const QString &reason) {
+        out->clear();
+        *error = reason;
+        return false;
+    };
+    QString text = QString::fromUtf8(tsv);
+    if (text.startsWith(QChar(0xfeff))) text.remove(0, 1);
+    const auto lines = text.split('\n', Qt::SkipEmptyParts);
+    if (lines.isEmpty()) return fail(QStringLiteral("Empty sales report; totals are unavailable"));
+    QStringList headers = lines.first().split('\t');
+    for (auto &header : headers) header = header.trimmed();
+    const QStringList required{"amazon-order-id", "purchase-date", "order-status", "sales-channel", "sku", "asin", "quantity"};
+    int maxColumn = 0;
+    for (const auto &name : required) {
+        if (!headers.contains(name)) return fail(QStringLiteral("Sales report missing column: %1").arg(name));
+        maxColumn = qMax(maxColumn, headers.indexOf(name));
+    }
+    QHash<QString, QString> channels;
+    for (const auto &mp : AmazonMarketplace::all())
+        channels.insert(mp.salesChannelName().toLower(), mp.marketplaceId());
+    for (const auto &id : marketplaceIds) out->insert(id, {});
+    QHash<QString, int> seen;
+    for (int i = 1; i < lines.size(); ++i) {
+        if (lines[i].trimmed().isEmpty()) continue;
+        const auto cols = lines[i].split('\t');
+        if (cols.size() <= maxColumn) return fail(QStringLiteral("Incomplete sales report row %1").arg(i + 1));
+        const auto value = [&](const QString &name) {
+            const int col = headers.indexOf(name);
+            return col >= 0 && col < cols.size() ? cols[col].trimmed() : QString();
+        };
+        const QString channel = value("sales-channel").toLower();
+        const QString mp = channels.value(channel);
+        if (mp.isEmpty()) {
+            // MCF/non-Amazon orders do not belong to an Amazon storefront.
+            if (channel.startsWith("amazon.")) return fail(QStringLiteral("Unknown Amazon sales channel: %1").arg(channel));
+            continue;
+        }
+        if (!marketplaceIds.contains(mp)) continue;
+        const auto purchased = QDateTime::fromString(value("purchase-date"), Qt::ISODate);
+        if (!purchased.isValid()) return fail(QStringLiteral("Invalid sales report purchase date"));
+        // Explicit half-open boundaries prevent duplicate orders at period edges.
+        if (purchased < from || purchased >= to) continue;
+        const QString orderStatus = value("order-status").toLower();
+        const QString itemStatus = value("item-status").toLower();
+        if (orderStatus == "canceled" || orderStatus == "cancelled"
+            || itemStatus == "canceled" || itemStatus == "cancelled") continue;
+        bool ok = false;
+        const int qty = value("quantity").toInt(&ok);
+        const QString asin = value("asin"), order = value("amazon-order-id"), sku = value("sku");
+        if (!ok || qty < 0 || asin.isEmpty() || order.isEmpty() || sku.isEmpty())
+            return fail(QStringLiteral("Invalid sales report order item at row %1").arg(i + 1));
+        const QString lineId = value("order-item-id");
+        const QString key = mp + '\x1f' + order + '\x1f' +
+            (lineId.isEmpty() ? sku + '\x1f' + asin : lineId);
+        if (seen.contains(key)) {
+            if (seen.value(key) != qty) return fail(QStringLiteral("Conflicting duplicate sales report order item"));
+            continue;
+        }
+        seen.insert(key, qty);
+        const qint64 sum = qint64((*out)[mp].value(asin)) + qty;
+        if (sum > std::numeric_limits<int>::max()) return fail(QStringLiteral("Sales total exceeds supported range"));
+        (*out)[mp][asin] = int(sum);
+    }
+    return true;
+}
+
 QCoro::Task<void> AmazonCatalogApi::fetchSalesReport(
     QStringList marketplaceIds,
     QDateTime dataStartTime,
     QDateTime dataEndTime,
-    QHash<QString, QHash<QString,int>>* mpToAsinUnits)
+    QHash<QString, QHash<QString,int>>* mpToAsinUnits,
+    std::shared_ptr<bool> cancelled,
+    std::function<void(const QString &)> onProgress)
 {
     mpToAsinUnits->clear();
-    if (marketplaceIds.isEmpty()) co_return;
+    m_lastError.clear();
+    if (marketplaceIds.isEmpty() || !dataStartTime.isValid() || !dataEndTime.isValid()
+        || dataStartTime >= dataEndTime || dataStartTime.secsTo(dataEndTime) > 30 * 86400) {
+        m_lastError = QStringLiteral("Invalid sales report interval (maximum 30 days)");
+        co_return;
+    }
+    for (const auto &id : marketplaceIds) {
+        if (lwaRegionForMarketplace(id) != lwaRegionForMarketplace(marketplaceIds.first())) {
+            m_lastError = QStringLiteral("Sales report marketplaces must belong to one region");
+            co_return;
+        }
+    }
+    if (cancelled && *cancelled) { m_lastError = QStringLiteral("Canceled"); co_return; }
 
     const QString primaryId = marketplaceIds.first();
     const QString endpoint  = endpointForMarketplace(primaryId);
     const QString lwaReg    = lwaRegionForMarketplace(primaryId);
 
+    if (onProgress) onProgress(QStringLiteral("Requesting sales report…"));
     QString token;
     co_await _getAccessToken(lwaReg, &token);
-    if (token.isEmpty()) co_return;
+    if (token.isEmpty()) {
+        if (m_lastError.isEmpty()) m_lastError = QStringLiteral("No regional access token available");
+        co_return;
+    }
 
     // --- Step 1: Create the report ---
     {
@@ -4663,12 +4769,26 @@ QCoro::Task<void> AmazonCatalogApi::fetchSalesReport(
         req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
 
         qDebug() << "AmazonCatalogApi: requesting sales report for" << marketplaceIds;
-        QNetworkReply* reply = _nam()->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
-        co_await qCoro(reply).waitForFinished();
-
-        const QByteArray data   = reply->readAll();
-        const int        status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        reply->deleteLater();
+        QByteArray data;
+        int status = 0;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            QNetworkReply *reply = _nam()->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+            co_await AmazonRead::wait(reply, cancelled);
+            data = reply->readAll();
+            status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            const int retryAfter = reply->rawHeader("Retry-After").toInt();
+            reply->deleteLater();
+            if (cancelled && *cancelled) { m_lastError = QStringLiteral("Canceled"); co_return; }
+            if ((status != 429 && status < 500) || attempt == 2) break;
+            // Reports have their own quota; allow a token to refill before retry.
+            int delayMs = qMax(60 * (attempt + 1), retryAfter) * 1000;
+#ifdef AMAZONCATALOGAPI_UNIT_TESTS
+            if (m_immediateReportPollForTests) delayMs = 0;
+#endif
+            if (onProgress) onProgress(QStringLiteral("Amazon is busy (HTTP %1); retrying in %2 seconds…").arg(status).arg(delayMs / 1000));
+            co_await AmazonRead::delay(delayMs, cancelled);
+            if (cancelled && *cancelled) { m_lastError = QStringLiteral("Canceled"); co_return; }
+        }
 
         if (status != 202) {
             m_lastError = QStringLiteral("Sales report creation failed: HTTP %1 — %2")
@@ -4687,17 +4807,22 @@ QCoro::Task<void> AmazonCatalogApi::fetchSalesReport(
 
         // --- Step 2: Poll until DONE ---
         static const int kMaxPolls = 36;
-        static const int kPollMs   = 5000;
+        int kPollMs = 5000;
+#ifdef AMAZONCATALOGAPI_UNIT_TESTS
+        if (m_immediateReportPollForTests) kPollMs = 0;
+#endif
         QString reportDocumentId;
+        if (onProgress) onProgress(QStringLiteral("Waiting for Amazon to prepare the report…"));
 
         for (int poll = 0; poll < kMaxPolls; ++poll) {
-            QTimer timer;
-            timer.setSingleShot(true);
-            timer.start(kPollMs);
-            co_await qCoro(&timer).waitForTimeout();
+            co_await AmazonRead::delay(kPollMs, cancelled);
+            if (cancelled && *cancelled) { m_lastError = QStringLiteral("Canceled"); co_return; }
 
             co_await _getAccessToken(lwaReg, &token);
-            if (token.isEmpty()) co_return;
+            if (token.isEmpty()) {
+                if (m_lastError.isEmpty()) m_lastError = QStringLiteral("No regional access token available");
+                co_return;
+            }
 
             QUrl pollUrl;
             pollUrl.setScheme(QStringLiteral("https"));
@@ -4709,18 +4834,34 @@ QCoro::Task<void> AmazonCatalogApi::fetchSalesReport(
             pollReq.setRawHeader("accept", "application/json");
 
             QNetworkReply* pollReply = _nam()->get(pollReq);
-            co_await qCoro(pollReply).waitForFinished();
+            co_await AmazonRead::wait(pollReply, cancelled);
+            if (cancelled && *cancelled) {
+                pollReply->deleteLater();
+                m_lastError = QStringLiteral("Canceled");
+                co_return;
+            }
 
             const QByteArray pollData   = pollReply->readAll();
             const int        pollStatus = pollReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             pollReply->deleteLater();
 
-            if (pollStatus != 200) { continue; }
+            if (pollStatus != 200) {
+                if (onProgress) onProgress(QStringLiteral("Amazon status check returned HTTP %1; checking again (%2/%3)…")
+                    .arg(pollStatus).arg(poll + 1).arg(kMaxPolls));
+                continue;
+            }
 
             const QJsonObject pollObj  = QJsonDocument::fromJson(pollData).object();
             const QString     procStat = pollObj.value(QStringLiteral("processingStatus")).toString();
             qDebug() << "AmazonCatalogApi: sales report poll" << (poll + 1) << procStat;
 
+            if (onProgress) {
+                const QString message = procStat == QStringLiteral("IN_QUEUE")
+                    ? QStringLiteral("Report queued by Amazon")
+                    : procStat == QStringLiteral("IN_PROGRESS") ? QStringLiteral("Amazon is preparing the report")
+                    : QStringLiteral("Report status: %1").arg(procStat);
+                onProgress(QStringLiteral("%1 (check %2/%3)").arg(message).arg(poll + 1).arg(kMaxPolls));
+            }
             if (procStat == QStringLiteral("DONE")) {
                 reportDocumentId = pollObj.value(QStringLiteral("reportDocumentId")).toString();
                 break;
@@ -4738,9 +4879,13 @@ QCoro::Task<void> AmazonCatalogApi::fetchSalesReport(
             co_return;
         }
 
+        if (onProgress) onProgress(QStringLiteral("Downloading sales report…"));
         // --- Step 3: Get download URL ---
         co_await _getAccessToken(lwaReg, &token);
-        if (token.isEmpty()) co_return;
+        if (token.isEmpty()) {
+            if (m_lastError.isEmpty()) m_lastError = QStringLiteral("No regional access token available");
+            co_return;
+        }
 
         QUrl docUrl;
         docUrl.setScheme(QStringLiteral("https"));
@@ -4752,7 +4897,12 @@ QCoro::Task<void> AmazonCatalogApi::fetchSalesReport(
         docReq.setRawHeader("accept", "application/json");
 
         QNetworkReply* docReply = _nam()->get(docReq);
-        co_await qCoro(docReply).waitForFinished();
+        co_await AmazonRead::wait(docReply, cancelled);
+        if (cancelled && *cancelled) {
+            docReply->deleteLater();
+            m_lastError = QStringLiteral("Canceled");
+            co_return;
+        }
 
         const QByteArray docData   = docReply->readAll();
         const int        docStatus = docReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -4776,7 +4926,12 @@ QCoro::Task<void> AmazonCatalogApi::fetchSalesReport(
 
         // --- Step 4: Download ---
         QNetworkReply* dlReply = _nam()->get(QNetworkRequest{QUrl(downloadUrl)});
-        co_await qCoro(dlReply).waitForFinished();
+        co_await AmazonRead::wait(dlReply, cancelled);
+        if (cancelled && *cancelled) {
+            dlReply->deleteLater();
+            m_lastError = QStringLiteral("Canceled");
+            co_return;
+        }
 
         QByteArray tsvData  = dlReply->readAll();
         const int  dlStatus = dlReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -4798,53 +4953,9 @@ QCoro::Task<void> AmazonCatalogApi::fetchSalesReport(
             tsvData = decompressed;
         }
 
-        // --- Step 5: Parse TSV ---
-        const QString     text    = QString::fromUtf8(tsvData);
-        const QStringList lines   = text.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-        if (lines.isEmpty()) co_return;
-
-        // Build sales-channel → marketplaceId map from AmazonMarketplace::all()
-        QHash<QString, QString> channelToMp;
-        for (const AmazonMarketplace &mp : AmazonMarketplace::all())
-            channelToMp.insert(mp.salesChannelName(), mp.marketplaceId());
-
-        const QStringList headers  = lines.at(0).split(QLatin1Char('\t'));
-        const int asinCol    = headers.indexOf(QStringLiteral("asin"));
-        const int qtyCol     = headers.indexOf(QStringLiteral("quantity"));
-        const int statusCol  = headers.indexOf(QStringLiteral("order-status"));
-        const int channelCol = headers.indexOf(QStringLiteral("sales-channel"));
-
-        if (asinCol < 0 || qtyCol < 0) {
-            qWarning() << "AmazonCatalogApi: sales report TSV missing columns. Headers:" << headers;
-            co_return;
-        }
-
-        for (int i = 1; i < lines.size(); ++i) {
-            const QStringList cols = lines.at(i).split(QLatin1Char('\t'));
-            if (cols.size() <= qMax(asinCol, qtyCol)) continue;
-
-            if (statusCol >= 0 && statusCol < cols.size()) {
-                const QString status = cols.at(statusCol).trimmed();
-                if (status.compare(QStringLiteral("Canceled"),  Qt::CaseInsensitive) == 0
-                 || status.compare(QStringLiteral("Cancelled"), Qt::CaseInsensitive) == 0
-                 || status.compare(QStringLiteral("Pending"),   Qt::CaseInsensitive) == 0)
-                    continue;
-            }
-
-            const QString asin = cols.at(asinCol).trimmed();
-            const int     qty  = cols.at(qtyCol).trimmed().toInt();
-            if (asin.isEmpty() || qty <= 0) continue;
-
-            QString mpId;
-            if (channelCol >= 0 && channelCol < cols.size())
-                mpId = channelToMp.value(cols.at(channelCol).trimmed());
-
-            if (!mpId.isEmpty())
-                (*mpToAsinUnits)[mpId][asin] += qty;
-        }
-
-        qDebug() << "AmazonCatalogApi: sales report parsed."
-                 << "Marketplaces with data:" << mpToAsinUnits->size();
+        if (onProgress) onProgress(QStringLiteral("Counting sales in the report…"));
+        parseSalesReport(tsvData, marketplaceIds, dataStartTime, dataEndTime,
+                         mpToAsinUnits, &m_lastError);
     }
     co_return;
 }

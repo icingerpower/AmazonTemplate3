@@ -73,6 +73,8 @@ add_library(AmazonTemplate3Lib STATIC
   TreeDeletedProducts.cpp
   StorePlacements.h
   StorePlacements.cpp
+  StoreSales.h
+  StoreSales.cpp
   TableStoreAsin.h
   TableStoreAsin.cpp
   TableReviews.h
@@ -211,6 +213,8 @@ add_library(AmazonTemplate3Lib_Tests STATIC
   TreeDeletedProducts.cpp
   StorePlacements.h
   StorePlacements.cpp
+  StoreSales.h
+  StoreSales.cpp
   TableStoreAsin.h
   TableStoreAsin.cpp
   TableReviews.h

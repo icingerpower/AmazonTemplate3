@@ -98,6 +98,7 @@ public:
 
     // Returns the seller ID configured for the given marketplace's region.
     QString sellerIdForMarketplace(const QString& marketplaceId) const;
+    bool isConfiguredForMarketplace(const QString& marketplaceId) const;
     // Maps a marketplace ID to its LWA region name ("EU", "NA", "JP").
     static QString lwaRegionForMarketplace(const QString& marketplaceId);
 
@@ -439,12 +440,19 @@ public:
                                               StoreItem* item,
                                               QStringList allMarketplaceIds = {});
 
-    // Key: marketplaceId → { asin → units sold }.
+    // Key: marketplaceId → { asin → non-canceled units ordered }.
     // Uses GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL.
+    // Same-region marketplaces only; interval is [start,end), at most 30 days.
+    // On success includes an empty map for marketplaces with no orders.
     QCoro::Task<void> fetchSalesReport(QStringList marketplaceIds,
                                         QDateTime dataStartTime,
                                         QDateTime dataEndTime,
-                                        QHash<QString, QHash<QString,int>>* mpToAsinUnits);
+                                        QHash<QString, QHash<QString,int>>* mpToAsinUnits,
+                                        std::shared_ptr<bool> cancelled = {},
+                                        std::function<void(const QString &)> onProgress = {});
+    static bool parseSalesReport(const QByteArray &tsv, const QStringList &marketplaceIds,
+                                 QDateTime from, QDateTime to,
+                                 QHash<QString, QHash<QString,int>> *out, QString *error);
 
 #ifdef AMAZONCATALOGAPI_UNIT_TESTS
     // Mock is called instead of real HTTP. Receives the path
@@ -453,6 +461,8 @@ public:
     using MockFn = std::function<QByteArray(const QString& path,
                                             const QMap<QString,QString>& queryParams)>;
     void setMockForTests(MockFn mock);
+    // Takes ownership; report polling is immediate for offline HTTP fixtures.
+    void setNetworkAccessManagerForTests(QNetworkAccessManager* manager);
     void resetForTests();
 #endif
 
@@ -530,6 +540,7 @@ private:
 
 #ifdef AMAZONCATALOGAPI_UNIT_TESTS
     MockFn m_mock;
+    bool m_immediateReportPollForTests = false;
 #endif
 };
 

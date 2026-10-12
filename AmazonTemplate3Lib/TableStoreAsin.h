@@ -32,7 +32,8 @@ public:
         QPixmap image;
         QDate   createdDate;
         QSet<QString> existsInMarketplaces; // marketplaceIds where this color-group rep exists
-        int salesYear       = -1; // units sold in the last 365 days, summed across the row's SKUs (-1 = not fetched)
+        int salesYear       = -1; // non-canceled units ordered across countries and unique ASINs
+        bool salesComplete = false; // false for missing countries/periods or an expired snapshot
         int stockDays       = -1; // estimatedDaysOfSupply(), summed across the row's SKUs (-1 = not fetched)
         int stockAvailable  = -1; // available stock units, summed across the row's SKUs (-1 = not fetched)
         int recommended4mo  = -1; // recommendedInventoryForDays(…, 120), summed across the row's SKUs (-1 = not fetched)

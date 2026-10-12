@@ -116,7 +116,8 @@ QVariant TableStoreAsin::data(const QModelIndex &index, int role) const
                 ? row.createdDate.toString(QStringLiteral("MMM yyyy"))
                 : QVariant{};
         case ColSalesYear:
-            return row.salesYear < 0 ? QVariant{} : QVariant(row.salesYear);
+            if (row.salesYear < 0) return QStringLiteral("—");
+            return row.salesComplete ? QVariant(row.salesYear) : QVariant(QStringLiteral("%1*").arg(row.salesYear));
         case ColStockDays:
             if (row.stockDays < 0) return QVariant{};
             if (row.stockDays >= kInfiniteDaysOfSupply) return QString::fromUtf8("\xE2\x88\x9E");
@@ -142,6 +143,12 @@ QVariant TableStoreAsin::data(const QModelIndex &index, int role) const
     if (role == Qt::ToolTipRole && row.duplicate && (col == ColAsin || col == ColTitle))
         return tr("Additional category placement of this product");
 
+    if (role == Qt::ToolTipRole && col == ColSalesYear) {
+        return tr("Units ordered in the last 365 days across all configured Amazon countries, "
+                  "including all seller SKUs and fulfillment channels; canceled items excluded.")
+            + (row.salesComplete ? QString() : tr("\nIncomplete or stale total. Sort by sales or Refresh sales & stock retrieves missing periods. "
+                                                 "* marks an incomplete total; — means no sales periods have been fetched."));
+    }
     // Tooltip: full date + days ago
     if (role == Qt::ToolTipRole && col == ColCreatedDate && row.createdDate.isValid()) {
         const int days = row.createdDate.daysTo(QDate::currentDate());

@@ -14,6 +14,7 @@
 #include "apis/AmazonCatalogApi.h"
 #include "AmazonMarketplace.h"
 #include "StorePlacements.h"
+#include "StoreSales.h"
 #include "AbstractCli.h"
 #include "../DialogGenStorefrontImage.h"
 
@@ -64,12 +65,14 @@ private:
     QCoro::Task<void> m_retrieveTask;
     QCoro::Task<void> m_imageTask;
     QCoro::Task<void> m_stockRefreshTask;
+    QCoro::Task<void> m_salesTask;
+    StoreSales m_sales;
+    std::shared_ptr<bool> m_salesCancelled;
 
     // Sales/stock cache (per SKU, lowercased), shared 24h-TTL/partial-refetch
     // convention with PaneMarketplaces' AmazonCache — see _loadStockCache/_saveStockCache.
     QHash<QString, int> m_stockAvailableBySkuLower; // -1 = unknown
     QHash<QString, int> m_stockSales90BySkuLower;   // units sold in the last 90 days, -1 = unknown
-    QHash<QString, int> m_stockSales365BySkuLower;  // units sold in the last 365 days, -1 = unknown
     qint64               m_stockCacheTimestampUtc = 0; // 0 = never loaded
 
     AmazonCatalogApi *_catalogApi();
@@ -125,6 +128,10 @@ private:
     // Save order independently for the selected category path.
     void _syncSavedOrderFromVisibleRows();
     void _onSortBySales();
+    void _sortByCachedSales();
+    QList<QStringList> _salesRegions();
+    QString _salesScope();
+    QCoro::Task<void> _refreshSales(bool sortAfterwards);
     void _onOldInBottom();
 
     QStringList _currentNodePath() const;
@@ -140,10 +147,10 @@ private:
 
     void _loadStockCache();
     void _saveStockCache() const;
-    // Aggregated (available, sales90d, sales365d) across every SKU in groupAsins;
+    // Aggregated (available, sales90d) across every SKU in groupAsins;
     // component is -1 when nothing in the group has cached data for it.
     void _aggregateStock(const QStringList &groupAsins,
-                         int *availableOut, int *sales90Out, int *sales365Out) const;
+                         int *availableOut, int *sales90Out) const;
     QCoro::Task<void> _onRefreshSalesStock();
 
     // English category names (TreeBrandCategories::ColEnglishName), persisted
