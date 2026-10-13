@@ -92,3 +92,26 @@
   the counted period. Diagnostics retained no credentials or actual counts in
   repository files. Only authentication and read-only sales requests were made.
 - Final Release build and all 16 CTest suites passed (29.97 seconds).
+
+## 2026-10-12 — Unified pacing gate and escalating backoff for SKU sales retrieval
+
+- `fetchSalesUnits` (used by pricing retrieval, discount pane, store pane, and
+  inventory sync) now shares the monotonic `SalesRequestGate` with `_fetchOrderMetrics`.
+  Both query `/sales/v1/orderMetrics` and are subject to Amazon's 0.5 req/sec
+  rate limit and 15-token burst bucket.
+- Previously, `fetchSalesUnits` lacked pacing and used a fixed 3-second wait
+  with only 3 attempts. When iterating hundreds of SKUs during pricing retrieval,
+  burst tokens quickly exhausted and every subsequent request failed with 429
+  without allowing the token bucket to replenish.
+- Both `fetchSalesUnits` and `_fetchOrderMetrics` now use `calculateThrottleDelay`:
+  - Up to 5 attempts per request.
+  - Exponential backoff per attempt (3s, 6s, 12s, 24s, 48s, up to 120s max).
+  - Consecutive 429 failure counter across requests (`consecutiveFailures` in gate)
+    escalates the initial backoff and pacing when Amazon repeatedly throttles.
+  - The gate's `nextRequest` is pushed into the future on 429 so subsequent
+    marketplaces and SKUs wait for the cooldown even if the current call gives up.
+  - Server `Retry-After` header is respected.
+  - Successful HTTP 200 resets `consecutiveFailures` back to 0.
+- Test helper `resetSalesRequestGateForTests(int spacingMs = 2100)` allows unit tests
+  to run fast while ensuring production defaults to 2100 ms pacing.
+- Full Release build succeeded; all 17 CTest suites passed (38.30 seconds).

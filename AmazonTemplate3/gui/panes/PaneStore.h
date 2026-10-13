@@ -47,6 +47,7 @@ private:
     TreeBrandCategories    *m_treeModel      = nullptr;
     QStandardItemModel     *m_countriesModel = nullptr;
     TableStoreAsin         *m_storeModel     = nullptr;
+    bool                    m_tableColumnsInitialized = false;
 
     QList<AbstractCli *>    m_availableClis;
 
@@ -133,6 +134,7 @@ private:
     QString _salesScope();
     QCoro::Task<void> _refreshSales(bool sortAfterwards);
     void _onOldInBottom();
+    QCoro::Task<void> _moveOldProductsAfterSales();
 
     QStringList _currentNodePath() const;
 

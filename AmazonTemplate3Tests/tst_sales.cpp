@@ -307,6 +307,56 @@ private slots:
         QCOMPARE(counts, QList<int>{-1});
         QCOMPARE(api.lastError(), "Cancelled");
     }
+    void fetchSalesUnitsThrottlingAndEscalation()
+    {
+        AmazonInventoryApi::resetSalesRequestGateForTests(0);
+        SalesNetwork network;
+        network.response = R"({"payload":[{"unitCount":15}]})";
+        network.statuses = {429, 200};
+        network.retryAfter = "1";
+        AmazonInventoryApi api("fake", "fake", "fake", "fake", "A13V1IB3VIYZZH");
+        api.setNetworkAccessManager(&network);
+        QStringList progress;
+        api.setReadProgress([&](const QString &message) { progress.append(message); });
+        bool done = false;
+        int units = -1;
+        const QString sku1 = QStringLiteral("SKU-1");
+        const QStringList markets{QStringLiteral("A13V1IB3VIYZZH")};
+        auto run = [&]() -> QCoro::Task<void> {
+            co_await api.fetchSalesUnits(sku1, 90, markets, &units);
+            done = true;
+        };
+        auto task = run();
+        QTRY_VERIFY_WITH_TIMEOUT(done, 4000);
+        QCOMPARE(units, 15);
+        QCOMPARE(network.metricTimes.size(), 2);
+        QVERIFY(network.metricTimes[1] - network.metricTimes[0] >= 1000);
+        QVERIFY(progress.join(' ').contains("Amazon throttled the request"));
+        QVERIFY(progress.join(' ').contains("retry 2/5"));
+
+        // Check consecutive failure escalation across attempts
+        network.statuses = {429, 429, 429};
+        done = false;
+        units = -1;
+        progress.clear();
+        auto cancelled = std::make_shared<bool>(false);
+        api.setReadCancellation(cancelled);
+        api.setReadProgress([&](const QString &message) {
+            progress.append(message);
+            if (progress.size() >= 2)
+                *cancelled = true;
+        });
+        const QString sku2 = QStringLiteral("SKU-2");
+        auto run2 = [&]() -> QCoro::Task<void> {
+            co_await api.fetchSalesUnits(sku2, 90, markets, &units);
+            done = true;
+        };
+        auto task2 = run2();
+        QTRY_VERIFY_WITH_TIMEOUT(done, 10000);
+        QVERIFY(progress.join(' ').contains("consecutive failure"));
+
+        AmazonInventoryApi::resetSalesRequestGateForTests(2100);
+    }
     void temuUsesParentTotalAndExclusiveBoundary()
     {
         SalesNetwork network;

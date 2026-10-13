@@ -217,7 +217,7 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventory(QStringList skus, QList<
         query.addQueryItem("sellerSkus", chunk.join(QLatin1Char(',')));
         url.setQuery(query);
 
-        for (int attempt = 0; attempt < 3; ++attempt) {
+        for (int attempt = 0; attempt < 5; ++attempt) {
             QNetworkRequest req(url);
             req.setRawHeader("x-amz-access-token", token.toUtf8());
             req.setRawHeader("Accept", "application/json");
@@ -237,16 +237,22 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventory(QStringList skus, QList<
 
             const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             const QByteArray data = reply->readAll();
+            const auto retryAfter = reply->rawHeader("Retry-After");
             reply->deleteLater();
 
             if (status == 429) {
+                qint64 delayMs = 2000LL << attempt;
+                bool secondsValid = false;
+                const qint64 seconds = retryAfter.toLongLong(&secondsValid);
+                if (secondsValid && seconds > 0)
+                    delayMs = qMax(delayMs, qMin<qint64>(seconds, 86400) * 1000);
                 qWarning() << "AmazonInventoryApi::fetchFbaInventory: 429 throttled, attempt"
-                           << (attempt + 1);
-                if (attempt < 2) {
+                           << (attempt + 1) << "delay:" << delayMs << "ms";
+                if (attempt < 4) {
                     if (m_readProgress)
-                        m_readProgress(QStringLiteral("Amazon throttled the request; retry %1/3 in 2 seconds")
-                                           .arg(attempt + 2));
-                    co_await AmazonRead::delay(2000, m_cancelled);
+                        m_readProgress(QStringLiteral("Amazon throttled the request; retry %1/5 in %2 seconds")
+                                           .arg(attempt + 2).arg((delayMs + 999) / 1000));
+                    co_await AmazonRead::delay(static_cast<int>(delayMs), m_cancelled);
                     if (readCancelled())
                         co_return;
                     continue;
@@ -997,12 +1003,13 @@ int AmazonInventoryApi::parseOrderCount(const QByteArray &body)
 }
 
 namespace {
-// Shared by all sales-pane API instances, including retries and subsequent
+// Shared by all sales API instances, including retries and subsequent
 // refreshes. Accessed on the Qt GUI/network thread. Use monotonic time.
 struct SalesRequestGate {
     QElapsedTimer clock;
     qint64 nextRequest = 0;
     int spacingMs = 2100;
+    int consecutiveFailures = 0;
     SalesRequestGate() { clock.start(); }
 };
 SalesRequestGate &salesRequestGate()
@@ -1010,6 +1017,36 @@ SalesRequestGate &salesRequestGate()
     static SalesRequestGate gate;
     return gate;
 }
+
+qint64 calculateThrottleDelay(SalesRequestGate &gate, int attempt, const QByteArray &retryAfter, qint64 baseMs = 3000)
+{
+    gate.consecutiveFailures++;
+    // Exponential backoff within the retry loop + escalating base for consecutive failures across requests
+    const int failureShift = qMin(gate.consecutiveFailures > 1 ? gate.consecutiveFailures - 1 : 0, 4);
+    const int totalShift = qMin(attempt + failureShift, 5);
+    qint64 delayMs = baseMs << totalShift;
+    bool secondsValid = false;
+    const qint64 seconds = retryAfter.toLongLong(&secondsValid);
+    if (secondsValid && seconds > 0)
+        delayMs = qMax(delayMs, qMin<qint64>(seconds, 86400) * 1000);
+    else {
+        const auto date = QDateTime::fromString(QString::fromLatin1(retryAfter), Qt::RFC2822Date);
+        if (date.isValid())
+            delayMs = qMax(delayMs, QDateTime::currentDateTimeUtc().msecsTo(date));
+    }
+    delayMs = qMin<qint64>(delayMs, 120000); // cap at 2 minutes
+    gate.nextRequest = qMax(gate.nextRequest, gate.clock.elapsed() + delayMs);
+    return delayMs;
+}
+}
+
+void AmazonInventoryApi::resetSalesRequestGateForTests(int spacingMs)
+{
+    auto &gate = salesRequestGate();
+    gate.clock.restart();
+    gate.nextRequest = 0;
+    gate.spacingMs = spacingMs;
+    gate.consecutiveFailures = 0;
 }
 
 QList<int> AmazonInventoryApi::parseMonthlyOrderCounts(const QByteArray &body,
@@ -1141,19 +1178,17 @@ QCoro::Task<void> AmazonInventoryApi::_fetchOrderMetrics(QDateTime from, QDateTi
         reply->deleteLater();
         if (readCancelled()) { m_lastError = QStringLiteral("Cancelled"); co_return; }
         if (status == 429 || status >= 500 || status == 0) {
-            qint64 delayMs = 2000LL << qMin(attempt, 3);
-            bool secondsValid = false;
-            const qint64 seconds = retryAfter.toLongLong(&secondsValid);
-            if (secondsValid && seconds > 0)
-                delayMs = qMax(delayMs, qMin<qint64>(seconds, 86400) * 1000);
-            else {
-                const auto date = QDateTime::fromString(QString::fromLatin1(retryAfter), Qt::RFC2822Date);
-                if (date.isValid()) delayMs = qMax(delayMs, QDateTime::currentDateTimeUtc().msecsTo(date));
+            const qint64 delayMs = calculateThrottleDelay(gate, attempt, retryAfter, 2000);
+            if (attempt < 4 && m_readProgress) {
+                const int delaySec = int((delayMs + 999) / 1000);
+                if (gate.consecutiveFailures > 1) {
+                    m_readProgress(QStringLiteral("HTTP %1; consecutive failure %2, retry %3/5 in %4 seconds")
+                        .arg(status).arg(gate.consecutiveFailures).arg(attempt + 2).arg(delaySec));
+                } else {
+                    m_readProgress(QStringLiteral("HTTP %1; retry %2/5 in %3 seconds")
+                        .arg(status).arg(attempt + 2).arg(delaySec));
+                }
             }
-            gate.nextRequest = qMax(gate.nextRequest, gate.clock.elapsed() + delayMs);
-            if (attempt < 4 && m_readProgress)
-                m_readProgress(QStringLiteral("HTTP %1; retry %2/5 in %3 seconds")
-                    .arg(status).arg(attempt + 2).arg((delayMs + 999) / 1000));
             // Keep the cooldown for other marketplaces even after this one's
             // final attempt fails.
             if (attempt < 4) continue;
@@ -1166,6 +1201,7 @@ QCoro::Task<void> AmazonInventoryApi::_fetchOrderMetrics(QDateTime from, QDateTi
             if (!requestId.isEmpty()) m_lastError += QStringLiteral(" (request %1)").arg(QString::fromLatin1(requestId));
             co_return;
         }
+        gate.consecutiveFailures = 0;
         *out = body;
         co_return;
     }
@@ -1218,6 +1254,7 @@ QCoro::Task<void> AmazonInventoryApi::fetchSalesUnits(QString sku, int days, QSt
 
     int total = 0;
     bool anyOk = false;
+    auto &gate = salesRequestGate();
 
     for (const QString &mpId : marketplaceIds) {
         if (readCancelled())
@@ -1225,8 +1262,25 @@ QCoro::Task<void> AmazonInventoryApi::fetchSalesUnits(QString sku, int days, QSt
         int status = 0;
         QByteArray data;
 
-        for (int attempt = 0; attempt < 3; ++attempt) {
+        for (int attempt = 0; attempt < 5; ++attempt) {
+            if (readCancelled()) {
+                m_lastError = QStringLiteral("Cancelled");
+                co_return;
+            }
             co_await _getAccessToken(&token);
+            if (token.isEmpty()) {
+                if (m_lastError.isEmpty())
+                    m_lastError = QStringLiteral("No LWA access token available");
+                co_return;
+            }
+
+            while (gate.nextRequest > gate.clock.elapsed() && !readCancelled())
+                co_await AmazonRead::delay(int(qMin<qint64>(1000, gate.nextRequest - gate.clock.elapsed())), m_cancelled);
+            if (readCancelled()) {
+                m_lastError = QStringLiteral("Cancelled");
+                co_return;
+            }
+            gate.nextRequest = gate.clock.elapsed() + gate.spacingMs;
 
             QUrl url(QStringLiteral("https://%1/sales/v1/orderMetrics")
                          .arg(endpointForMarketplace(m_marketplaceId)));
@@ -1234,10 +1288,12 @@ QCoro::Task<void> AmazonInventoryApi::fetchSalesUnits(QString sku, int days, QSt
             query.addQueryItem("marketplaceIds", mpId);
             query.addQueryItem("interval", interval);
             query.addQueryItem("granularity", "Total");
+            query.addQueryItem("granularityTimeZone", "UTC");
             query.addQueryItem("sku", sku);
             url.setQuery(query);
 
             QNetworkRequest req(url);
+            req.setTransferTimeout(30000);
             req.setRawHeader("x-amz-access-token", token.toUtf8());
             req.setRawHeader("Accept", "application/json");
 
@@ -1256,21 +1312,41 @@ QCoro::Task<void> AmazonInventoryApi::fetchSalesUnits(QString sku, int days, QSt
 
             status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             data = reply->readAll();
+            const auto retryAfter = reply->rawHeader("Retry-After");
+            const double rate = reply->rawHeader("x-amzn-RateLimit-Limit").toDouble();
+            if (rate > 0 && rate < 0.5) {
+                gate.spacingMs = int(qMin(3600000.0, 1050.0 / rate));
+                gate.nextRequest = qMax(gate.nextRequest, gate.clock.elapsed() + gate.spacingMs);
+            }
             reply->deleteLater();
 
-            if (status == 429) {
-                qWarning() << "AmazonInventoryApi::fetchSalesUnits: 429 throttled for" << mpId << "attempt"
-                           << (attempt + 1);
-                if (attempt < 2) {
-                    if (m_readProgress)
-                        m_readProgress(QStringLiteral("Amazon throttled the request; retry %1/3 in 3 seconds")
-                                           .arg(attempt + 2));
-                    co_await AmazonRead::delay(3000, m_cancelled);
-                    if (readCancelled())
-                        co_return;
+            if (readCancelled()) {
+                m_lastError = QStringLiteral("Cancelled");
+                co_return;
+            }
+
+            if (status == 429 || status >= 500 || status == 0) {
+                const qint64 delayMs = calculateThrottleDelay(gate, attempt, retryAfter, 3000);
+                qWarning() << "AmazonInventoryApi::fetchSalesUnits: HTTP" << status << "throttled for" << mpId
+                           << "attempt" << (attempt + 1) << "consecutive failures:" << gate.consecutiveFailures
+                           << "delay:" << delayMs << "ms";
+                if (attempt < 4) {
+                    if (m_readProgress) {
+                        const int delaySec = int((delayMs + 999) / 1000);
+                        if (gate.consecutiveFailures > 1) {
+                            m_readProgress(QStringLiteral("Amazon throttled the request; consecutive failure %1, retry %2/5 in %3 seconds")
+                                               .arg(gate.consecutiveFailures).arg(attempt + 2).arg(delaySec));
+                        } else {
+                            m_readProgress(QStringLiteral("Amazon throttled the request; retry %1/5 in %2 seconds")
+                                               .arg(attempt + 2).arg(delaySec));
+                        }
+                    }
                     continue;
                 }
+                break;
             }
+
+            gate.consecutiveFailures = 0;
             break;
         }
 
@@ -1320,7 +1396,7 @@ QCoro::Task<QJsonArray> AmazonInventoryApi::fetchFulfillmentOrders(const QDateTi
     query.addQueryItem("queryStartDate", startDateTime.toString(Qt::ISODate));
     url.setQuery(query);
 
-    for (int attempt = 0; attempt < 3; ++attempt) {
+    for (int attempt = 0; attempt < 5; ++attempt) {
         QNetworkRequest req(url);
         req.setRawHeader("x-amz-access-token", token.toUtf8());
         req.setRawHeader("Accept", "application/json");
@@ -1333,12 +1409,13 @@ QCoro::Task<QJsonArray> AmazonInventoryApi::fetchFulfillmentOrders(const QDateTi
         reply->deleteLater();
 
         if (status == 429) {
+            const int delayMs = 2000 << attempt;
             qWarning() << "AmazonInventoryApi::fetchFulfillmentOrders: 429 throttled, attempt"
-                       << (attempt + 1);
-            if (attempt < 2) {
+                       << (attempt + 1) << "delay:" << delayMs << "ms";
+            if (attempt < 4) {
                 QTimer timer;
                 timer.setSingleShot(true);
-                timer.start(2000);
+                timer.start(delayMs);
                 co_await qCoro(&timer).waitForTimeout();
                 continue;
             }
@@ -1387,7 +1464,7 @@ QCoro::Task<bool> AmazonInventoryApi::createFulfillmentOrder(const QJsonObject &
     QUrl url(QStringLiteral("https://%1/fba/outbound/2020-07-01/fulfillmentOrders").arg(endpointForMarketplace(m_marketplaceId)));
     const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
 
-    for (int attempt = 0; attempt < 3; ++attempt) {
+    for (int attempt = 0; attempt < 5; ++attempt) {
         QNetworkRequest req(url);
         req.setRawHeader("x-amz-access-token", token.toUtf8());
         req.setRawHeader("Accept", "application/json");
@@ -1401,12 +1478,13 @@ QCoro::Task<bool> AmazonInventoryApi::createFulfillmentOrder(const QJsonObject &
         reply->deleteLater();
 
         if (status == 429) {
+            const int delayMs = 2000 << attempt;
             qWarning() << "AmazonInventoryApi::createFulfillmentOrder: 429 throttled, attempt"
-                       << (attempt + 1);
-            if (attempt < 2) {
+                       << (attempt + 1) << "delay:" << delayMs << "ms";
+            if (attempt < 4) {
                 QTimer timer;
                 timer.setSingleShot(true);
-                timer.start(2000);
+                timer.start(delayMs);
                 co_await qCoro(&timer).waitForTimeout();
                 continue;
             }
@@ -1442,7 +1520,7 @@ QCoro::Task<QJsonObject> AmazonInventoryApi::getFulfillmentOrder(const QString &
                  .arg(endpointForMarketplace(m_marketplaceId))
                  .arg(QString::fromUtf8(QUrl::toPercentEncoding(sellerFulfillmentOrderId))));
 
-    for (int attempt = 0; attempt < 3; ++attempt) {
+    for (int attempt = 0; attempt < 5; ++attempt) {
         QNetworkRequest req(url);
         req.setRawHeader("x-amz-access-token", token.toUtf8());
         req.setRawHeader("Accept", "application/json");
@@ -1455,12 +1533,13 @@ QCoro::Task<QJsonObject> AmazonInventoryApi::getFulfillmentOrder(const QString &
         reply->deleteLater();
 
         if (status == 429) {
+            const int delayMs = 2000 << attempt;
             qWarning() << "AmazonInventoryApi::getFulfillmentOrder: 429 throttled, attempt"
-                       << (attempt + 1);
-            if (attempt < 2) {
+                       << (attempt + 1) << "delay:" << delayMs << "ms";
+            if (attempt < 4) {
                 QTimer timer;
                 timer.setSingleShot(true);
-                timer.start(2000);
+                timer.start(delayMs);
                 co_await qCoro(&timer).waitForTimeout();
                 continue;
             }

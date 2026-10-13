@@ -128,6 +128,8 @@ class PricingNetwork : public QNetworkAccessManager {
 class PricingRetrievalTests : public QObject {
     Q_OBJECT
   private slots:
+    void init() { AmazonInventoryApi::resetSalesRequestGateForTests(0); }
+    void cleanup() { AmazonInventoryApi::resetSalesRequestGateForTests(2100); }
     void updateAuditIncludesBeforeAfterAndEveryOutcome();
     void updateCancellation_data();
     void updateCancellation();

@@ -29,6 +29,8 @@ public:
     void setReadProgress(std::function<void(const QString &)> progress) { m_readProgress = std::move(progress); }
     // Borrowed manager for offline transport tests; set before starting a request.
     void setNetworkAccessManager(QNetworkAccessManager *manager) { m_nam = manager; }
+    // Test helper to inspect or reset the shared sales rate gate
+    static void resetSalesRequestGateForTests(int spacingMs = 2100);
     static int parseSalesUnits(const QByteArray &body); // -1 for malformed/incomplete responses
     static int parseOrderCount(const QByteArray &body);
     QCoro::Task<void> fetchOrderCount(QDateTime from, QDateTime to, int *out);

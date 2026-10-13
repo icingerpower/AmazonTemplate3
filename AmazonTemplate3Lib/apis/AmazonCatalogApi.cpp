@@ -392,11 +392,12 @@ QCoro::Task<void> AmazonCatalogApi::_doGet(const QString& marketplaceId,
         }
 
         if (httpStatus == 429 && retry < 4) {
-            qDebug() << "AmazonCatalogApi: 429 Quota Exceeded for" << asin << "— retrying in 3s...";
+            const int delayMs = 3000 << retry;
+            qDebug() << "AmazonCatalogApi: 429 Quota Exceeded for" << asin << "— retrying in" << (delayMs / 1000) << "s...";
             reply->deleteLater();
             QTimer t;
             t.setSingleShot(true);
-            t.start(3000);
+            t.start(delayMs);
             co_await qCoro(&t).waitForTimeout();
             continue;
         }
@@ -4664,8 +4665,11 @@ bool AmazonCatalogApi::parseSalesReport(const QByteArray &tsv, const QStringList
         maxColumn = qMax(maxColumn, headers.indexOf(name));
     }
     QHash<QString, QString> channels;
-    for (const auto &mp : AmazonMarketplace::all())
-        channels.insert(mp.salesChannelName().toLower(), mp.marketplaceId());
+    for (const auto &id : marketplaceIds) {
+        const auto *mp = AmazonMarketplace::forMarketplaceId(id);
+        if (!mp) return fail(QStringLiteral("Unsupported requested sales marketplace: %1").arg(id));
+        channels.insert(mp->salesChannelName().toLower(), id);
+    }
     for (const auto &id : marketplaceIds) out->insert(id, {});
     QHash<QString, int> seen;
     for (int i = 1; i < lines.size(); ++i) {
@@ -4678,12 +4682,10 @@ bool AmazonCatalogApi::parseSalesReport(const QByteArray &tsv, const QStringList
         };
         const QString channel = value("sales-channel").toLower();
         const QString mp = channels.value(channel);
-        if (mp.isEmpty()) {
-            // MCF/non-Amazon orders do not belong to an Amazon storefront.
-            if (channel.startsWith("amazon.")) return fail(QStringLiteral("Unknown Amazon sales channel: %1").arg(channel));
-            continue;
-        }
-        if (!marketplaceIds.contains(mp)) continue;
+        // Regional reports can contain other storefronts (e.g. Amazon.com.tr).
+        // Count only requested channels; unrelated orders must not invalidate
+        // the whole period. This also excludes non-Amazon/MCF orders.
+        if (mp.isEmpty()) continue;
         const auto purchased = QDateTime::fromString(value("purchase-date"), Qt::ISODate);
         if (!purchased.isValid()) return fail(QStringLiteral("Invalid sales report purchase date"));
         // Explicit half-open boundaries prevent duplicate orders at period edges.

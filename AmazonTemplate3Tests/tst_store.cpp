@@ -346,6 +346,25 @@ private slots:
         QVERIFY(!AmazonCatalogApi::parseSalesReport({}, {"A2EUQ1WTGCTBG2"}, from, to, &out, &error));
     }
 
+    void salesReportIgnoresUnrequestedChannels()
+    {
+        const auto from = QDateTime::fromString("2026-09-01T00:00:00Z", Qt::ISODate);
+        const auto to = from.addDays(30);
+        QByteArray tsv = salesHeader();
+        tsv += "de\ti1\t2026-09-02T00:00:00Z\tShipped\tAmazon.de\tSKU-DE\tBOOT\t7\n";
+        tsv += "tr\ti1\t2026-09-02T00:00:00Z\tShipped\tAmazon.com.tr\tSKU-TR\tBOOT\t99\n";
+        tsv += "ca\ti1\t2026-09-02T00:00:00Z\tShipped\tAmazon.ca\tSKU-CA\tBOOT\t50\n";
+        QHash<QString, QHash<QString, int>> out;
+        QString error;
+        QVERIFY2(AmazonCatalogApi::parseSalesReport(tsv, {"A1PA6795UKMFR9"}, from, to, &out, &error), qPrintable(error));
+        QCOMPARE(out.size(), 1);
+        QCOMPARE(out["A1PA6795UKMFR9"].value("BOOT"), 7);
+        QVERIFY(error.isEmpty());
+        QVERIFY(!AmazonCatalogApi::parseSalesReport(tsv, {"unsupported-marketplace"}, from, to, &out, &error));
+        QVERIFY(out.isEmpty());
+        QVERIFY(!error.isEmpty());
+    }
+
     void globalSalesRetryCacheAndRanking()
     {
         PaneStore pane;
@@ -434,16 +453,26 @@ private slots:
 
     void salesProgressResumesFromSuccessfulPeriods()
     {
-        AmazonCatalogApi api("offline", "offline", {}, "na", "jp", {}, "na-seller", "jp-seller");
+        AmazonCatalogApi api("offline", "offline", "eu", "na", "jp", "eu-seller", "na-seller", "jp-seller");
         auto *network = new StoreNetwork;
         api.setNetworkAccessManagerForTests(network);
-        network->salesBody = [](const QJsonObject &) { return salesHeader(); };
-        network->failedSalesRegions.insert("JP");
+        network->salesBody = [](const QJsonObject &request) {
+            const QString date = request["dataStartTime"].toString();
+            QByteArray body = salesHeader();
+            body += ("tr\ti1\t" + date + "\tShipped\tAmazon.com.tr\tSKU-TR\tBOOT\t99\n").toUtf8();
+            for (const auto &id : request["marketplaceIds"].toArray()) {
+                const auto *mp = AmazonMarketplace::forMarketplaceId(id.toString());
+                body += ("order\ti1\t" + date + "\tShipped\t" + mp->salesChannelName()
+                         + "\tSKU\tBOOT\t2\n").toUtf8();
+            }
+            return body;
+        };
+        network->failedSalesRegions.insert("EU");
         StoreSales sales;
         sales.load(QDir(m_dir->path()), "progress-fixture");
         QList<QPair<int, int>> counts;
         QStringList messages;
-        const QList<QStringList> regions{{"A2EUQ1WTGCTBG2"}, {"A1VC38T7YXB528"}};
+        const QList<QStringList> regions{{"A1PA6795UKMFR9"}, {"A2EUQ1WTGCTBG2"}, {"A1VC38T7YXB528"}};
         const auto cancelled = std::make_shared<bool>(false);
         bool done = false;
         auto run = [&]() -> QCoro::Task<void> {
@@ -454,8 +483,10 @@ private slots:
         };
         auto task = run();
         QTRY_VERIFY_WITH_TIMEOUT(done, 3000);
-        QCOMPARE(counts.first(), qMakePair(0, 26));
-        QCOMPARE(counts.last(), qMakePair(13, 26)); // failed region does not advance the bar
+        QCOMPARE(counts.first(), qMakePair(0, 39));
+        QCOMPARE(counts.last(), qMakePair(26, 39)); // failed EU does not advance the bar
+        QCOMPARE(sales.total({"BOOT"}).units, 52);
+        QVERIFY(!sales.total({"BOOT"}).complete);
         QVERIFY(messages.join('\n').contains("CA —"));
         QVERIFY(messages.join('\n').contains("Waiting for Amazon"));
         QVERIFY(messages.join('\n').contains("Downloading sales report"));
@@ -465,9 +496,11 @@ private slots:
         done = false;
         task = run();
         QTRY_VERIFY_WITH_TIMEOUT(done, 3000);
-        QCOMPARE(counts.first(), qMakePair(13, 26));
-        QCOMPARE(counts.last(), qMakePair(26, 26));
-        QCOMPARE(network->salesReports.size(), 27); // 13 CA, failed JP, then 13 JP
+        QCOMPARE(counts.first(), qMakePair(26, 39));
+        QCOMPARE(counts.last(), qMakePair(39, 39));
+        QCOMPARE(network->salesReports.size(), 40); // failed EU, 26 CA/JP, then only 13 EU
+        QCOMPARE(sales.total({"BOOT"}).units, 78); // Turkey excluded, saved sales counted once
+        QVERIFY(sales.total({"BOOT"}).complete);
     }
 
     void salesCacheAgePolicy_data()
@@ -1585,6 +1618,79 @@ private slots:
             QVERIFY(QFile::exists(outDir + "/horizontal.jpg"));
             QVERIFY(QFile::exists(outDir + "/square.jpg"));
         }
+    }
+
+    void oldInBottomCompletesMissingSales_data()
+    {
+        QTest::addColumn<bool>("failRetry");
+        QTest::addColumn<bool>("cancelRetry");
+        QTest::newRow("complete-then-reorder") << false << false;
+        QTest::newRow("failure-explains-unchanged-order") << true << false;
+        QTest::newRow("cancel-keeps-order") << false << true;
+    }
+
+    void oldInBottomCompletesMissingSales()
+    {
+        QFETCH(bool, failRetry);
+        QFETCH(bool, cancelRetry);
+        auto old = catalog().first();
+        old.asin = "OLD"; old.sku = "OLD-39";
+        old.createdDate = QDate::currentDate().addYears(-6);
+        auto recent = old;
+        recent.asin = "NEW"; recent.sku = "NEW-39";
+        recent.createdDate = QDate::currentDate().addMonths(-5);
+        PaneStore pane;
+        setup(pane, {old, recent});
+        delete pane.m_catalogApi;
+        pane.m_catalogApi = new AmazonCatalogApi("offline", "offline", "eu", "na", "jp", "eu-seller", "na-seller", "jp-seller", {}, &pane);
+        auto *network = new StoreNetwork;
+        pane.m_catalogApi->setNetworkAccessManagerForTests(network);
+        network->salesBody = [](const QJsonObject &) { return salesHeader(); };
+        network->failedSalesRegions.insert("EU");
+        pane.m_sales.load(QDir(m_dir->path()), pane._salesScope());
+        bool seeded = false;
+        auto prime = [&]() -> QCoro::Task<void> {
+            co_await pane.m_sales.refresh(pane.m_catalogApi, pane._salesRegions(), {}, {});
+            seeded = true;
+        };
+        auto task = prime();
+        QTRY_VERIFY_WITH_TIMEOUT(seeded, 5000);
+        QCOMPARE(network->salesReports.size(), 27); // failed EU, 13 NA + 13 JP saved
+        pane.m_stockAvailableBySkuLower[old.sku.toLower()] = 0;
+        pane.m_stockAvailableBySkuLower[recent.sku.toLower()] = 10;
+        selectNode(pane, category("Pumps"));
+        QCOMPARE(pane.m_storeModel->rows().first().asin, QString("OLD"));
+        QCOMPARE(pane.m_storeModel->rows().first().salesYear, 0);
+        QVERIFY(!pane.m_storeModel->rows().first().salesComplete);
+        if (!failRetry) network->failedSalesRegions.clear();
+        if (cancelRetry) network->onSalesReport = [&] { *pane.m_salesCancelled = true; };
+        QString explanation;
+        QTimer dismiss;
+        connect(&dismiss, &QTimer::timeout, this, [&] {
+            if (auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+                explanation = box->text();
+                box->accept();
+            }
+        });
+        dismiss.start(10);
+        pane.findChild<QPushButton *>("buttonOldInBottom")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(pane.isEnabled(), 5000);
+        dismiss.stop();
+        QCOMPARE(network->salesReports.size(), failRetry || cancelRetry ? 28 : 40);
+        QCOMPARE(pane.m_storeModel->rows().first().asin,
+                 failRetry || cancelRetry ? QString("OLD") : QString("NEW"));
+        QCOMPARE(pane.m_sales.total({}).complete, !failRetry && !cancelRetry);
+        if (failRetry) QVERIFY(explanation.contains("still incomplete"));
+        else QVERIFY(explanation.isEmpty());
+        if (!failRetry && !cancelRetry) {
+            pane.findChild<QPushButton *>("buttonOldInBottom")->click();
+            QCOMPARE(network->salesReports.size(), 40); // complete cache is reused
+            roundTrip(pane);
+            selectNode(pane, category("Pumps"));
+            QCOMPARE(pane.m_storeModel->rows().first().asin, QString("NEW"));
+        }
+        for (auto *widget : QApplication::topLevelWidgets())
+            if (auto *dialog = qobject_cast<QDialog *>(widget)) dialog->close();
     }
 
     void oldInBottomMovesOldDeadProductsToBottom()

@@ -100,7 +100,8 @@ PaneStore::PaneStore(QWidget *parent)
     // Right bottom: ASIN table (manual order, no column-click sort)
     m_storeModel = new TableStoreAsin(this);
     ui->tableViewAsins->setModel(m_storeModel);
-    ui->tableViewAsins->horizontalHeader()->setStretchLastSection(true);
+    ui->tableViewAsins->horizontalHeader()->setStretchLastSection(false);
+    ui->tableViewAsins->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     ui->tableViewAsins->verticalHeader()->hide();
     ui->tableViewAsins->setSelectionBehavior(QAbstractItemView::SelectRows);
     // Only the ASIN column is flagged Qt::ItemIsEditable (see TableStoreAsin::flags),
@@ -1716,11 +1717,15 @@ void PaneStore::_buildTable(const QStringList &asins)
 
     m_storeModel->setRows(finalRows);
 
-    ui->tableViewAsins->resizeColumnsToContents();
-    ui->tableViewAsins->horizontalHeader()->setStretchLastSection(false);
-    ui->tableViewAsins->setColumnWidth(TableStoreAsin::ColImage, 58);
-    ui->tableViewAsins->horizontalHeader()->setSectionResizeMode(
-        TableStoreAsin::ColTitle, QHeaderView::Stretch);
+    // Size once when products first appear; subsequent rebuilds keep the widths
+    // chosen by dragging or double-clicking the column header boundaries.
+    if (!m_tableColumnsInitialized && !finalRows.isEmpty()) {
+        ui->tableViewAsins->resizeColumnsToContents();
+        ui->tableViewAsins->setColumnWidth(TableStoreAsin::ColImage, 58);
+        ui->tableViewAsins->setColumnWidth(TableStoreAsin::ColTitle,
+            qBound(240, ui->tableViewAsins->columnWidth(TableStoreAsin::ColTitle), 600));
+        m_tableColumnsInitialized = true;
+    }
 
     // Kick off async image loading for ASINs without cached images
     QStringList needImages;
@@ -2073,8 +2078,28 @@ void PaneStore::_sortByCachedSales()
 
 void PaneStore::_onOldInBottom()
 {
+    if (m_storeModel->rowCount() == 0) return;
+    m_salesTask = _moveOldProductsAfterSales();
+}
+
+QCoro::Task<void> PaneStore::_moveOldProductsAfterSales()
+{
+    const QPointer<PaneStore> self(this);
+    const QDir directory = m_workingDir;
+    const QStringList path = _currentNodePath();
+    co_await _refreshSales(false);
+    if (!self || m_workingDir != directory || _currentNodePath() != path
+        || (m_salesCancelled && *m_salesCancelled)) co_return;
+    if (!m_sales.total({}).complete) {
+        QMessageBox::information(this, tr("Old in bottom"),
+            tr("The order has not been changed because sales totals are still incomplete.\n\n"
+               "A value of 0* does not confirm zero sales. Complete the missing sales periods "
+               "and try again to move older products with no sales and no inventory to the bottom."));
+        co_return;
+    }
+
     QList<TableStoreAsin::Row> rows = m_storeModel->rows();
-    if (rows.isEmpty()) return;
+    if (rows.isEmpty()) co_return;
 
     const QDate twoYearsAgo = QDate::currentDate().addYears(-2);
     auto isOldDead = [&](const TableStoreAsin::Row &r) {

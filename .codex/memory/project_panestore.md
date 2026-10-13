@@ -13,6 +13,10 @@ PaneStore saves its retrieved Amazon catalog data in the subfolder `stores/` und
 
 **How to apply:** When working on PaneStore or any code that writes store data, files go to `{workingDir}/stores/{marketplaceId}.json` (e.g. `stores/A1PA6795UKMFR9.json` for EU Germany). The marketplace ID used as filename comes from QSettings key `store/marketplaceId`, defaulting to `A1PA6795UKMFR9`.
 
+## 2026-10-13 — Resizable product-table columns
+
+- All product-table columns use interactive header resizing, including Title (previously forced to Stretch). Initial widths are fitted once when nonempty data first appears, with a 58-pixel image column and title width bounded to 240–600 pixels. Category changes and table refreshes retain user-adjusted widths for the lifetime of the pane; widths are not saved across application restarts. Header boundary double-click remains available to fit a column to its contents.
+
 ## 2026-10-11 — Discover US, Canada, and Japan; merge by ASIN
 
 - Previously Retrieve discovered only the primary marketplace (Germany by default); country selection did not change discovery. Retrieve now requests separate merchant listings reports for the primary marketplace plus US, CA, and JP, removing repeated marketplace IDs. Regions lacking client credentials, refresh token, or seller ID are skipped with a warning.
@@ -20,6 +24,12 @@ PaneStore saves its retrieved Amazon catalog data in the subfolder `stores/` und
 - The existing primary-marketplace JSON remains the combined cache; placements, archived deletions, and saved orders retain their formats. Failed/skipped reports retain absent cached items and cached availability; a wholly empty retrieval leaves the saved catalog intact. Complete retrieval still replaces the discovered catalog and filters variation parents and deleted originals.
 - Fixed the Listings summaries loop returning early on the primary summary: it now collects all returned marketplace IDs while selecting the primary summary's metadata.
 - Offline `StoreTests` HTTP fixtures cover report/endpoint routing, CA-only ASIN `B0DCZLPXTY`, US/JP-only products, duplicate ASINs with different regional SKUs, repeat retrieval, stock not being summed, category overrides/order/deletion persistence, metadata fallback, missing credentials, failed reports, and later marketplace summaries. No live Amazon requests are needed.
+
+### 2026-10-13 — Boot variants split into multiple rows (diagnosed, not fixed)
+
+- Local catalog inspection of the reported denim boots found distinct child ASINs with SKUs such as `CJBHNSNS18837-Light Blue-43-NARROW`, `...-39-NARROW`, and `...-35-NARROW`. `TreeBrandCategories::colorGroupKey` derives families from SKU suffixes rather than parent relationships; it recognizes a final size token but not a final NARROW/WIDE token, so the embedded sizes remain in the family key and each gets its own row.
+- Exact catalog colors also differ (`Blue`, `Denim blue`, `Light Blue Denim`), splitting otherwise related rows. Some black boot records share the blue boot thumbnail URL, so image similarity alone is not reliable evidence of identical variants. Cross-market ASIN deduplication does not merge distinct child ASINs into a family.
+- Remove archives the selected row's visible group ASINs; Retrieve filters these archived originals in `_applyItems`. New/different ASINs under the same parent are not blocked, because deletion is by ASIN, not parent. Deleting extra rows hides their variants and excludes their counts from the retained row; it does not consolidate groups. No grouping implementation change was made during this diagnosis.
 
 ## 2026-10-12 — Global sales ranking, independent of fulfillment stock
 
@@ -39,6 +49,23 @@ PaneStore saves its retrieved Amazon catalog data in the subfolder `stores/` und
 - Sort bypasses retrieval for complete snapshots up to 14 days old. After 14 days through 30 days, a Yes/No dialog offers a refresh: No sorts cached totals, Yes forces a new rolling snapshot. After 30 days, retrieval runs automatically. Missing/incomplete data still triggers retrieval. This policy applies to global annual sales; the separate stock/90-day-demand cache retains its 24-hour lifetime. The offline progress regression checks partial failure at 13/26, reloading and resuming at 13/26, and completion at 26/26 without refetching successful periods. Five offline age-policy cases exercise recent-cache reuse, accepting/declining the two-week prompt, declining near 30 days, and automatic refresh beyond 30 days.
 
 - Follow-up validation: Release and the desktop Debug executable rebuilt successfully; `StoreTests` passed offscreen including the progress and cache-age scenarios (4.46 seconds). No live Amazon requests were made.
+
+### Follow-up — apparent refresh after moving a category
+
+- Read-only inspection on 2026-10-12 found the user's current sales snapshot had 26/39 valid saved periods: all 13 North American and all 13 Japanese periods, but zero of 13 European periods. Sort therefore retries the missing EU periods even though the snapshot is recent. The cache does not persist the previous error, so it does not establish why EU retrieval failed. Moving products only saves catalog/category state and does not invalidate the sales cache.
+- The running desktop process still held the replaced Debug executable from before the progress-bar update; the newer executable was already on disk. Restart is needed to see the progress bar and country names. The old dialog's `1/39` label counts traversal from the first missing EU period and does not mean the 26 saved periods were discarded.
+
+### 2026-10-13 — Turkish sales-channel row blocked European periods
+
+- User-supplied logs resolved the previously unknown EU failure: report generation/download succeeded, but `parseSalesReport` rejected `amazon.com.tr` because Turkey is outside the app's marketplace registry. One such row discarded the whole EU period, and the region loop stopped, leaving progress at 26/39.
+- Parser now builds its channel lookup from the requested marketplace IDs and ignores other channels, including unconfigured Amazon storefronts and MCF. Unsupported *requested* IDs still fail explicitly; malformed rows for requested storefronts still fail. This does not add Turkey to the configured marketplaces or include Turkish sales in totals.
+- An offline parser regression reproduced the exact Turkish-channel error before the fix. The report/cache progress regression now uses three regions: 26/39 after EU failure, then 39/39 after retrying only 13 EU periods, with Turkish rows in the fixture excluded and saved CA/JP counts retained without duplication. No live Amazon requests or cache edits were made.
+
+### 2026-10-13 — Old in bottom resolves incomplete sales first
+
+- With every annual total incomplete (`0*`), the old button's `salesComplete && salesYear == 0` predicate left old rows in place ahead of recent/stocked rows. It was a stable partition, not date sorting; it did not actively move the recent rows downward.
+- The button now retains an async task that awaits the same sales refresh/cache policy before applying the existing age/sales/inventory partition. Failure leaves ordering unchanged with an explicit explanation that `0*` is not confirmed zero. Cancellation, pane destruction, and category/working-directory changes abort the subsequent reorder. The stock predicate and relative order within each partition are unchanged.
+- Offline coverage starts at 26/39 saved periods with an old zero-sale row above a recent stocked row, then checks missing-EU-only retry and correct/persisted ordering, cache reuse, failure messaging, and cancellation. Existing complete-cache partition coverage remains.
 
 ## 2026-09-23 — Multiple category placements feasibility (not implemented)
 

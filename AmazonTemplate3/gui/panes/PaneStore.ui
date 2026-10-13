@@ -259,7 +259,7 @@
          <item>
           <widget class="QPushButton" name="buttonOldInBottom">
            <property name="toolTip">
-            <string>Move older products (&gt; 2 years old) with no sales and no inventory to the bottom, preserving the relative order of all other products</string>
+            <string>Retrieve missing sales if needed, then move older products (&gt; 2 years old) with confirmed zero sales and no inventory to the bottom, preserving the relative order of all other products</string>
            </property>
            <property name="text">
             <string>Old in bottom</string>
