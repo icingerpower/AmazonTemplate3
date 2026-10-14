@@ -17,6 +17,20 @@ PaneStore saves its retrieved Amazon catalog data in the subfolder `stores/` und
 
 - All product-table columns use interactive header resizing, including Title (previously forced to Stretch). Initial widths are fitted once when nonempty data first appears, with a 58-pixel image column and title width bounded to 240–600 pixels. Category changes and table refreshes retain user-adjusted widths for the lifetime of the pane; widths are not saved across application restarts. Header boundary double-click remains available to fit a column to its contents.
 
+## 2026-10-13 — Selected rows count display in product table
+
+- Added `labelSelectedRows` (`QLabel`) in `horizontalLayout_2` beside `buttonExportCountry` and before `horizontalSpacer_2`.
+- When products are selected in `tableViewAsins`, the label displays the number of rows selected via `tr("%n row(s) selected", "", count)`. When no rows are selected, the label is cleared (`""`).
+- `_updateTableActions()` updates the label on table selection changes, model resets (category switches, moves, removals), and export progress states.
+
+## 2026-10-13 — Export country text files
+
+- `Export country` sits beside Export and offers registered marketplaces labeled with country code/name and Amazon storefront (e.g. US / Amazon.com). The last choice is remembered under `store/exportCountry` in working-directory settings, initially US.
+- User explicitly requested exact selected representative ASINs in visible table order (no availability filtering, substitution, or size-group expansion), and category translation plus description. Shared export logic uses only the chosen country's language label and writes `ASINS_US.txt`, `ASINS_CA.txt`, etc. into the same brand/category destination as normal Export. Other country files and `ASINS.txt` remain unchanged; rerunning the same country replaces its file.
+- Country export skips all image requirements/copying but retains the English category name, selected CLI, export-folder and >60-products checks. The CLI generates category text; C++ appends the exact ASIN line. Both export buttons remain disabled during generation even when selection changes, and ASIN file-write failures are reported.
+- Offline UI regression covers country picking/cancel, separate US/JP files with different selections, preserved Unicode category text and descriptions, exact table order, no size expansion/country filtering, export without images, and preserving the general export. Existing full export tests exercise the shared path.
+- Validation: Release and the configured desktop Debug executable built successfully; `StoreTests` passed offscreen (4.21 seconds). No real translation or export to the user's product folders was performed.
+
 ## 2026-10-11 — Discover US, Canada, and Japan; merge by ASIN
 
 - Previously Retrieve discovered only the primary marketplace (Germany by default); country selection did not change discovery. Retrieve now requests separate merchant listings reports for the primary marketplace plus US, CA, and JP, removing repeated marketplace IDs. Regions lacking client credentials, refresh token, or seller ID are skipped with a warning.

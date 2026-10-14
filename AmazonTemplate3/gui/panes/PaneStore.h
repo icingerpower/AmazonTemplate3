@@ -48,6 +48,7 @@ private:
     QStandardItemModel     *m_countriesModel = nullptr;
     TableStoreAsin         *m_storeModel     = nullptr;
     bool                    m_tableColumnsInitialized = false;
+    bool                    m_exportInProgress = false;
 
     QList<AbstractCli *>    m_availableClis;
 
@@ -166,6 +167,8 @@ private:
     QStringList _configuredLanguageLabels();
 
     void _onExportProducts();
+    void _onExportCountry();
+    void _exportProducts(const QString &countryCode = {});
 };
 
 #endif // PANESTORE_H

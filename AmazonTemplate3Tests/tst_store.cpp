@@ -7,10 +7,13 @@
 #include <QApplication>
 #include <QBrush>
 #include <QClipboard>
+#include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QInputDialog>
+#include <QLabel>
 #include <QMessageBox>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -144,6 +147,7 @@ class StoreExportCli : public AbstractCli
 {
 public:
     mutable QString prompt;
+    QString outputPath, outputText;
     QString getName() const override { return "Offline export stub"; }
     QString getDescription() const override { return {}; }
     bool canGenSvg() const override { return false; }
@@ -152,7 +156,14 @@ public:
     bool canGenVideoFromImages() const override { return false; }
     QString getExecutable() const override { return "/usr/bin/true"; }
     QStringList promptArgs() const override { return {}; }
-    QString preparePrompt(const QString &value) const override { prompt = value; return value; }
+    QString preparePrompt(const QString &value) const override {
+        prompt = value;
+        if (!outputPath.isEmpty()) {
+            QFile file(outputPath);
+            if (file.open(QIODevice::WriteOnly)) file.write(outputText.toUtf8());
+        }
+        return value;
+    }
 };
 
 class StoreTests : public QObject
@@ -1435,6 +1446,173 @@ private slots:
         QCOMPARE(items.size(), 1);
         QCOMPARE(items.first().asin, "B38");
     }
+    void countryExportKeepsSelectionsAndSeparateTextFiles()
+    {
+        StoreExportCli cli;
+        PaneStore pane;
+        setup(pane);
+        pane.setAvailableClis({&cli});
+        auto names = pane.m_treeModel->englishNames();
+        names[category("Pumps").join('\x1f')] = "Pumps";
+        pane.m_treeModel->setEnglishNames(names);
+        const auto items = pane.m_items;
+        pane._applyItems(items);
+        selectNode(pane, category("Pumps"));
+        QDir dir(m_dir->path());
+        const QString outputDir = dir.filePath("exports/Brand/Pumps");
+        QVERIFY(dir.mkpath("exports/Brand/Pumps"));
+        QFile generic(outputDir + "/ASINS.txt");
+        QVERIFY(generic.open(QIODevice::WriteOnly));
+        generic.write("existing general export");
+        generic.close();
+        pane.findChild<QLineEdit *>("lineEditExportFolder")->setText(dir.filePath("exports"));
+        auto *table = pane.findChild<QTableView *>("tableViewAsins");
+        auto *button = pane.findChild<QPushButton *>("buttonExportCountry");
+        QVERIFY(button);
+        QVERIFY(!button->isEnabled());
+        QCOMPARE(pane.m_storeModel->rowCount(), 2);
+
+        auto runExport = [&](const QString &code, bool cancel) {
+            bool picked = false, finished = false, success = false;
+            QString message;
+            QTimer dialogs;
+            connect(&dialogs, &QTimer::timeout, this, [&] {
+                if (auto *picker = qobject_cast<QInputDialog *>(QApplication::activeModalWidget())) {
+                    picked = true;
+                    if (cancel) { picker->reject(); return; }
+                    auto *combo = picker->findChild<QComboBox *>();
+                    if (!combo) { picker->reject(); return; }
+                    for (int i = 0; i < combo->count(); ++i) {
+                        if (combo->itemText(i).startsWith(code + " —")) {
+                            combo->setCurrentIndex(i);
+                            picker->accept();
+                            return;
+                        }
+                    }
+                    picker->reject();
+                } else if (auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+                    success = box->icon() == QMessageBox::Information;
+                    message = box->text();
+                    finished = true;
+                    box->accept();
+                }
+            });
+            dialogs.start(10);
+            button->click();
+            QVERIFY(picked);
+            if (!cancel) {
+                // Selection changes must not enable overlapping exports while the CLI runs.
+                pane._updateTableActions();
+                if (pane.m_exportInProgress) {
+                    QVERIFY(!button->isEnabled());
+                    QVERIFY(!pane.findChild<QPushButton *>("buttonExportProducts")->isEnabled());
+                }
+                QTRY_VERIFY_WITH_TIMEOUT(finished, 3000);
+                QVERIFY2(success, qPrintable(message));
+            }
+            dialogs.stop();
+        };
+
+        // Reverse the visible order, then select in reverse click order. Export
+        // must follow the table, without expanding sizes or filtering countries.
+        auto rows = pane.m_storeModel->rows();
+        std::reverse(rows.begin(), rows.end());
+        pane.m_storeModel->setRows(rows);
+        for (int i = rows.size() - 1; i >= 0; --i)
+            table->selectionModel()->select(pane.m_storeModel->index(i, 0),
+                                           QItemSelectionModel::Select | QItemSelectionModel::Rows);
+        QStringList expected;
+        for (const auto &row : rows) expected.append(row.asin);
+        cli.outputPath = outputDir + "/ASINS_US.txt";
+        cli.outputText = "EN (US)\nPumps\nExplore pumps in several colors.\n\n";
+        runExport("US", false); // No generated images or country availability metadata needed.
+        QFile us(cli.outputPath);
+        QVERIFY(us.open(QIODevice::ReadOnly));
+        const QByteArray usBytes = us.readAll();
+        QCOMPARE(QString::fromUtf8(usBytes), cli.outputText + expected.join(',') + "\n\n\n");
+        QVERIFY(cli.prompt.contains("Entries, in order: EN (US)."));
+        us.close();
+
+        // Another country uses another selection and its own language/file.
+        table->selectRow(1);
+        cli.outputPath = outputDir + "/ASINS_JP.txt";
+        cli.outputText = QString::fromUtf8("JA (JP)\nパンプス\nパンプスをご覧ください。\n\n");
+        runExport("JP", false);
+        QFile jp(cli.outputPath);
+        QVERIFY(jp.open(QIODevice::ReadOnly));
+        QCOMPARE(QString::fromUtf8(jp.readAll()), cli.outputText + rows[1].asin + "\n\n\n");
+        QVERIFY(cli.prompt.contains("Entries, in order: JA (JP)."));
+        QVERIFY(us.open(QIODevice::ReadOnly));
+        QCOMPARE(us.readAll(), usBytes);
+        QVERIFY(generic.open(QIODevice::ReadOnly));
+        QCOMPARE(generic.readAll(), QByteArray("existing general export"));
+        const QString previousPrompt = cli.prompt;
+        runExport("CA", true);
+        QCOMPARE(cli.prompt, previousPrompt);
+        QVERIFY(!QFile::exists(outputDir + "/ASINS_CA.txt"));
+        QCOMPARE(QDir(outputDir).entryList(QDir::Files), (QStringList{"ASINS.txt", "ASINS_JP.txt", "ASINS_US.txt"}));
+    }
+
+    void selectedRowsLabelUpdatesWithTableSelection()
+    {
+        PaneStore pane;
+        setup(pane);
+        selectNode(pane, category("Pumps"));
+
+        auto *table = pane.findChild<QTableView *>("tableViewAsins");
+        auto *label = pane.findChild<QLabel *>("labelSelectedRows");
+        auto *btnExport = pane.findChild<QPushButton *>("buttonExportProducts");
+        auto *btnCountry = pane.findChild<QPushButton *>("buttonExportCountry");
+        auto *btnMove = pane.findChild<QPushButton *>("buttonMoveProducts");
+
+        QVERIFY(table);
+        QVERIFY(label);
+        QVERIFY(btnExport);
+        QVERIFY(btnCountry);
+        QVERIFY(btnMove);
+
+        // Initially no selection
+        QVERIFY(label->text().isEmpty());
+        QVERIFY(!btnExport->isEnabled());
+        QVERIFY(!btnCountry->isEnabled());
+        QVERIFY(!btnMove->isEnabled());
+        QCOMPARE(pane.m_storeModel->rowCount(), 2);
+
+        // Select first row
+        table->selectRow(0);
+        QCOMPARE(label->text(), QObject::tr("%n row(s) selected", "", 1));
+        QVERIFY(btnExport->isEnabled());
+        QVERIFY(btnCountry->isEnabled());
+        QVERIFY(btnMove->isEnabled());
+
+        // Multi-select both rows
+        table->selectionModel()->select(pane.m_storeModel->index(1, 0),
+                                       QItemSelectionModel::Select | QItemSelectionModel::Rows);
+        QCOMPARE(label->text(), QObject::tr("%n row(s) selected", "", 2));
+
+        // Clear selection
+        table->clearSelection();
+        QVERIFY(label->text().isEmpty());
+        QVERIFY(!btnExport->isEnabled());
+        QVERIFY(!btnCountry->isEnabled());
+        QVERIFY(!btnMove->isEnabled());
+
+        // Select all
+        table->selectAll();
+        QCOMPARE(label->text(), QObject::tr("%n row(s) selected", "", 2));
+
+        // Switch to another category clears selection and label
+        selectNode(pane, category("Low heels"));
+        QVERIFY(label->text().isEmpty());
+
+        // Switch back and test moving row retains selection count
+        selectNode(pane, category("Pumps"));
+        table->selectRow(1);
+        QCOMPARE(label->text(), QObject::tr("%n row(s) selected", "", 1));
+        pane._onMoveUp();
+        QCOMPARE(label->text(), QObject::tr("%n row(s) selected", "", 1));
+    }
+
     void duplicateExportUsesCategoryAndUniqueAsins()
     {
         StoreExportCli cli;
