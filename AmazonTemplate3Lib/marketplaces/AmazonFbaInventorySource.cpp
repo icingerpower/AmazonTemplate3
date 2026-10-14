@@ -181,8 +181,10 @@ QCoro::Task<bool> AmazonFbaInventorySource::createFulfillmentOrder(FulfillmentRe
 QList<AbstractInventorySource *> AmazonFbaInventorySourceFactory::createInstances(QSettings *settings) const
 {
     QList<AbstractInventorySource *> out;
-    const QString clientId     = settings->value(QStringLiteral("AmazonApi/lwaClientId")).toString();
-    // Secrets come from the OS keychain (ini value passed only as legacy fallback).
+    // Credentials come from the OS keychain (ini value passed only as legacy fallback).
+    const QString clientId     = CredentialManager::lookup(QStringLiteral("AmazonTemplate3"),
+        QStringLiteral("AmazonApi/lwaClientId"),
+        settings->value(QStringLiteral("AmazonApi/lwaClientId")).toString());
     const QString clientSecret = CredentialManager::lookup(QStringLiteral("AmazonTemplate3"),
         QStringLiteral("AmazonApi/lwaClientSecret"),
         settings->value(QStringLiteral("AmazonApi/lwaClientSecret")).toString());

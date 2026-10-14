@@ -43,8 +43,8 @@ QList<AbstractSalesChannel *> AmazonSalesChannelFactory::createSalesChannels(QSe
         return CredentialManager::lookup(QStringLiteral("AmazonTemplate3"), key,
                                          settings->value(key).toString());
     };
-    const auto client = settings->value("AmazonApi/lwaClientId").toString();
-    const auto clientSecret = secret("AmazonApi/lwaClientSecret");
+    const auto client = secret(QStringLiteral("AmazonApi/lwaClientId"));
+    const auto clientSecret = secret(QStringLiteral("AmazonApi/lwaClientSecret"));
     QList<AbstractSalesChannel *> channels;
     if (client.isEmpty() || clientSecret.isEmpty())
         return channels;

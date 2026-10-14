@@ -4676,10 +4676,11 @@ QCoro::Task<void> PaneSizing::onTemuCreateOrUpdate()
 
     // Amazon pricing context — FR marketplace (EUR) to fetch the base price.
     DialogTemuCreateProduct::AmazonPricingCtx pricing;
-    pricing.clientId      = settings->value(SettingsTable::KEY_LWA_CLIENT_ID).toString();
-    pricing.secret        = settings->value(SettingsTable::KEY_LWA_CLIENT_SECRET).toString();
-    pricing.refreshTokenEu = settings->value(SettingsTable::KEY_EU_LWA_REFRESH_TOKEN).toString();
-    pricing.sellerIdEu    = settings->value(SettingsTable::KEY_EU_SELLER_ID).toString();
+    auto *st = SettingsTable::instance();
+    pricing.clientId      = st->value(SettingsTable::KEY_LWA_CLIENT_ID);
+    pricing.secret        = st->value(SettingsTable::KEY_LWA_CLIENT_SECRET);
+    pricing.refreshTokenEu = st->value(SettingsTable::KEY_EU_LWA_REFRESH_TOKEN);
+    pricing.sellerIdEu    = st->value(SettingsTable::KEY_EU_SELLER_ID);
     pricing.marketplaceId = QStringLiteral("A13V1IB3VIYZZH"); // Amazon France (EUR)
 
     AbstractCli *cli = ui->comboBoxCli->currentData().value<AbstractCli *>();
