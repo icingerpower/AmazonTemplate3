@@ -713,8 +713,31 @@ QString PaneSizing::_skuFromGlobalCache(const QString &asin) const
             continue;
         const QString sku = QJsonDocument::fromJson(f.readAll())
                                 .object().value(asin).toString().trimmed();
-        if (!sku.isEmpty() && sku != asin)
+        if (!sku.isEmpty() && sku != asin && !AmazonCatalogApi::isRefurbishedSku(sku))
             return sku;
+    }
+
+    const QDir storesRoot(m_workingDir.filePath(QStringLiteral("stores")));
+    const QStringList storeFiles = storesRoot.entryList(
+        {QStringLiteral("*.json")}, QDir::Files, QDir::Name);
+    for (const QString &sf : storeFiles) {
+        QFile f(storesRoot.filePath(sf));
+        if (!f.open(QIODevice::ReadOnly))
+            continue;
+        const QByteArray raw = f.readAll();
+        if (!raw.contains(asin.toUtf8()))
+            continue;
+        const QJsonDocument doc = QJsonDocument::fromJson(raw);
+        if (!doc.isArray())
+            continue;
+        for (const QJsonValue &v : doc.array()) {
+            const QJsonObject o = v.toObject();
+            if (o.value(QStringLiteral("asin")).toString().trimmed() == asin) {
+                const QString sku = o.value(QStringLiteral("sku")).toString().trimmed();
+                if (!sku.isEmpty() && sku != asin && !AmazonCatalogApi::isRefurbishedSku(sku))
+                    return sku;
+            }
+        }
     }
     return {};
 }
@@ -814,6 +837,9 @@ void PaneSizing::_loadProductSettings()
     _initAplusContent();
     _refreshSizeImageUploadStatus();
     _updateTemuCreatedLabel();
+    if (m_brokenChildTable && m_brokenChildTable->rowCount() == 0)
+        m_brokenChildTable->loadFromDir(m_productWorkingDir);
+    _updateBrokenChildLabel();
 
     QSettings s(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
                  QSettings::IniFormat);
@@ -926,6 +952,11 @@ void PaneSizing::_ensureModel(const QDir &dir)
         ui->tableViewBrokenChild->horizontalHeader()->setStretchLastSection(true);
         ui->tableViewBrokenChild->verticalHeader()->hide();
         _refreshBrokenAttrCombo();
+
+        connect(m_brokenChildTable, &QAbstractItemModel::modelReset,
+                this, &PaneSizing::_updateBrokenChildLabel);
+        connect(m_brokenChildTable, &QAbstractItemModel::dataChanged,
+                this, [this]() { _updateBrokenChildLabel(); });
     }
 
     if (!m_searchTermsTable) {
@@ -999,8 +1030,11 @@ void PaneSizing::_ensureModel(const QDir &dir)
                 m_productWorkingDir = QDir{};
                 m_shoeWidths.clear();
                 ui->lineEditSubWorkingDir->clear();
+                if (m_brokenChildTable)
+                    m_brokenChildTable->clear();
                 _refreshSizeImageUploadStatus();
                 _updateTemuCreatedLabel();
+                _updateBrokenChildLabel();
                 m_aplusContent.reset();
                 if (m_aplusModel) {
                     ui->aplusTreeView->setModel(nullptr);
@@ -9184,12 +9218,21 @@ QCoro::Task<void> PaneSizing::_loadBrokenChildData(bool forceRefresh)
         }
     }
 
-    // 2. If any child SKU is still missing, run the listing reports to fill the gaps.
-    // We check ALL marketplaces currently in the country list.
+    // 2. If any child SKU is still missing, check offline caches (sku_cache_*.json + stores/*.json)
+    //    and then run the listing reports to fill any remaining gaps.
     {
         QStringList missingAsins;
-        for (const auto &row : m_brokenChildTable->rows())
-            if (asinToSku.value(row.asin).isEmpty()) missingAsins << row.asin;
+        for (const auto &row : m_brokenChildTable->rows()) {
+            if (asinToSku.value(row.asin).isEmpty()) {
+                const QString cached = _skuFromGlobalCache(row.asin);
+                if (!cached.isEmpty()) {
+                    asinToSku.insert(row.asin, cached);
+                    qDebug() << "PaneSizing: ASIN" << row.asin << "resolved from offline global/store cache:" << cached;
+                } else {
+                    missingAsins << row.asin;
+                }
+            }
+        }
 
         if (!missingAsins.isEmpty() && m_api) {
             // Collect all available marketplace IDs
@@ -9284,6 +9327,14 @@ QCoro::Task<void> PaneSizing::_loadBrokenChildData(bool forceRefresh)
 // ---------------------------------------------------------------------------
 // Broken-child fix workflow
 // ---------------------------------------------------------------------------
+
+void PaneSizing::_updateBrokenChildLabel()
+{
+    const QStringList broken = m_brokenChildTable
+        ? m_brokenChildTable->brokenMarketplaceCodes()
+        : QStringList{};
+    ui->labelBrokenChildCountries->setText(broken.join(QStringLiteral(" / ")));
+}
 
 void PaneSizing::_refreshBrokenAttrCombo()
 {
@@ -9596,12 +9647,15 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
     const QString langTag     = langTagForMarketplace(mpId);
 
     // Composite size attribute (nested {size, size_system, size_class, …}):
-    // apparel_size (clothing) or shapewear_size (swimwear/shapewear).
+    // apparel_size (clothing), shapewear_size (swimwear/shapewear), or footwear_size (shoes).
     QString compositeSizeAttr;
     if (ptProps.contains(QStringLiteral("apparel_size")))        compositeSizeAttr = QStringLiteral("apparel_size");
     else if (ptProps.contains(QStringLiteral("shapewear_size"))) compositeSizeAttr = QStringLiteral("shapewear_size");
+    else if (ptProps.contains(QStringLiteral("footwear_size")))  compositeSizeAttr = QStringLiteral("footwear_size");
     const bool hasComposite = !compositeSizeAttr.isEmpty();
-    const bool isApparelComposite = compositeSizeAttr == QStringLiteral("apparel_size");
+    const bool isApparelComposite   = compositeSizeAttr == QStringLiteral("apparel_size");
+    const bool isShapewearComposite = compositeSizeAttr == QStringLiteral("shapewear_size");
+    const bool isFootwearComposite  = compositeSizeAttr == QStringLiteral("footwear_size");
 
     // Simple size attribute (free text {value, language_tag}) when there's no
     // composite: `size` → `size_name` → a single other *size* candidate.
@@ -9610,7 +9664,8 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
         QStringLiteral("size_map"), QStringLiteral("size_chart_node_id"),
         QStringLiteral("item_display_size"), QStringLiteral("size_class"),
         QStringLiteral("size_system"), QStringLiteral("apparel_size"),
-        QStringLiteral("shapewear_size"), QStringLiteral("fit_to_size_sentiment"),
+        QStringLiteral("shapewear_size"), QStringLiteral("footwear_size"),
+        QStringLiteral("fit_to_size_sentiment"),
     };
     QString simpleSizeAttr;
     QStringList sizeCandidates;
@@ -9641,6 +9696,7 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
     // composite stored on this marketplace (never borrowed from another region).
     QHash<QString, QJsonObject> localBySku;
     QString refSizeSystem, refSizeClass;
+    QJsonObject refCompositeObj;
     QJsonObject parentLocalSizeObj;
     for (const VariationTemplateEntry &e : tplEntries) {
         if (e.sku.isEmpty()) continue;
@@ -9652,11 +9708,14 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
         if (sizeArr.isEmpty()) continue;
         const QJsonObject o = sizeArr.first().toObject();
         if (e.isParent) { parentLocalSizeObj = o; continue; } // children preferred
+        if (refCompositeObj.isEmpty()) refCompositeObj = o;
         if (refSizeSystem.isEmpty() && o.contains(QStringLiteral("size_system")))
             refSizeSystem = o.value(QStringLiteral("size_system")).toString();
         if (refSizeClass.isEmpty() && o.contains(QStringLiteral("size_class")))
             refSizeClass = o.value(QStringLiteral("size_class")).toString();
     }
+    if (refCompositeObj.isEmpty() && !parentLocalSizeObj.isEmpty())
+        refCompositeObj = parentLocalSizeObj;
     if (refSizeSystem.isEmpty() && parentLocalSizeObj.contains(QStringLiteral("size_system")))
         refSizeSystem = parentLocalSizeObj.value(QStringLiteral("size_system")).toString();
     if (refSizeClass.isEmpty() && parentLocalSizeObj.contains(QStringLiteral("size_class")))
@@ -9832,21 +9891,173 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
                 QStringLiteral("country_of_origin"),
                 QStringLiteral("condition_type"),
             };
-            // Language-tagged attributes must NEVER come from another marketplace's
-            // listing (its language_tag would be wrong → 100720). For those, use the
-            // parent's own local value only; the rest may use the cross-marketplace
-            // fallback (marketplace_id swapped).
+            // Language-tagged attributes must NEVER carry another marketplace's
+            // language_tag (→ 100720). When the parent SKU is missing on THIS
+            // marketplace (`localAttrs` empty), fall back to a child listing that
+            // ALREADY exists on THIS marketplace (`localBySku`) — its text and
+            // browse nodes are already localized for `mpId`/`langTag`.
             static const QSet<QString> kLangTagged{
                 QStringLiteral("brand"), QStringLiteral("item_name"),
                 QStringLiteral("product_description"), QStringLiteral("bullet_point"),
                 QStringLiteral("department"),
             };
+            auto filterToTargetLang = [&](const QJsonArray &arr, bool allowAnyLangFallback) -> QJsonArray {
+                QJsonArray out;
+                for (const QJsonValue &jv : arr) {
+                    QJsonObject o = jv.toObject();
+                    const QString lt = o.value(QStringLiteral("language_tag")).toString();
+                    if (lt.isEmpty() || lt == langTag) {
+                        o.insert(QStringLiteral("language_tag"),   langTag);
+                        o.insert(QStringLiteral("marketplace_id"), mpId);
+                        out.append(o);
+                    }
+                }
+                if (out.isEmpty() && allowAnyLangFallback && !arr.isEmpty()) {
+                    QJsonObject o = arr.first().toObject();
+                    o.insert(QStringLiteral("language_tag"),   langTag);
+                    o.insert(QStringLiteral("marketplace_id"), mpId);
+                    out.append(o);
+                }
+                return out;
+            };
+            auto cleanCommonTitlePrefix = [](const QString &a, const QString &b) -> QString {
+                if (a == b) return a;
+                const int n = qMin(a.size(), b.size());
+                int i = 0;
+                int lastWordEnd = 0;
+                while (i < n && a.at(i) == b.at(i)) {
+                    if (a.at(i).isSpace() || a.at(i) == QLatin1Char(',')
+                            || a.at(i) == QLatin1Char('-') || a.at(i) == QChar(0x2013)
+                            || a.at(i) == QChar(0x2014) || a.at(i) == QLatin1Char('(')) {
+                        lastWordEnd = i;
+                    }
+                    ++i;
+                }
+                QString prefix = (i == n ? a.left(n) : a.left(lastWordEnd > 0 ? lastWordEnd : i)).trimmed();
+                while (!prefix.isEmpty()) {
+                    const QChar c = prefix.back();
+                    if (c.isSpace() || c == QLatin1Char('-') || c == QChar(0x2013)
+                            || c == QChar(0x2014) || c == QLatin1Char(',')
+                            || c == QLatin1Char('/') || c == QLatin1Char(':')
+                            || c == QLatin1Char('(')) {
+                        prefix.chop(1);
+                    } else {
+                        break;
+                    }
+                }
+                return prefix.size() >= 15 ? prefix : a;
+            };
+
+            QStringList parentAttrSources;
+            QStringList missingParentAttrs;
             for (const QString &k : kParentCopyKeys) {
                 if (!ptProps.contains(k)) continue; // not defined by this schema
-                const QJsonValue v = kLangTagged.contains(k)
-                    ? (localAttrs.contains(k) ? localAttrs.value(k) : QJsonValue())
-                    : rawOr(k, parentAttrsFallback);
-                if (usable(v)) addPatch(k, v);
+                QJsonValue v;
+                QString srcLabel;
+                if (kLangTagged.contains(k)) {
+                    if (localAttrs.contains(k)) {
+                        const QJsonArray filtered = filterToTargetLang(
+                            localAttrs.value(k).toArray(), k == QLatin1String("brand"));
+                        if (!filtered.isEmpty()) {
+                            v = filtered;
+                            srcLabel = QStringLiteral("own-local");
+                        }
+                    }
+                    if (!usable(v) && k == QLatin1String("item_name")) {
+                        // Derive localized parent title from local children on this marketplace,
+                        // stripping any trailing per-child size suffix via common prefix.
+                        QStringList childTitles;
+                        QString firstChildSku;
+                        for (const VariationTemplateEntry &ce : tplEntries) {
+                            if (ce.isParent || ce.sku.isEmpty()) continue;
+                            const QJsonArray arr = filterToTargetLang(
+                                localBySku.value(ce.sku).value(k).toArray(), false);
+                            if (!arr.isEmpty()) {
+                                const QString t = arr.first().toObject().value(QStringLiteral("value")).toString().trimmed();
+                                if (!t.isEmpty()) {
+                                    if (firstChildSku.isEmpty()) firstChildSku = ce.sku;
+                                    childTitles << t;
+                                }
+                            }
+                        }
+                        if (!childTitles.isEmpty()) {
+                            QString title = childTitles.first();
+                            for (int ti = 1; ti < childTitles.size(); ++ti)
+                                title = cleanCommonTitlePrefix(title, childTitles.at(ti));
+                            v = QJsonArray{QJsonObject{
+                                {QStringLiteral("value"),          title},
+                                {QStringLiteral("language_tag"),   langTag},
+                                {QStringLiteral("marketplace_id"), mpId},
+                            }};
+                            srcLabel = QStringLiteral("child-local(%1)").arg(firstChildSku);
+                        }
+                    }
+                    if (!usable(v)) {
+                        for (const VariationTemplateEntry &ce : tplEntries) {
+                            if (ce.isParent || ce.sku.isEmpty()) continue;
+                            const QJsonArray arr = filterToTargetLang(
+                                localBySku.value(ce.sku).value(k).toArray(),
+                                k == QLatin1String("brand"));
+                            if (!arr.isEmpty()) {
+                                v = arr;
+                                srcLabel = QStringLiteral("child-local(%1)").arg(ce.sku);
+                                break;
+                            }
+                        }
+                    }
+                    // Brand is a proper noun (e.g. "Pradize") and language-invariant:
+                    // if neither parent nor children on this marketplace have it, fall back
+                    // to parentAttrsFallback with target language_tag & marketplace_id.
+                    if (!usable(v) && k == QLatin1String("brand") && parentAttrsFallback.contains(k)) {
+                        const QJsonArray arr = filterToTargetLang(
+                            parentAttrsFallback.value(k).toArray(), true);
+                        if (!arr.isEmpty()) {
+                            v = arr;
+                            srcLabel = QStringLiteral("fallback-brand");
+                        }
+                    }
+                } else {
+                    // Non-language-tagged (recommended_browse_nodes, country_of_origin,
+                    // condition_type): prefer parent's own local value -> a child on THIS
+                    // marketplace (so recommended_browse_nodes uses this country's browse
+                    // node ID, not another country's!) -> parentAttrsFallback.
+                    // Note: if the parent on this marketplace is an incomplete draft
+                    // (missing brand/item_name from an earlier partial run), its stored
+                    // recommended_browse_nodes may have been copied from another country
+                    // (e.g. DE's node on FR), so prefer the local child's browse node first.
+                    const bool parentIncomplete = localAttrs.isEmpty()
+                        || !localAttrs.contains(QStringLiteral("item_name"))
+                        || !localAttrs.contains(QStringLiteral("brand"));
+                    if (localAttrs.contains(k)
+                            && !(parentIncomplete && k == QLatin1String("recommended_browse_nodes"))) {
+                        v = localAttrs.value(k);
+                        srcLabel = QStringLiteral("own-local");
+                    } else {
+                        for (const VariationTemplateEntry &ce : tplEntries) {
+                            if (ce.isParent || ce.sku.isEmpty()) continue;
+                            const QJsonObject cla = localBySku.value(ce.sku);
+                            if (cla.contains(k) && !cla.value(k).toArray().isEmpty()) {
+                                v = swapMarketplaceIdRec(cla.value(k), mpId);
+                                srcLabel = QStringLiteral("child-local(%1)").arg(ce.sku);
+                                break;
+                            }
+                        }
+                        if (!usable(v) && localAttrs.contains(k)) {
+                            v = localAttrs.value(k);
+                            srcLabel = QStringLiteral("own-local");
+                        }
+                        if (!usable(v) && parentAttrsFallback.contains(k)) {
+                            v = swapMarketplaceIdRec(parentAttrsFallback.value(k), mpId);
+                            srcLabel = QStringLiteral("fallback");
+                        }
+                    }
+                }
+                if (usable(v)) {
+                    addPatch(k, v);
+                    parentAttrSources << QStringLiteral("%1[%2]").arg(k, srcLabel);
+                } else {
+                    missingParentAttrs << k;
+                }
             }
             // NOTE: a delete op ({"op":"delete"}) is NOT supported by JSON_LISTINGS_FEED
             // (Amazon returns "Invalid empty value provided in patch"), so a corrupted
@@ -9896,11 +10107,108 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
                                      QStringLiteral("age_range_description")}) {
                 if (!ptProps.contains(k)) continue;
                 QString v = englishScalar(localAttrs, k);
+                if (v.isEmpty()) {
+                    for (const VariationTemplateEntry &ce : tplEntries) {
+                        if (ce.isParent || ce.sku.isEmpty()) continue;
+                        v = englishScalar(localBySku.value(ce.sku), k);
+                        if (!v.isEmpty()) break;
+                    }
+                }
                 if (v.isEmpty()) v = englishScalar(parentAttrsFallback, k);
                 if (v.isEmpty()) v = familyAttrFallback.value(k);
                 if (k == QLatin1String("age_range_description"))
                     v = canonicalAge(v);
-                if (!v.isEmpty()) addPatch(k, simpleVal(v));
+                if (!v.isEmpty()) {
+                    addPatch(k, simpleVal(v));
+                    parentAttrSources << QStringLiteral("%1=%2").arg(k, v);
+                }
+            }
+
+            const bool parentIsIncomplete = localAttrs.isEmpty()
+                || !localAttrs.contains(QStringLiteral("item_name"))
+                || !localAttrs.contains(QStringLiteral("brand"));
+            logOut->append(tr("parent %1 attrs (%2): %3")
+                               .arg(e.sku,
+                                    localAttrs.isEmpty()
+                                        ? tr("NEW/MISSING on %1").arg(mpCode)
+                                        : (parentIsIncomplete ? tr("INCOMPLETE DRAFT on %1").arg(mpCode)
+                                                              : tr("existing on %1").arg(mpCode)),
+                                    parentAttrSources.isEmpty() ? tr("(none)") : parentAttrSources.join(QStringLiteral(", "))));
+            if (!missingParentAttrs.isEmpty()) {
+                logOut->append(tr("⚠ parent %1 missing descriptor(s) on %2: %3")
+                                   .arg(e.sku, mpCode, missingParentAttrs.join(QStringLiteral(", "))));
+            }
+
+            // When the parent SKU is absent or an incomplete draft ("Missing information",
+            // lacking brand/item_name) on this marketplace, also create/validate it
+            // synchronously via PUT /listings/...?requirements=LISTING_PRODUCT_ONLY
+            // before the async feed runs. This guarantees immediate diagnostic feedback
+            // (even if the feed later times out at 3 min) and lets us auto-borrow any
+            // additional schema-required parent attribute from a local child listing.
+            if (parentIsIncomplete) {
+                auto patchesToAttributesObj = [](const QJsonArray &pArr) -> QJsonObject {
+                    QJsonObject obj;
+                    static const QString kPrefix = QStringLiteral("/attributes/");
+                    for (const QJsonValue &pv : pArr) {
+                        const QJsonObject po = pv.toObject();
+                        const QString path = po.value(QStringLiteral("path")).toString();
+                        if (path.startsWith(kPrefix))
+                            obj.insert(path.mid(kPrefix.size()), po.value(QStringLiteral("value")));
+                    }
+                    return obj;
+                };
+                QJsonObject parentPutAttrs = patchesToAttributesObj(patches);
+                bool putOk = false;
+                QString putDetails;
+                QStringList missingPutAttrs;
+                co_await m_api->putListingProductOnly(
+                    mpId, e.sku, actualPt, parentPutAttrs,
+                    &putOk, &putDetails, &missingPutAttrs);
+                logOut->append(tr("parent %1: sync PUT (create missing parent on %2) → %3")
+                                   .arg(e.sku, mpCode, putDetails));
+
+                if (!putOk && !missingPutAttrs.isEmpty()) {
+                    QStringList borrowed;
+                    for (const QString &ma : missingPutAttrs) {
+                        if (parentPutAttrs.contains(ma) || !ptProps.contains(ma)) continue;
+                        // Never copy child-only size/color or identifier onto a parent.
+                        if (ma == compositeSizeAttr || ma == simpleSizeAttr
+                                || ma == QLatin1String("color") || ma == QLatin1String("color_name")
+                                || ma == QLatin1String("externally_assigned_product_identifier")
+                                || ma == QLatin1String("merchant_suggested_asin")) {
+                            continue;
+                        }
+                        QJsonValue bv;
+                        for (const VariationTemplateEntry &ce : tplEntries) {
+                            if (ce.isParent || ce.sku.isEmpty()) continue;
+                            const QJsonObject cla = localBySku.value(ce.sku);
+                            if (!cla.contains(ma)) continue;
+                            if (kLangTagged.contains(ma)) {
+                                const QJsonArray fa = filterToTargetLang(cla.value(ma).toArray(), false);
+                                if (!fa.isEmpty()) { bv = fa; break; }
+                            } else {
+                                bv = swapMarketplaceIdRec(cla.value(ma), mpId);
+                                break;
+                            }
+                        }
+                        if (!usable(bv) && !kLangTagged.contains(ma) && parentAttrsFallback.contains(ma))
+                            bv = swapMarketplaceIdRec(parentAttrsFallback.value(ma), mpId);
+                        if (usable(bv)) {
+                            addPatch(ma, bv);
+                            parentPutAttrs.insert(ma, bv);
+                            borrowed << ma;
+                        }
+                    }
+                    if (!borrowed.isEmpty()) {
+                        bool retryOk = false;
+                        QString retryDetails;
+                        co_await m_api->putListingProductOnly(
+                            mpId, e.sku, actualPt, parentPutAttrs,
+                            &retryOk, &retryDetails);
+                        logOut->append(tr("parent %1: retry sync PUT with [%2] → %3")
+                                           .arg(e.sku, borrowed.join(QStringLiteral(", ")), retryDetails));
+                    }
+                }
             }
         } else {
             addPatch(QStringLiteral("child_parent_sku_relationship"),
@@ -9956,25 +10264,61 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
                 srcCountry = QStringLiteral("FR");
             }
 
+            const auto *curCat = _currentCategory();
+            static const QRegularExpression kShoePtRe(
+                QStringLiteral("SHOE|BOOT|SANDAL|SLIPPER|SNEAKER"),
+                QRegularExpression::CaseInsensitiveOption);
+            const bool isShoes =
+                dynamic_cast<const ShoesWomenCategory*>(curCat) != nullptr
+                || dynamic_cast<const ShoesMenCategory*>(curCat) != nullptr
+                || actualPt.contains(kShoePtRe);
+            QString sizeGender = e.gender;
+            if (sizeGender.isEmpty()) sizeGender = familyAttrFallback.value(QStringLiteral("target_gender"));
+            if (sizeGender.isEmpty()) {
+                if (dynamic_cast<const ShoesMenCategory*>(curCat) != nullptr
+                        || dynamic_cast<const ClothingMenCategory*>(curCat) != nullptr)
+                    sizeGender = QStringLiteral("male");
+                else
+                    sizeGender = QStringLiteral("female");
+            }
+
             // The child's size in THIS country's numbering (bare, e.g. "38").
             QString bareSize = srcSize;
-            if (!bareSize.isEmpty() && !srcCountry.isEmpty() && srcCountry != mpCode)
-                bareSize = FillerSize::convertSize(bareSize, srcCountry, mpCode);
+            if (!bareSize.isEmpty()) {
+                const QString fromCountry = srcCountry.isEmpty() ? mpCode : srcCountry;
+                bareSize = FillerSize::convertSize(bareSize, fromCountry, mpCode, sizeGender, isShoes);
+            }
             if (bareSize.startsWith(QStringLiteral("numeric_")))
                 bareSize = bareSize.mid(8);
 
             if (hasComposite) {
-                // COMPOSITE size (apparel_size or shapewear_size):
+                // COMPOSITE size (apparel_size, shapewear_size, or footwear_size):
                 //   [{ size, size_system, size_class, marketplace_id, … }]
                 // size_system / size_class are REGIONAL — child's own local composite
                 // first, then the region reference (stored sibling / schema-pinned).
-                // Canonical numeric size value is "numeric_<n>". body_type/height_type
-                // = "regular" ONLY for apparel_size (shapewear uses different enums
-                // and doesn't require them).
+                // Canonical numeric size value is "numeric_<n>".
                 const QJsonArray localSizeArr = localAttrs.value(compositeSizeAttr).toArray();
 
                 QJsonObject sizeObj;
-                if (!localSizeArr.isEmpty()) {
+                if (isFootwearComposite) {
+                    if (!localSizeArr.isEmpty()) {
+                        sizeObj = localSizeArr.first().toObject();
+                    } else if (!refCompositeObj.isEmpty()) {
+                        sizeObj = refCompositeObj;
+                        sizeObj.remove(QStringLiteral("size"));
+                        sizeObj.remove(QStringLiteral("to_size"));
+                    }
+                    if (!sizeObj.contains(QStringLiteral("age_group")))
+                        sizeObj.insert(QStringLiteral("age_group"), QStringLiteral("adult"));
+                    if (!sizeObj.contains(QStringLiteral("gender"))) {
+                        const bool isMale = sizeGender.compare(QStringLiteral("male"), Qt::CaseInsensitive) == 0
+                                         || sizeGender.compare(QStringLiteral("men"), Qt::CaseInsensitive) == 0;
+                        sizeObj.insert(QStringLiteral("gender"),
+                                       isMale ? QStringLiteral("men") : QStringLiteral("women"));
+                    }
+                    if (!sizeObj.contains(QStringLiteral("width")))
+                        sizeObj.insert(QStringLiteral("width"), QStringLiteral("medium"));
+                } else if (!localSizeArr.isEmpty()) {
                     const QJsonObject o = localSizeArr.first().toObject();
                     for (const QString &k : {QStringLiteral("size_system"),
                                              QStringLiteral("size_class")}) {
@@ -9985,11 +10329,10 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
                     sizeObj.insert(QStringLiteral("size_system"), refSizeSystem);
                 if (!sizeObj.contains(QStringLiteral("size_class")) && !refSizeClass.isEmpty())
                     sizeObj.insert(QStringLiteral("size_class"), refSizeClass);
-                // body_type / height_type = "regular": these are OPPOSITE between the
-                // two composites — REQUIRED for shapewear_size (error 99022 without
-                // them) but NOT ALLOWED for apparel_size (error 90248 with them). So
-                // send them only for shapewear_size; never inject them for apparel.
-                if (!isApparelComposite) {
+                // body_type / height_type = "regular": REQUIRED for shapewear_size
+                // (error 99022 without them) but NOT ALLOWED for apparel_size (error
+                // 90248 with them) or footwear_size.
+                if (isShapewearComposite) {
                     if (!sizeObj.contains(QStringLiteral("body_type")))
                         sizeObj.insert(QStringLiteral("body_type"),   QStringLiteral("regular"));
                     if (!sizeObj.contains(QStringLiteral("height_type")))
@@ -9997,7 +10340,9 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
                 }
 
                 QString sizeVal;
-                if (!localSizeArr.isEmpty())
+                if (sizeOverridesFr.contains(e.sku) && !bareSize.isEmpty())
+                    sizeVal = bareSize;
+                else if (!localSizeArr.isEmpty())
                     sizeVal = localSizeArr.first().toObject().value(QStringLiteral("size")).toString();
                 if (sizeVal.isEmpty())
                     sizeVal = bareSize;
@@ -10033,9 +10378,10 @@ QCoro::Task<void> PaneSizing::_buildFullVariationMessages(
             } else if (hasSimpleSize) {
                 // Simple size attribute (name from schema, e.g. `size`/`size_name`):
                 // [{value, language_tag, marketplace_id}] — free text, language_tag
-                // REQUIRED. Prefer the child's own stored value (already the right
-                // language); else the converted bare size for this country.
-                QJsonValue sizeV = rawOr(simpleSizeAttr, {});
+                // REQUIRED. Prefer user override first, then child's own stored value
+                // (already the right language), else the converted bare size.
+                QJsonValue sizeV = sizeOverridesFr.contains(e.sku)
+                    ? QJsonValue() : rawOr(simpleSizeAttr, {});
                 if (!usable(sizeV) && !bareSize.isEmpty())
                     sizeV = QJsonArray{QJsonObject{
                         {QStringLiteral("value"),          bareSize},
@@ -10281,10 +10627,26 @@ QString PaneSizing::_fillVariationTemplate(
         cell(row, QStringLiteral("color_name"),         e.color);
         cell(row, QStringLiteral("color_map"),          e.color);
         {
+            const auto *curCat = _currentCategory();
+            static const QRegularExpression kShoePtRe(
+                QStringLiteral("SHOE|BOOT|SANDAL|SLIPPER|SNEAKER"),
+                QRegularExpression::CaseInsensitiveOption);
+            const bool isShoes =
+                dynamic_cast<const ShoesWomenCategory*>(curCat) != nullptr
+                || dynamic_cast<const ShoesMenCategory*>(curCat) != nullptr
+                || productType.contains(kShoePtRe);
+            QString sizeGender = e.gender.isEmpty() ? fbGender : e.gender;
+            if (sizeGender.isEmpty()) {
+                if (dynamic_cast<const ShoesMenCategory*>(curCat) != nullptr
+                        || dynamic_cast<const ClothingMenCategory*>(curCat) != nullptr)
+                    sizeGender = QStringLiteral("male");
+                else
+                    sizeGender = QStringLiteral("female");
+            }
             QString sz = e.size;
             if (!sz.isEmpty() && !templateCountry.isEmpty()
                     && !e.sizeSource.isEmpty() && e.sizeSource != templateCountry) {
-                sz = FillerSize::convertSize(sz, e.sizeSource, templateCountry);
+                sz = FillerSize::convertSize(sz, e.sizeSource, templateCountry, sizeGender, isShoes);
             }
             cell(row, QStringLiteral("size_name"),    sz);
             cell(row, QStringLiteral("apparel_size"), sz);
@@ -10829,6 +11191,9 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                 QJsonObject pAttrs;
                 co_await m_api->fetchListingAttributes(mpId, parentSku, &pAttrs);
                 const QJsonArray ps = pAttrs.value(QStringLiteral("apparel_size")).toArray();
+                const QJsonArray pBrand = pAttrs.value(QStringLiteral("brand")).toArray();
+                const QJsonArray pTitle = pAttrs.value(QStringLiteral("item_name")).toArray();
+                const QJsonArray pNodes = pAttrs.value(QStringLiteral("recommended_browse_nodes")).toArray();
                 appendLog(tr("  parent %1: %2 productType=%3 status=[%4] linked children=%5 theme=%6")
                               .arg(parentSku,
                                    pc.exists ? tr("exists") : tr("NOT LISTED"),
@@ -10836,6 +11201,10 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                                    pc.status)
                               .arg(pc.childSkus.size())
                               .arg(pc.variationTheme.isEmpty() ? tr("(none)") : pc.variationTheme));
+                appendLog(tr("    descriptors: brand=%1 | item_name=%2 | browse_node=%3")
+                              .arg(pBrand.isEmpty() ? tr("(MISSING)") : pBrand.first().toObject().value(QStringLiteral("value")).toString(),
+                                   pTitle.isEmpty() ? tr("(MISSING)") : pTitle.first().toObject().value(QStringLiteral("value")).toString().left(50),
+                                   pNodes.isEmpty() ? tr("(MISSING)") : pNodes.first().toObject().value(QStringLiteral("value")).toString()));
                 appendLog(tr("    stored apparel_size: %1").arg(
                     ps.isEmpty() ? tr("(none)")
                                  : QString::fromUtf8(QJsonDocument(ps).toJson(QJsonDocument::Compact))));
@@ -10850,6 +11219,8 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                 QJsonObject cAttrs;
                 co_await m_api->fetchListingAttributes(mpId, cs.first, &cAttrs);
                 const QJsonArray csz = cAttrs.value(QStringLiteral("apparel_size")).toArray();
+                const QJsonArray fsz = cAttrs.value(QStringLiteral("footwear_size")).toArray();
+                const QJsonArray ssz = cAttrs.value(QStringLiteral("shapewear_size")).toArray();
                 const QJsonArray simpleSz = cAttrs.value(QStringLiteral("size")).toArray();
                 const bool linked = !parentSku.isEmpty() && cc.parentSku == parentSku;
                 appendLog(tr("  %1 (%2): parent=%3%4 productType=%5 status=[%6]")
@@ -10858,9 +11229,13 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                                    linked ? QStringLiteral(" ✓") : QString(),
                                    cc.productType.isEmpty() ? tr("(none)") : cc.productType,
                                    cc.status));
-                appendLog(tr("    stored apparel_size: %1 | size: %2").arg(
+                appendLog(tr("    stored apparel_size: %1 | footwear_size: %2 | shapewear_size: %3 | size: %4").arg(
                     csz.isEmpty() ? tr("(none)")
                                   : QString::fromUtf8(QJsonDocument(csz).toJson(QJsonDocument::Compact)),
+                    fsz.isEmpty() ? tr("(none)")
+                                  : QString::fromUtf8(QJsonDocument(fsz).toJson(QJsonDocument::Compact)),
+                    ssz.isEmpty() ? tr("(none)")
+                                  : QString::fromUtf8(QJsonDocument(ssz).toJson(QJsonDocument::Compact)),
                     simpleSz.isEmpty() ? tr("(none)")
                                        : QString::fromUtf8(QJsonDocument(simpleSz).toJson(QJsonDocument::Compact))));
                 for (const QString &iss : cc.issues)
@@ -10922,12 +11297,32 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
             parentSkuForFetch = asinToSku.value(m_brokenChildTable->rows().at(t.rowIdx).parentAsin);
             if (!parentSkuForFetch.isEmpty()) break;
         }
-        if (!primaryMpId.isEmpty() && !parentSkuForFetch.isEmpty()) {
-            QString unused;
-            co_await m_api->fetchListingBrandAndTheme(primaryMpId, parentSkuForFetch,
-                                                      &unused, &variationTheme);
-            appendLog(tr("variation_theme: %1").arg(
-                variationTheme.isEmpty() ? tr("(not found)") : variationTheme));
+        if (!parentSkuForFetch.isEmpty()) {
+            QString themeFromMp;
+            if (!primaryMpId.isEmpty()) {
+                QString unused;
+                co_await m_api->fetchListingBrandAndTheme(primaryMpId, parentSkuForFetch,
+                                                          &unused, &variationTheme);
+                if (!variationTheme.isEmpty()) themeFromMp = primaryMpId;
+            }
+            // If the parent is missing on primaryMpId (e.g. missing on FR while present
+            // on DE), scan the other marketplaces until we find its variation_theme.
+            if (variationTheme.isEmpty() && m_brokenChildTable) {
+                for (int i = 0; i < m_brokenChildTable->marketplaceCount(); ++i) {
+                    const auto &s = m_brokenChildTable->marketplaceAt(i);
+                    if (s.id.isEmpty() || s.id == primaryMpId) continue;
+                    QString unused;
+                    co_await m_api->fetchListingBrandAndTheme(s.id, parentSkuForFetch,
+                                                              &unused, &variationTheme);
+                    if (!variationTheme.isEmpty()) {
+                        themeFromMp = s.code;
+                        break;
+                    }
+                }
+            }
+            appendLog(tr("variation_theme: %1%2").arg(
+                variationTheme.isEmpty() ? tr("(not found)") : variationTheme,
+                themeFromMp.isEmpty() ? QString() : QStringLiteral(" (from %1)").arg(themeFromMp)));
         }
     }
 
@@ -11038,23 +11433,82 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                     const QString attrMpId = _brokenAttrMarketplaceId().isEmpty()
                         ? (brokenMpIds.isEmpty() ? primaryMpId : brokenMpIds.first())
                         : _brokenAttrMarketplaceId();
+                    QString attrMpCode;
+                    for (int i = 0; i < m_brokenChildTable->marketplaceCount(); ++i) {
+                        const auto &s = m_brokenChildTable->marketplaceAt(i);
+                        if (s.id == attrMpId) { attrMpCode = s.code; break; }
+                    }
                     appendLog(tr("Fetching parent attributes (%1) for template…")
                                   .arg(ui->comboBoxBrokenAttrMarket->currentText()));
                     QJsonObject parentAttrs;
                     co_await m_api->fetchListingAttributes(attrMpId, feedParentSku, &parentAttrs);
+                    if (parentAttrs.isEmpty() && m_brokenChildTable) {
+                        appendLog(tr("⚠ Parent %1 has no listing on %2 — searching other marketplaces for fallback attributes…")
+                                      .arg(feedParentSku, attrMpCode.isEmpty() ? attrMpId : attrMpCode));
+                        for (int i = 0; i < m_brokenChildTable->marketplaceCount(); ++i) {
+                            const auto &s = m_brokenChildTable->marketplaceAt(i);
+                            if (s.id.isEmpty() || s.id == attrMpId) continue;
+                            co_await m_api->fetchListingAttributes(s.id, feedParentSku, &parentAttrs);
+                            if (!parentAttrs.isEmpty()) {
+                                appendLog(tr("  Found parent fallback attributes on %1 (%2 attr(s))")
+                                              .arg(s.code).arg(parentAttrs.size()));
+                                break;
+                            }
+                        }
+                    }
+                    if (variationTheme.isEmpty() && parentAttrs.contains(QStringLiteral("variation_theme"))) {
+                        const QJsonArray vtArr = parentAttrs.value(QStringLiteral("variation_theme")).toArray();
+                        if (!vtArr.isEmpty()) {
+                            variationTheme = vtArr.first().toObject().value(QStringLiteral("name")).toString();
+                            if (variationTheme.isEmpty())
+                                variationTheme = vtArr.first().toObject().value(QStringLiteral("value")).toString();
+                        }
+                    }
 
                     // Fallback color/size/sizeSource from BrokenChildTable (may be from any marketplace).
+                    // If the cached table entry came from a non-EU marketplace (e.g. US) while
+                    // the top-left tree (m_treeModel) already holds an EU size, prefer the tree size.
+                    QHash<QString, QString> treeSizeByAsin;
+                    if (m_treeModel) {
+                        for (int fi = 0; fi < m_treeModel->rowCount(); ++fi) {
+                            const QModelIndex pi = m_treeModel->index(fi, 0);
+                            for (int ci = 0; ci < m_treeModel->rowCount(pi); ++ci) {
+                                const QString a = m_treeModel->data(
+                                    m_treeModel->index(ci, TreeSizingAsins::ASIN, pi)).toString();
+                                const QString s = m_treeModel->data(
+                                    m_treeModel->index(ci, TreeSizingAsins::Size, pi)).toString();
+                                if (!a.isEmpty() && !s.isEmpty())
+                                    treeSizeByAsin.insert(a, s);
+                            }
+                        }
+                    }
+                    auto isEuCode = [](const QString &c) {
+                        return c == QLatin1String("FR") || c == QLatin1String("ES")
+                            || c == QLatin1String("BE") || c == QLatin1String("DE")
+                            || c == QLatin1String("IT") || c == QLatin1String("NL")
+                            || c == QLatin1String("SE") || c == QLatin1String("PL");
+                    };
                     struct ColorSizeSrc { QString color; QString size; QString sizeSource; };
                     QHash<QString, ColorSizeSrc> fallbackByAsin;
-                    for (const auto &r : m_brokenChildTable->rows())
-                        fallbackByAsin.insert(r.asin, {r.color, r.size, r.sizeSource});
+                    for (const auto &r : m_brokenChildTable->rows()) {
+                        QString sz = r.size;
+                        QString src = r.sizeSource;
+                        const QString treeSz = treeSizeByAsin.value(r.asin);
+                        if (!treeSz.isEmpty() && (sz.isEmpty() || !isEuCode(src))) {
+                            sz  = treeSz;
+                            src = isEuCode(attrMpCode) ? attrMpCode : QStringLiteral("FR");
+                        }
+                        fallbackByAsin.insert(r.asin, {r.color, sz, src});
+                    }
 
                     auto childFirstVal = [](const QJsonObject &attrs, const QString &key) -> QString {
                         const QJsonArray arr = attrs.value(key).toArray();
                         if (arr.isEmpty()) return {};
                         const QJsonObject obj = arr.first().toObject();
-                        const QString v = obj.value(QStringLiteral("value")).toString();
-                        return v.isEmpty() ? obj.value(QStringLiteral("name")).toString() : v;
+                        QString v = obj.value(QStringLiteral("value")).toString();
+                        if (v.isEmpty()) v = obj.value(QStringLiteral("name")).toString();
+                        if (v.isEmpty()) v = obj.value(QStringLiteral("size")).toString();
+                        return v;
                     };
 
                     QList<VariationTemplateEntry> tplEntries;
@@ -11071,8 +11525,18 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                             QJsonObject childListingAttrs;
                             if (!e.sku.isEmpty())
                                 co_await m_api->fetchListingAttributes(attrMpId, e.sku, &childListingAttrs);
-                            const QString lc   = childFirstVal(childListingAttrs, QStringLiteral("color_name"));
-                            const QString ls   = childFirstVal(childListingAttrs, QStringLiteral("apparel_size"));
+                            QString lc = childFirstVal(childListingAttrs, QStringLiteral("color_name"));
+                            if (lc.isEmpty())
+                                lc = childFirstVal(childListingAttrs, QStringLiteral("color"));
+                            QString ls;
+                            for (const QString &sk : {QStringLiteral("apparel_size"),
+                                                      QStringLiteral("footwear_size"),
+                                                      QStringLiteral("shapewear_size"),
+                                                      QStringLiteral("size"),
+                                                      QStringLiteral("size_name")}) {
+                                ls = childFirstVal(childListingAttrs, sk);
+                                if (!ls.isEmpty()) break;
+                            }
                             const QString lss  = childFirstVal(childListingAttrs, QStringLiteral("apparel_size_system"));
                             const QString lsc  = childFirstVal(childListingAttrs, QStringLiteral("apparel_size_class"));
                             const QString lg   = childFirstVal(childListingAttrs, QStringLiteral("target_gender"));
@@ -11082,7 +11546,7 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
 
                             // 2. Catalog Items API (by ASIN) — fallback for any field missing from Listings API.
                             AmazonCatalogApi::CatalogApparelAttrs cat;
-                            if (lc.isEmpty() || lss.isEmpty() || lsc.isEmpty()
+                            if (lc.isEmpty() || ls.isEmpty() || lss.isEmpty() || lsc.isEmpty()
                                     || lg.isEmpty() || la.isEmpty() || lbt.isEmpty() || lht.isEmpty())
                                 co_await m_api->fetchCatalogApparelAttrs(attrMpId, e.asin, &cat);
 
@@ -11093,7 +11557,14 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                             ageRange   = la.isEmpty()  ? cat.ageRange    : la;
                             bodyType   = lbt.isEmpty() ? cat.bodyType    : lbt;
                             heightType = lht.isEmpty() ? cat.heightType  : lht;
-                            if (!ls.isEmpty()) { size = ls; sizeSrc = {}; }
+                            if (!ls.isEmpty()) {
+                                size = ls;
+                                sizeSrc = attrMpCode;
+                            } else if (!cat.size.isEmpty()
+                                       && (size.isEmpty() || sizeSrc != QLatin1String("FR"))) {
+                                size = cat.size;
+                                sizeSrc = attrMpCode;
+                            }
 
                             appendLog(tr("  [tpl] %1 (%2): color=%3 size=%4 sizeSystem=%5 gender=%6 age=%7")
                                           .arg(e.asin, e.sku,
@@ -11293,6 +11764,23 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                     // FR numbering; the feed converts them to each region.
                     QHash<QString, QString> sizeOverridesFr;
                     {
+                        const auto *curCat = _currentCategory();
+                        static const QRegularExpression kShoePtRe(
+                            QStringLiteral("SHOE|BOOT|SANDAL|SLIPPER|SNEAKER"),
+                            QRegularExpression::CaseInsensitiveOption);
+                        const bool isShoes =
+                            dynamic_cast<const ShoesWomenCategory*>(curCat) != nullptr
+                            || dynamic_cast<const ShoesMenCategory*>(curCat) != nullptr
+                            || m_productType.contains(kShoePtRe);
+                        QString familyGender = familyAttrFallback.value(QStringLiteral("target_gender"));
+                        if (familyGender.isEmpty()) {
+                            if (dynamic_cast<const ShoesMenCategory*>(curCat) != nullptr
+                                    || dynamic_cast<const ClothingMenCategory*>(curCat) != nullptr)
+                                familyGender = QStringLiteral("male");
+                            else
+                                familyGender = QStringLiteral("female");
+                        }
+
                         QDialog dlg(this);
                         dlg.setWindowTitle(tr("Review sizes (FR/ES numbering)"));
                         auto *vlay = new QVBoxLayout(&dlg);
@@ -11305,9 +11793,10 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                         for (const auto &e : tplEntries) {
                             if (e.isParent || e.sku.isEmpty()) continue;
                             QString fr = e.size;
-                            if (!fr.isEmpty() && !e.sizeSource.isEmpty()
-                                    && e.sizeSource != QLatin1String("FR"))
-                                fr = FillerSize::convertSize(fr, e.sizeSource, QStringLiteral("FR"));
+                            const QString g = e.gender.isEmpty() ? familyGender : e.gender;
+                            const QString src = e.sizeSource.isEmpty() ? QStringLiteral("FR") : e.sizeSource;
+                            if (!fr.isEmpty())
+                                fr = FillerSize::convertSize(fr, src, QStringLiteral("FR"), g, isShoes);
                             if (fr.startsWith(QStringLiteral("numeric_"))) fr = fr.mid(8);
                             auto *edit = new QLineEdit(fr);
                             edit->setMaximumWidth(90);
@@ -11358,14 +11847,22 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                             AmazonCatalogApi::ListingCheck pc;
                             co_await m_api->checkListing(feedMpId, feedParentSku, &pc);
                             if (!pc.exists) {
-                                appendLog(tr("  parent %1: NOT LISTED on %2 — feed will create it")
-                                              .arg(feedParentSku, feedMpCode));
+                                const QString preMsg = tr("parent %1: NOT LISTED on %2 — will create it")
+                                                           .arg(feedParentSku, feedMpCode);
+                                appendLog(QStringLiteral("  ") + preMsg);
+                                _appendFixLog(feedParentSku, feedMpCode,
+                                              QStringLiteral("pre-check: ") + preMsg);
                             } else {
-                                appendLog(tr("  parent %1: status=[%2] linked children=%3 theme=%4")
-                                              .arg(feedParentSku,
-                                                   pc.status.isEmpty() ? tr("none") : pc.status)
-                                              .arg(pc.childSkus.size())
-                                              .arg(pc.variationTheme.isEmpty() ? tr("(none)") : pc.variationTheme));
+                                const QString preMsg = tr("parent %1: status=[%2] linked children=%3 theme=%4")
+                                                           .arg(feedParentSku,
+                                                                pc.status.isEmpty() ? tr("none") : pc.status)
+                                                           .arg(pc.childSkus.size())
+                                                           .arg(pc.variationTheme.isEmpty() ? tr("(none)") : pc.variationTheme);
+                                appendLog(QStringLiteral("  ") + preMsg);
+                                _appendFixLog(feedParentSku, feedMpCode,
+                                              QStringLiteral("pre-check: ") + preMsg
+                                              + (pc.issues.isEmpty() ? QString()
+                                                                     : QStringLiteral(" | issues: ") + pc.issues.join(QStringLiteral(" ; "))));
                                 for (const QString &iss : pc.issues)
                                     appendLog(QStringLiteral("    ") + iss);
                             }
@@ -11377,8 +11874,14 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                             feedMpId, feedMpCode, feedParentSku, m_productType,
                             variationTheme, parentAttrs, tplEntries,
                             familyAttrFallback, sizeOverridesFr, &feedMessages, &buildLog);
-                        for (const QString &l : buildLog)
+                        for (const QString &l : buildLog) {
                             appendLog(QStringLiteral("  ") + l);
+                            if (l.startsWith(QLatin1String("parent "))
+                                    || l.contains(QStringLiteral("⚠"))) {
+                                _appendFixLog(feedParentSku, feedMpCode,
+                                              QStringLiteral("build: ") + l);
+                            }
+                        }
 
                         QString feedResult;
                         const QStringList feedMpList{feedMpId};
@@ -11389,26 +11892,57 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                                       QStringLiteral("full feed: ") + feedResult);
                         fullFeedSubmitted = true;
 
-                        // Post-check: per-child validation issues + relationship
-                        // state. Async validation may lag — issues shown here are
-                        // authoritative, missing relationships may still appear.
+                        // Post-check: parent first, then per-child validation issues +
+                        // relationship state. Async validation may lag — issues shown
+                        // here are authoritative, missing relationships may still appear.
+                        {
+                            AmazonCatalogApi::ListingCheck pcAfter;
+                            co_await m_api->checkListing(feedMpId, feedParentSku, &pcAfter);
+                            const QString postParentMsg = tr("parent %1 after feed: %2 status=[%3] linked children=%4 theme=%5")
+                                .arg(feedParentSku,
+                                     pcAfter.exists ? tr("exists") : tr("STILL NOT LISTED"),
+                                     pcAfter.status.isEmpty() ? tr("none") : pcAfter.status)
+                                .arg(pcAfter.childSkus.size())
+                                .arg(pcAfter.variationTheme.isEmpty() ? tr("(none)") : pcAfter.variationTheme);
+                            appendLog(QStringLiteral("  ") + postParentMsg);
+                            for (const QString &iss : pcAfter.issues)
+                                appendLog(QStringLiteral("    ") + iss);
+                            _appendFixLog(feedParentSku, feedMpCode,
+                                          QStringLiteral("post-check: ") + postParentMsg
+                                          + (pcAfter.issues.isEmpty() ? QString()
+                                                                      : QStringLiteral(" | issues: ") + pcAfter.issues.join(QStringLiteral(" ; "))));
+                        }
+                        int linkedChildrenAfter = 0;
+                        int totalChildrenAfter  = 0;
+                        QStringList childIssuesAfter;
                         for (const auto &e : tplEntries) {
                             if (e.isParent || e.sku.isEmpty()) continue;
+                            ++totalChildrenAfter;
                             AmazonCatalogApi::ListingCheck cc;
                             co_await m_api->checkListing(feedMpId, e.sku, &cc);
                             if (!cc.exists) {
                                 appendLog(tr("  %1: NOT LISTED").arg(e.sku));
+                                childIssuesAfter << QStringLiteral("%1: NOT LISTED").arg(e.sku);
                                 continue;
                             }
                             const bool linked = (cc.parentSku == feedParentSku);
+                            if (linked) ++linkedChildrenAfter;
                             appendLog(tr("  %1: parent=%2 status=[%3]%4")
                                           .arg(e.sku,
                                                cc.parentSku.isEmpty() ? tr("(none)") : cc.parentSku,
                                                cc.status,
                                                linked ? QStringLiteral(" ✓") : QString()));
-                            for (const QString &iss : cc.issues)
+                            for (const QString &iss : cc.issues) {
                                 appendLog(QStringLiteral("    ") + iss);
+                                if (childIssuesAfter.size() < 10)
+                                    childIssuesAfter << QStringLiteral("%1: %2").arg(e.sku, iss);
+                            }
                         }
+                        _appendFixLog(feedParentSku, feedMpCode,
+                                      QStringLiteral("post-check children: linked=%1/%2%3")
+                                          .arg(linkedChildrenAfter).arg(totalChildrenAfter)
+                                          .arg(childIssuesAfter.isEmpty() ? QString()
+                                                                          : QStringLiteral(" | issues: ") + childIssuesAfter.join(QStringLiteral(" ; "))));
                     }
                 }
 
@@ -11515,7 +12049,23 @@ QCoro::Task<void> PaneSizing::_runBrokenChildFix(bool fixParents, bool fixImages
                         localSize = s;
                     } else if (!localSize.isEmpty() && !row.sizeSource.isEmpty()
                                && row.sizeSource != mpCode) {
-                        localSize = FillerSize::convertSize(localSize, row.sizeSource, mpCode);
+                        const auto *curCat = _currentCategory();
+                        static const QRegularExpression kShoePtRe(
+                            QStringLiteral("SHOE|BOOT|SANDAL|SLIPPER|SNEAKER"),
+                            QRegularExpression::CaseInsensitiveOption);
+                        const bool isShoes =
+                            dynamic_cast<const ShoesWomenCategory*>(curCat) != nullptr
+                            || dynamic_cast<const ShoesMenCategory*>(curCat) != nullptr
+                            || m_productType.contains(kShoePtRe);
+                        QString g = localGender;
+                        if (g.isEmpty()) {
+                            if (dynamic_cast<const ShoesMenCategory*>(curCat) != nullptr
+                                    || dynamic_cast<const ClothingMenCategory*>(curCat) != nullptr)
+                                g = QStringLiteral("male");
+                            else
+                                g = QStringLiteral("female");
+                        }
+                        localSize = FillerSize::convertSize(localSize, row.sizeSource, mpCode, g, isShoes);
                     }
                 }
                 // Catalog Items API fallback for any field still empty.

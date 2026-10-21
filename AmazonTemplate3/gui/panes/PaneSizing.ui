@@ -264,6 +264,23 @@
           </widget>
          </item>
          <item>
+          <widget class="QLabel" name="labelBrokenChild">
+           <property name="text">
+            <string>Broken child:</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLabel" name="labelBrokenChildCountries">
+           <property name="styleSheet">
+            <string notr="true">color: red; font-weight: bold;</string>
+           </property>
+           <property name="text">
+            <string/>
+           </property>
+          </widget>
+         </item>
+         <item>
           <spacer name="horizontalSpacerExcludedColors">
            <property name="orientation">
             <enum>Qt::Orientation::Horizontal</enum>

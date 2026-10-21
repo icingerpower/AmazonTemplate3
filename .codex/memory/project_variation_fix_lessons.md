@@ -41,7 +41,7 @@ Related: [[project_spapi_auth]]
   counts, not seller listing suppression/issues. A `✓ 7` cell is therefore not
   proof that a listing is unsuppressed.
 - The table reads the catalog's plain `size` attribute (preferring FR, then US,
-  then DE). The feed builder explicitly handles apparel/shapewear composites,
+  then DE). *(Superseded 2026-10-21: see below.)* The feed builder explicitly handles apparel/shapewear composites,
   but has no dedicated shoe-width handling. A displayed `43 EU` versus
   `43 EU Étroit` is not sufficient evidence to infer or overwrite width. Left
   unchanged: first compare affected and correct sibling catalog/listing size
@@ -49,3 +49,16 @@ Related: [[project_spapi_auth]]
   then consider a narrowly scoped shoe-specific repair with regression tests.
   The supplied Seller Central screenshot reports main-image suppression, not
   a width error. No live API reads or writes were needed for this code change.
+
+## 2026-10-21 — Missing parent creation, `footwear_size` composite, and EU size priority (VERIFIED)
+
+- **Missing / incomplete parent creation on a target marketplace (`P-CJNS1905163-BLACKRED` on `FR`):**
+  - When a parent SKU does not exist on the target marketplace (`localAttrs` empty) or is an incomplete draft (`Missing information`, lacking `brand` or `item_name`), `_buildFullVariationMessages` must NOT leave `kLangTagged` attributes (`brand`, `item_name`, `product_description`, `bullet_point`) empty and must NOT copy another country's `recommended_browse_nodes` (e.g. `DE`'s node onto `FR`).
+  - Instead, borrow `brand`, `item_name` (using the cleaned common prefix across children to strip per-child size suffixes), `product_description`, `bullet_point` (filtered to the target marketplace's `language_tag`), and the target marketplace's own `recommended_browse_nodes`, `country_of_origin`, and `condition_type` from the existing child listings on that same marketplace (`localBySku`).
+  - Also submit the missing/incomplete parent synchronously via `AmazonCatalogApi::putListingProductOnly` (`PUT /listings/2021-08-01/items/{sellerId}/{sku}?requirements=LISTING_PRODUCT_ONLY`) before the async `JSON_LISTINGS_FEED`, and if Amazon returns `INVALID` with missing `attributeNames` in `issues`, auto-borrow those attributes from the local child listing and retry the `PUT`. Verified to create and link the missing parent on `FR`.
+- **`footwear_size` composite handling:**
+  - `SHOES` uses the `footwear_size` composite (`{size, size_system, size_class, age_group, gender, width, marketplace_id}`). Treating it as a simple `{value, language_tag}` attribute when missing on a child causes error `99022`. `_buildFullVariationMessages` now handles `footwear_size` as a composite attribute, preserving stored fields or borrowing regional sibling defaults (`refCompositeObj`) and applying user size overrides.
+- **Catalog size extraction & EU priority:**
+  - `extractCatalogSize` in `AmazonCatalogApi.cpp` falls back from flat `size` to composite `apparel_size` / `footwear_size` / `shapewear_size` (stripping `numeric_`).
+  - `BrokenChildTable::populate` prioritizes `FR > ES/BE > DE/IT/NL/SE/PL > UK/IE > US/CA/JP` so EU sizes are never overwritten by US/UK sizes, and `FillerSize::convertSize` parses numeric tokens from suffixed strings like `"35 EU Schmal"` or `"4 Narrow"`.
+  - Marketplaces where all children have `0` images (page not created) are excluded from broken-child warning highlights and `brokenMarketplaceCodes()`.

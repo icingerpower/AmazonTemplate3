@@ -22,6 +22,7 @@ void BrokenChildTable::setMarketplaces(const QList<MarketplaceSpec> &specs)
 {
     beginResetModel();
     m_specs = specs;
+    _recomputeMaxImages();
     endResetModel();
 }
 
@@ -31,6 +32,7 @@ void BrokenChildTable::clear()
     beginResetModel();
     m_rows.clear();
     m_maxImages.clear();
+    m_mktMaxImages.clear();
     endResetModel();
 }
 
@@ -42,6 +44,7 @@ QCoro::Task<void> BrokenChildTable::populate(AmazonCatalogApi *api,
     beginResetModel();
     m_rows.clear();
     m_maxImages.clear();
+    m_mktMaxImages.fill(0, m_specs.size());
     for (ChildEntry &e : initialChildren) {
         e.health.fill({}, m_specs.size());
         m_rows.append(e);
@@ -63,24 +66,28 @@ QCoro::Task<void> BrokenChildTable::populate(AmazonCatalogApi *api,
             if (m_rows[ri].parentAsin.isEmpty() && !info.parentAsin.isEmpty())
                 m_rows[ri].parentAsin = info.parentAsin;
 
-            // Size priority: FR > US > DE > anything else
+            // Size priority: FR > ES/BE > DE/IT/NL/SE/PL > UK/IE > US/CA/JP > empty
             if (!info.size.isEmpty()) {
+                auto sizePriority = [](const QString &c) -> int {
+                    if (c.isEmpty()) return 0;
+                    if (c == QLatin1String("FR")) return 5;
+                    if (c == QLatin1String("ES") || c == QLatin1String("BE")) return 4;
+                    if (c == QLatin1String("DE") || c == QLatin1String("IT")
+                            || c == QLatin1String("NL") || c == QLatin1String("SE")
+                            || c == QLatin1String("PL")) return 3;
+                    if (c == QLatin1String("UK") || c == QLatin1String("IE")) return 2;
+                    return 1; // US, CA, JP, etc.
+                };
                 const QString &code = m_specs[mi].code;
                 const QString &cur  = m_rows[ri].sizeSource;
-                const bool take =
-                    cur.isEmpty()
-                    || (code == QLatin1String("FR"))
-                    || (code == QLatin1String("US") && cur != QLatin1String("FR"))
-                    || (code == QLatin1String("DE") && cur != QLatin1String("FR")
-                                                    && cur != QLatin1String("US"));
-                if (take) {
+                if (sizePriority(code) > sizePriority(cur)) {
                     m_rows[ri].size       = info.size;
                     m_rows[ri].sizeSource = code;
                 }
             }
 
             _recomputeMaxImages();
-            emit dataChanged(index(ri, 0), index(ri, columnCount() - 1));
+            emit dataChanged(index(0, 0), index(ri, columnCount() - 1));
         }
     }
     co_return;
@@ -89,6 +96,7 @@ QCoro::Task<void> BrokenChildTable::populate(AmazonCatalogApi *api,
 void BrokenChildTable::_recomputeMaxImages()
 {
     m_maxImages.clear();
+    m_mktMaxImages.fill(0, m_specs.size());
     for (const ChildEntry &row : m_rows) {
         const QString ck = row.color.toLower();
         if (!m_maxImages.contains(ck))
@@ -97,8 +105,10 @@ void BrokenChildTable::_recomputeMaxImages()
         for (int mi = 0; mi < m_specs.size() && mi < row.health.size(); ++mi) {
             // Only count cells where the ASIN actually exists in the marketplace —
             // MISSING cells should not influence the per-color "max image count".
-            if (row.health[mi].loaded && row.health[mi].exists)
+            if (row.health[mi].loaded && row.health[mi].exists) {
                 v[mi] = qMax(v[mi], row.health[mi].imageCount);
+                m_mktMaxImages[mi] = qMax(m_mktMaxImages[mi], row.health[mi].imageCount);
+            }
         }
     }
 }
@@ -167,10 +177,14 @@ QColor BrokenChildTable::_cellColor(int row, int mi) const
     // un-highlighted; the displayed "MISSING" label conveys the state.
     if (!h.exists)
         return {};
+    // When all children in this marketplace have 0 images, the product page
+    // is not created in this country — do not display as a warning.
+    if (m_mktMaxImages.value(mi, 0) == 0)
+        return {};
     const QString ck = m_rows[row].color.toLower();
     const int maxImgs = m_maxImages.value(ck).value(mi, 0);
-    // No images at all usually means the page was never created on this
-    // marketplace — flag dark orange (distinct from a genuine broken cell).
+    // No images at all on this child while other children in this marketplace
+    // have images — flag dark orange (or red below if parent/partial).
     if (h.imageCount == 0)
         return QColor(160, 90, 0);
     // Broken parent link, or a partial image set (some images but fewer than the
@@ -178,6 +192,22 @@ QColor BrokenChildTable::_cellColor(int row, int mi) const
     if (!h.hasParent || (maxImgs > 0 && h.imageCount < maxImgs))
         return QColor(160, 20, 20);
     return {};
+}
+
+QStringList BrokenChildTable::brokenMarketplaceCodes() const
+{
+    QStringList result;
+    for (int mi = 0; mi < m_specs.size(); ++mi) {
+        if (m_mktMaxImages.value(mi, 0) == 0)
+            continue;
+        for (int ri = 0; ri < m_rows.size(); ++ri) {
+            if (_cellColor(ri, mi).isValid()) {
+                result.append(m_specs[mi].code.toUpper());
+                break;
+            }
+        }
+    }
+    return result;
 }
 
 void BrokenChildTable::saveToDir(const QDir &dir) const

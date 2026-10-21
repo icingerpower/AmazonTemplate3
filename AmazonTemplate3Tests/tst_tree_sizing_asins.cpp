@@ -120,6 +120,8 @@ private slots:
     void test_parent_row_columns();
     void test_json_persistence_across_instances();
     void test_load_error_on_empty_response();
+    void test_dedup_german_compound_color_when_missing_on_uk();
+    void test_fetch_child_health_not_found_error_body();
 
 #ifdef DO_REAL_AMAZON_TESTS
     void test_real_b0dftx45y9_eu();
@@ -419,6 +421,108 @@ void Test_Tree_Sizing_Asins::test_load_error_on_empty_response()
     // loadError must fire; model must stay empty (modelReset may also fire for the clear)
     QVERIFY(errorSpy.count() > 0 || errorSpy.wait(5000));
     QCOMPARE(model.rowCount(QModelIndex{}), 0);
+#else
+    QSKIP("AMAZONCATALOGAPI_UNIT_TESTS not defined");
+#endif
+}
+
+void Test_Tree_Sizing_Asins::test_dedup_german_compound_color_when_missing_on_uk()
+{
+#ifdef AMAZONCATALOGAPI_UNIT_TESTS
+    AmazonCatalogApi api("clientId", "clientSecret", "refreshToken",
+                         "refreshToken", "refreshToken");
+
+    // Simulate B0HKCP1JS9 on DE (A1PA6795UKMFR9) with 2 children:
+    // - B0HJD8JLSC (32 EU): "Braun Kastanienbraun" on DE, 404 NOT_FOUND on UK (A1F83G8C2ARO7P)
+    // - B0HJD59LWF (33 EU): "Braun" on DE, "Brown" on UK (A1F83G8C2ARO7P)
+    api.setMockForTests([](const QString& path, const QMap<QString,QString>& qp) -> QByteArray {
+        const QString mkt = qp.value(QStringLiteral("marketplaceIds"));
+        if (path.endsWith("/B0HKCP1JS9")) {
+            return makeParentJson("B0HKCP1JS9", {"B0HJD8JLSC", "B0HJD59LWF"});
+        }
+        if (path.endsWith("/B0HJD8JLSC")) {
+            if (mkt == QLatin1String("A1F83G8C2ARO7P")) {
+                return QByteArrayLiteral(
+                    R"({"errors":[{"code":"NOT_FOUND","message":"Requested item, B0HJD8JLSC, not found in marketplace(s) A1F83G8C2ARO7P."}]})");
+            }
+            return makeChildJson("B0HJD8JLSC", "B0HKCP1JS9", "Braun Kastanienbraun", "32 EU", false);
+        }
+        if (path.endsWith("/B0HJD59LWF")) {
+            if (mkt == QLatin1String("A1F83G8C2ARO7P")) {
+                return makeChildJson("B0HJD59LWF", "B0HKCP1JS9", "Brown", "33 EU", false);
+            }
+            return makeChildJson("B0HJD59LWF", "B0HKCP1JS9", "Braun", "33 EU", false);
+        }
+        return {};
+    });
+
+    QTemporaryDir local;
+    QVERIFY(local.isValid());
+    TreeSizingAsins model(QDir(local.path()));
+    model.setApiClient(&api);
+
+    QList<QPair<QString, QStringList>> capturedVariants;
+    QMap<QString, QStringList> capturedColorAsins;
+    QObject::connect(&model, &TreeSizingAsins::variantImagesFetched,
+                     &model, [&](const QList<QPair<QString, QStringList>>& v) { capturedVariants = v; });
+    QObject::connect(&model, &TreeSizingAsins::colorAsinsReady,
+                     &model, [&](const QMap<QString, QStringList>& m) { capturedColorAsins = m; });
+
+    QSignalSpy resetSpy(&model, &QAbstractItemModel::modelReset);
+    model.load("B0HKCP1JS9");
+    QVERIFY2(waitForModelReset(resetSpy), "TreeSizingAsins did not emit modelReset");
+
+    const QModelIndex parentIdx = model.index(0, 0, QModelIndex{});
+    QVERIFY(parentIdx.isValid());
+    QCOMPARE(model.rowCount(parentIdx), 2);
+
+    // Both children must be unified to English "Brown"
+    QCOMPARE(model.data(model.index(0, TreeSizingAsins::Color, parentIdx), Qt::DisplayRole).toString(),
+             QStringLiteral("Brown"));
+    QCOMPARE(model.data(model.index(1, TreeSizingAsins::Color, parentIdx), Qt::DisplayRole).toString(),
+             QStringLiteral("Brown"));
+
+    // Only one distinct color variant emitted
+    QCOMPARE(capturedVariants.size(), 1);
+    QCOMPARE(capturedVariants.first().first, QStringLiteral("Brown"));
+
+    // colorAsinsReady maps "brown" to both child ASINs
+    QCOMPARE(capturedColorAsins.size(), 1);
+    QCOMPARE(capturedColorAsins.value(QStringLiteral("brown")),
+             (QStringList{QStringLiteral("B0HJD8JLSC"), QStringLiteral("B0HJD59LWF")}));
+#else
+    QSKIP("AMAZONCATALOGAPI_UNIT_TESTS not defined");
+#endif
+}
+
+void Test_Tree_Sizing_Asins::test_fetch_child_health_not_found_error_body()
+{
+#ifdef AMAZONCATALOGAPI_UNIT_TESTS
+    AmazonCatalogApi api("clientId", "clientSecret", "refreshToken",
+                         "refreshToken", "refreshToken");
+    api.setMockForTests([](const QString&, const QMap<QString,QString>&) -> QByteArray {
+        return QByteArrayLiteral(
+            R"({"errors":[{"code":"NOT_FOUND","message":"Requested item, B0HJD8JLSC, not found in marketplace(s) A1F83G8C2ARO7P."}]})");
+    });
+
+    AmazonCatalogApi::ChildHealthInfo info;
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+    auto task = [&]() -> QCoro::Task<void> {
+        co_await api.fetchChildHealth(QStringLiteral("B0HJD8JLSC"),
+                                      QStringLiteral("A1F83G8C2ARO7P"), &info);
+        loop.quit();
+    }();
+    Q_UNUSED(task);
+    timeout.start(5000);
+    loop.exec();
+
+    QVERIFY(!info.exists);
+    QVERIFY(info.parentAsin.isEmpty());
+    QCOMPARE(info.imageCount, 0);
 #else
     QSKIP("AMAZONCATALOGAPI_UNIT_TESTS not defined");
 #endif

@@ -282,6 +282,9 @@ void FillerSizeTests::testConvertSizeShoe_data()
     QTest::newRow("FR33_to_UK") << "33" << "FR" << "UK" << "1";
     QTest::newRow("FR34_to_US") << "34" << "FR" << "COM" << "3";
     QTest::newRow("FR34_to_UK") << "34" << "FR" << "UK" << "1.5";
+    QTest::newRow("US_4_Narrow_to_FR") << "4 Narrow" << "US" << "FR" << "35";
+    QTest::newRow("DE_35_EU_Schmal_to_FR") << "35 EU Schmal" << "DE" << "FR" << "35";
+    QTest::newRow("FR_35_EU_Schmal_to_FR") << "35 EU Schmal" << "FR" << "FR" << "35";
 }
 
 void FillerSizeTests::testConvertSizeShoe()

@@ -14,62 +14,112 @@
 namespace {
 constexpr const char* kJsonFileName = "sizing_upload.json";
 
-// Map well-known non-English single-word color names to their English canonical
-// form so that "Schwarz" and "Black" (or "Noir" and "Black") dedup correctly
-// when Amazon's UK normalisation step didn't cover every child ASIN.
-// Only unambiguous, single-word, case-insensitive matches are handled; compound
-// colours such as "Schwarz-Weiß" are left unchanged because the English compound
-// may differ structurally.
+// Map well-known non-English color names to their English canonical form so
+// that "Schwarz" and "Black" (or "Braun Kastanienbraun" and "Brown") dedup
+// correctly when Amazon's UK normalisation step didn't cover every child ASIN.
+// Multi-word strings whose tokens all resolve to the same base colour (such as
+// "Braun Kastanienbraun" → brown + chestnut-brown → brown) are collapsed to that
+// canonical colour, while genuinely multi-colour compounds such as "Schwarz-Weiß"
+// (black + white) are left unchanged.
 static QString canonicalColorKey(const QString &colorLower)
 {
     static const QHash<QString, QString> kMap = {
         // German
-        {QStringLiteral("schwarz"),  QStringLiteral("black")},
-        {QStringLiteral("weiß"),     QStringLiteral("white")},
-        {QStringLiteral("weiss"),    QStringLiteral("white")},
-        {QStringLiteral("grau"),     QStringLiteral("grey")},
-        {QStringLiteral("silber"),   QStringLiteral("silver")},
-        {QStringLiteral("gold"),     QStringLiteral("gold")},
-        {QStringLiteral("blau"),     QStringLiteral("blue")},
-        {QStringLiteral("rot"),      QStringLiteral("red")},
-        {QStringLiteral("gelb"),     QStringLiteral("yellow")},
-        {QStringLiteral("grün"),     QStringLiteral("green")},
-        {QStringLiteral("gruen"),    QStringLiteral("green")},
-        {QStringLiteral("braun"),    QStringLiteral("brown")},
-        {QStringLiteral("marine"),   QStringLiteral("navy")},
+        {QStringLiteral("schwarz"),        QStringLiteral("black")},
+        {QStringLiteral("weiß"),           QStringLiteral("white")},
+        {QStringLiteral("weiss"),          QStringLiteral("white")},
+        {QStringLiteral("grau"),           QStringLiteral("grey")},
+        {QStringLiteral("silber"),         QStringLiteral("silver")},
+        {QStringLiteral("gold"),           QStringLiteral("gold")},
+        {QStringLiteral("blau"),           QStringLiteral("blue")},
+        {QStringLiteral("rot"),            QStringLiteral("red")},
+        {QStringLiteral("gelb"),           QStringLiteral("yellow")},
+        {QStringLiteral("grün"),           QStringLiteral("green")},
+        {QStringLiteral("gruen"),          QStringLiteral("green")},
+        {QStringLiteral("braun"),          QStringLiteral("brown")},
+        {QStringLiteral("kastanienbraun"), QStringLiteral("brown")},
+        {QStringLiteral("marine"),         QStringLiteral("navy")},
+        // Dutch
+        {QStringLiteral("zwart"),          QStringLiteral("black")},
+        {QStringLiteral("wit"),            QStringLiteral("white")},
+        {QStringLiteral("grijs"),          QStringLiteral("grey")},
+        {QStringLiteral("zilver"),         QStringLiteral("silver")},
+        {QStringLiteral("blauw"),          QStringLiteral("blue")},
+        {QStringLiteral("rood"),           QStringLiteral("red")},
+        {QStringLiteral("geel"),           QStringLiteral("yellow")},
+        {QStringLiteral("groen"),          QStringLiteral("green")},
+        {QStringLiteral("bruin"),          QStringLiteral("brown")},
+        {QStringLiteral("kastanjebruin"),  QStringLiteral("brown")},
         // French
-        {QStringLiteral("noir"),     QStringLiteral("black")},
-        {QStringLiteral("blanc"),    QStringLiteral("white")},
-        {QStringLiteral("gris"),     QStringLiteral("grey")},
-        {QStringLiteral("argent"),   QStringLiteral("silver")},
-        {QStringLiteral("bleu"),     QStringLiteral("blue")},
-        {QStringLiteral("rouge"),    QStringLiteral("red")},
-        {QStringLiteral("jaune"),    QStringLiteral("yellow")},
-        {QStringLiteral("vert"),     QStringLiteral("green")},
-        {QStringLiteral("marron"),   QStringLiteral("brown")},
-        {QStringLiteral("brun"),     QStringLiteral("brown")},
+        {QStringLiteral("noir"),           QStringLiteral("black")},
+        {QStringLiteral("blanc"),          QStringLiteral("white")},
+        {QStringLiteral("gris"),           QStringLiteral("grey")},
+        {QStringLiteral("argent"),         QStringLiteral("silver")},
+        {QStringLiteral("bleu"),           QStringLiteral("blue")},
+        {QStringLiteral("rouge"),          QStringLiteral("red")},
+        {QStringLiteral("jaune"),          QStringLiteral("yellow")},
+        {QStringLiteral("vert"),           QStringLiteral("green")},
+        {QStringLiteral("marron"),         QStringLiteral("brown")},
+        {QStringLiteral("brun"),           QStringLiteral("brown")},
+        {QStringLiteral("châtain"),        QStringLiteral("brown")},
+        {QStringLiteral("chatain"),        QStringLiteral("brown")},
         // Italian
-        {QStringLiteral("nero"),     QStringLiteral("black")},
-        {QStringLiteral("bianco"),   QStringLiteral("white")},
-        {QStringLiteral("grigio"),   QStringLiteral("grey")},
-        {QStringLiteral("rosso"),    QStringLiteral("red")},
-        {QStringLiteral("blu"),      QStringLiteral("blue")},
-        {QStringLiteral("giallo"),   QStringLiteral("yellow")},
-        {QStringLiteral("verde"),    QStringLiteral("green")},
-        {QStringLiteral("marrone"),  QStringLiteral("brown")},
+        {QStringLiteral("nero"),           QStringLiteral("black")},
+        {QStringLiteral("bianco"),         QStringLiteral("white")},
+        {QStringLiteral("grigio"),         QStringLiteral("grey")},
+        {QStringLiteral("rosso"),          QStringLiteral("red")},
+        {QStringLiteral("blu"),            QStringLiteral("blue")},
+        {QStringLiteral("giallo"),         QStringLiteral("yellow")},
+        {QStringLiteral("verde"),          QStringLiteral("green")},
+        {QStringLiteral("marrone"),        QStringLiteral("brown")},
+        {QStringLiteral("castano"),        QStringLiteral("brown")},
         // Spanish
-        {QStringLiteral("negro"),    QStringLiteral("black")},
-        {QStringLiteral("blanco"),   QStringLiteral("white")},
-        {QStringLiteral("gris"),     QStringLiteral("grey")},
-        {QStringLiteral("plata"),    QStringLiteral("silver")},
-        {QStringLiteral("azul"),     QStringLiteral("blue")},
-        {QStringLiteral("rojo"),     QStringLiteral("red")},
-        {QStringLiteral("amarillo"), QStringLiteral("yellow")},
-        {QStringLiteral("verde"),    QStringLiteral("green")},
-        {QStringLiteral("marrón"),   QStringLiteral("brown")},
-        {QStringLiteral("marron"),   QStringLiteral("brown")},
+        {QStringLiteral("negro"),          QStringLiteral("black")},
+        {QStringLiteral("blanco"),         QStringLiteral("white")},
+        {QStringLiteral("gris"),           QStringLiteral("grey")},
+        {QStringLiteral("plata"),          QStringLiteral("silver")},
+        {QStringLiteral("azul"),           QStringLiteral("blue")},
+        {QStringLiteral("rojo"),           QStringLiteral("red")},
+        {QStringLiteral("amarillo"),       QStringLiteral("yellow")},
+        {QStringLiteral("verde"),          QStringLiteral("green")},
+        {QStringLiteral("marrón"),         QStringLiteral("brown")},
+        {QStringLiteral("marron"),         QStringLiteral("brown")},
+        {QStringLiteral("castaño"),        QStringLiteral("brown")},
     };
-    return kMap.value(colorLower, colorLower);
+    const QString trimmed = colorLower.trimmed();
+    if (kMap.contains(trimmed))
+        return kMap.value(trimmed);
+
+    static const QRegularExpression kTokenSplit(QStringLiteral(R"([^\p{L}\p{N}]+)"));
+    const QStringList tokens = trimmed.split(kTokenSplit, Qt::SkipEmptyParts);
+    if (tokens.size() >= 2) {
+        QString unified;
+        bool allSame = true;
+        for (const QString &tok : tokens) {
+            QString mapped = kMap.value(tok);
+            if (mapped.isEmpty()) {
+                for (auto it = kMap.constBegin(); it != kMap.constEnd(); ++it) {
+                    if (it.key().size() >= 4 && tok.size() > it.key().size()
+                        && tok.endsWith(it.key())) {
+                        mapped = it.value();
+                        break;
+                    }
+                }
+            }
+            if (mapped.isEmpty())
+                mapped = tok;
+            if (unified.isEmpty()) {
+                unified = mapped;
+            } else if (unified != mapped) {
+                allSame = false;
+                break;
+            }
+        }
+        if (allSame && !unified.isEmpty())
+            return unified;
+    }
+
+    return trimmed;
 }
 
 // Representative marketplace ID per geographic region, tried in order when
@@ -419,9 +469,9 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
             // Two-pass approach: first build a canonical-key → children map so we can
             // prefer the English display name when multiple language variants exist.
             using AsinItem = AmazonCatalogApi::AsinItem;
-            QMap<QString, QList<const AsinItem *>> canonicalGroups;
+            QMap<QString, QList<AsinItem *>> canonicalGroups;
             QList<QString> canonicalOrder; // insertion-order for stable output
-            for (const auto& c : family.children) {
+            for (auto& c : family.children) {
                 if (c.color.isEmpty()) continue;
                 const QString canon = canonicalColorKey(c.color.toLower());
                 if (!canonicalGroups.contains(canon))
@@ -436,7 +486,7 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
             logLines << tr("Color detection for %1:").arg(family.parentAsin);
 
             for (const QString &canon : canonicalOrder) {
-                const QList<const AsinItem *> &group = canonicalGroups[canon];
+                const QList<AsinItem *> &group = canonicalGroups[canon];
                 // Prefer the English (un-translated) name; fall back to first seen.
                 QString displayColor = group.first()->color;
                 for (const AsinItem *child : group) {
@@ -461,6 +511,16 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
                                 .arg(displayColor)
                                 .arg(group.first()->allImageUrls.size());
                 }
+                // Propagate the canonical display colour back onto every child in this
+                // group so the tree model, colorAsinsReady, and BrokenChildTable all see
+                // a single unified colour name rather than per-marketplace translations.
+                for (AsinItem *ch : group)
+                    ch->color = displayColor;
+            }
+            if (!newFamilies.isEmpty()) {
+                ParentItem &lastFam = newFamilies.back();
+                for (int ci = 0; ci < lastFam.children.size() && ci < family.children.size(); ++ci)
+                    lastFam.children[ci].color = family.children[ci].color;
             }
 
             logLines << tr("  → %1 distinct color(s): %2")

@@ -100,6 +100,11 @@ public:
     int marketplaceCount() const { return m_specs.size(); }
     const MarketplaceSpec &marketplaceAt(int i) const { return m_specs[i]; }
 
+    // Returns uppercase country codes (in marketplace column order) that have at
+    // least one broken child, excluding marketplaces where all children have
+    // imageCount == 0 (which means the product page is not created there).
+    QStringList brokenMarketplaceCodes() const;
+
     int           rowCount(const QModelIndex &parent = {}) const override;
     int           columnCount(const QModelIndex &parent = {}) const override;
     QVariant      data(const QModelIndex &index, int role = Qt::DisplayRole) const override;
@@ -124,4 +129,6 @@ private:
 
     // m_maxImages[colorKey][mktIdx] = max imageCount among all rows with that color
     QMap<QString, QVector<int>> m_maxImages;
+    // m_mktMaxImages[mktIdx] = max imageCount across all existing rows in that marketplace
+    QVector<int>                m_mktMaxImages;
 };

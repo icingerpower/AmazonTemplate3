@@ -124,6 +124,7 @@ public:
     // Out fields are left empty if the attribute is absent or the call fails.
     struct CatalogApparelAttrs {
         QString color;       // "color" attribute
+        QString size;        // "size" attribute (or composite apparel_size / footwear_size fallback)
         QString sizeSystem;  // "apparel_size_system"
         QString sizeClass;   // "apparel_size_class"
         QString gender;      // "target_gender"
@@ -317,6 +318,17 @@ public:
                                              QJsonArray storedValue,
                                              bool* success,
                                              QString* detailsOut = nullptr);
+
+    // Direct Listings Items API PUT with requirements=LISTING_PRODUCT_ONLY.
+    // Synchronously creates or validates a non-offer parent product listing and
+    // returns immediate validation issues + any missing schema attribute names.
+    // GCC 13 ICE workaround: params by value.
+    QCoro::Task<void> putListingProductOnly(QString marketplaceId, QString sku,
+                                            QString productType,
+                                            QJsonObject attributes,
+                                            bool* success,
+                                            QString* detailsOut = nullptr,
+                                            QStringList* missingAttrNamesOut = nullptr);
 
     // Builds and uploads a JSON_LISTINGS_FEED variation relationship feed via the Feeds API.
     // Fetches nothing — all data is passed in. Polls until DONE (3 min max).

@@ -357,6 +357,7 @@ private:
                                                   QJsonArray* messagesOut,
                                                   QStringList* logOut);
     void _refreshBrokenAttrCombo();
+    void _updateBrokenChildLabel();
     // Returns the marketplace ID currently selected in comboBoxBrokenAttrMarket.
     QString _brokenAttrMarketplaceId() const;
     void _downloadMainImage(const QString &url, const QString &asin);

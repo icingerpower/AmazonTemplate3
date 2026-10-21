@@ -579,28 +579,47 @@ QString FillerSize::convertSize(const QString &origSize,
     };
     const QString from = norm(countryFrom);
     const QString to   = norm(countryTo);
-    if (from == to) return origSize;
+    if (from == to && !origSize.contains(QLatin1Char(' '))) return origSize;
 
     const bool isFemale = gender.compare(QStringLiteral("male"), Qt::CaseInsensitive) != 0;
 
     if (isShoes) {
         const auto &table = isFemale ? SHOE_FEMALE_ADULT_SIZES : SHOE_MALE_ADULT_SIZES;
         bool ok = false;
-        const double num = origSize.toDouble(&ok);
+        double num = origSize.toDouble(&ok);
+        if (!ok && origSize.contains(QLatin1Char(' '))) {
+            QStringList elems = origSize.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+            if (!elems.isEmpty() && elems.first().contains(QLatin1String("CN"), Qt::CaseInsensitive))
+                elems.append(elems.takeFirst());
+            for (QString elem : std::as_const(elems)) {
+                elem.replace(QLatin1Char(','), QLatin1Char('.'));
+                num = elem.toDouble(&ok);
+                if (ok) break;
+            }
+        }
         if (ok) {
             for (const auto &row : table) {
                 if (row.contains(from) && row.contains(to)
                         && qFuzzyCompare(row[from], num))
                     return QString::number(row[to], 'g', 4);
             }
+            if (from == to)
+                return QString::number(num, 'g', 4);
         }
         return origSize;
     }
 
+    if (from == to) return origSize;
+
     // Clothing: numeric lookup first.
     const auto &table = isFemale ? CLOTHE_FEMALE_ADULT_SIZES : CLOTHE_MALE_ADULT_SIZES;
     bool ok = false;
-    const int num = origSize.toInt(&ok);
+    int num = origSize.toInt(&ok);
+    if (!ok && origSize.contains(QLatin1Char(' '))) {
+        const QStringList elems = origSize.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+        if (!elems.isEmpty())
+            num = elems.first().toInt(&ok);
+    }
     if (ok) {
         for (const auto &row : table) {
             if (row.contains(from) && row.contains(to) && row[from] == num)
