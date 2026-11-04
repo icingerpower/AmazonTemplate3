@@ -128,6 +128,7 @@ export async function openComplianceFor(
   let current = await currentMarketplace(page);
   if (current === mp.countryName) {
     log(`[gspr:${mp.country}] already on "${current}"`);
+    await maximizeMainTablePageSize(page, mp.country);
     return current;
   }
 
@@ -160,8 +161,11 @@ export async function openComplianceFor(
 
   current = await currentMarketplace(page);
   log(`[gspr:${mp.country}] landed with marketplace "${current}"`);
-  if (current !== mp.countryName)
+  if (current !== mp.countryName) {
     await dumpDebug(page, debugDir, "switch-failed");
+  } else {
+    await maximizeMainTablePageSize(page, mp.country);
+  }
   return current;
 }
 
@@ -171,6 +175,69 @@ async function settle(page: Page): Promise<void> {
   // only ends by timeout — keep it short or every step feels blocked.
   await page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
   await page.waitForTimeout(2000);
+}
+
+/**
+ * Switch the main compliance table's page-size dropdown from 25 to 100 when
+ * pagination is visible (> 25 rows), so warnings past row 25 (including
+ * expandable RP and MFR groups at the bottom of the list) are loaded onto
+ * page 1.
+ */
+async function maximizeMainTablePageSize(page: Page, country: string): Promise<void> {
+  const control = page.locator('[data-testid="ahd-pp-pagination-control"]').first();
+  if (!(await control.isVisible().catch(() => false))) return;
+  const dd = page.locator('#ahd-pp-pagination-page-size-dropdown').first();
+  if (!(await dd.count())) return;
+  const currentVal = await dd.getAttribute("value").catch(() => null);
+  if (currentVal === "100") return;
+
+  log(`[gspr:${country}] switching main compliance table page size from ${currentVal ?? "25"} to 100…`);
+  await dd.evaluate((el: Element) => {
+    (el as Element & { value?: string }).value = "100";
+    el.setAttribute("value", "100");
+    el.dispatchEvent(new CustomEvent("change", {
+      detail: { value: "100" },
+      bubbles: true,
+      composed: true,
+    }));
+  }).catch(() => {});
+  await page.waitForTimeout(1000);
+  await page.locator('#ahd-product-policies-spinner')
+    .waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
+  await settle(page);
+}
+
+/** Number of pages on the main compliance table (1 if pagination is hidden). */
+async function getMainTablePageCount(page: Page): Promise<number> {
+  const control = page.locator('[data-testid="ahd-pp-pagination-control"]').first();
+  if (!(await control.isVisible().catch(() => false))) return 1;
+  const input = page.locator('#ahd-pp-pagination-page-num-input').first();
+  if (!(await input.count())) return 1;
+  const maxAttr = await input.getAttribute("max").catch(() => null);
+  const maxPage = maxAttr ? parseInt(maxAttr, 10) : 1;
+  return Number.isFinite(maxPage) && maxPage > 1 ? maxPage : 1;
+}
+
+/** Navigate the main compliance table to `targetPage` (1-indexed). */
+async function goToMainTablePage(page: Page, country: string, targetPage: number): Promise<boolean> {
+  const pager = page.locator('#ahd-pp-pagination-katal-control').first();
+  if (!(await pager.count())) return false;
+  const currentAttr = await pager.getAttribute("page").catch(() => null);
+  if (currentAttr && parseInt(currentAttr, 10) === targetPage) return true;
+
+  log(`[gspr:${country}] navigating main compliance table to page ${targetPage}…`);
+  await pager.evaluate((el: Element, p: number) => {
+    el.dispatchEvent(new CustomEvent("page-changed", {
+      detail: { page: p },
+      bubbles: true,
+      composed: true,
+    }));
+  }, targetPage).catch(() => {});
+  await page.waitForTimeout(1000);
+  await page.locator('#ahd-product-policies-spinner')
+    .waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
+  await settle(page);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,14 +256,21 @@ const REASON_PSI   = "GPSR: warning and safety information";
 const FLYOUT        = "#flyout-root";
 const FLYOUT_PANEL  = `${FLYOUT} .flyoutPanel.active`;
 const FLYOUT_CLOSE  = `${FLYOUT} .flyoutPanelContent > span`;
-const ATTEST_CARD   = `${FLYOUT} [role="button"][aria-label="Safety attestation"]`;
-const ATTEST_CHECKBOX = `${FLYOUT} kat-checkbox[label*="warning and safety information"]`;
+// Old drawer UI (chunk 475): <div role="button" aria-label="Safety attestation">
+// New drawer UI (chunk 259): <kat-card aria-label="Safety attestation, Status: Not started">
+const ATTEST_CARD   = `${FLYOUT} [role="button"][aria-label^="Safety attestation"], `
+                    + `${FLYOUT} kat-card[aria-label^="Safety attestation"]`;
+const ATTEST_CHECKBOX = `${FLYOUT} kat-checkbox[label*="warning and safety information"], `
+                      + `${FLYOUT} kat-checkbox:has-text("warning and safety information"), `
+                      + `${FLYOUT} kat-checkbox`;
 const SAVE_BUTTON   = `${FLYOUT} kat-button[label="Save"], ${FLYOUT} kat-button[label="Submit"], `
                     + `${FLYOUT} kat-button:has-text("Save"), ${FLYOUT} kat-button:has-text("Submit"), `
                     + `${FLYOUT} button:has-text("Save"), ${FLYOUT} button:has-text("Submit")`;
-const CLOSE_BUTTON  = `${FLYOUT} kat-button:has-text("Close"), ${FLYOUT} kat-button:has-text("Fermer"), `
-                    + `${FLYOUT} button:has-text("Close"), ${FLYOUT} button:has-text("Fermer"), `
-                    + `${FLYOUT} kat-button[label="Close"], ${FLYOUT} kat-button[label="Fermer"]`;
+const CLOSE_BUTTON  = `${FLYOUT} kat-button:not([disabled]):has-text("Close"), ${FLYOUT} kat-button:not([disabled]):has-text("Fermer"), `
+                    + `${FLYOUT} button:not([disabled]):has-text("Close"), ${FLYOUT} button:not([disabled]):has-text("Fermer"), `
+                    + `${FLYOUT} kat-button:not([disabled])[label="Close"], ${FLYOUT} kat-button:not([disabled])[label="Fermer"]`;
+const UNDER_REVIEW_NOTE = `${FLYOUT} :text-matches("submission is under review", "i"), `
+                        + `${FLYOUT} [role="heading"]:has-text("Under review")`;
 
 /** Close the side pane if it is open; true when it ended up closed. */
 async function ensureDrawerClosed(page: Page): Promise<boolean> {
@@ -204,7 +278,7 @@ async function ensureDrawerClosed(page: Page): Promise<boolean> {
   const overlay = page.locator(`${FLYOUT} .flyoutOverlay`);
   if (!(await panel.isVisible().catch(() => false))) {
     if (await overlay.isVisible().catch(() => false)) {
-      await overlay.click({ force: true }).catch(() => {});
+      await overlay.click({ force: true, timeout: 1_000 }).catch(() => {});
       await overlay.waitFor({ state: "hidden", timeout: 1_000 }).catch(() => {});
     }
     return true;
@@ -213,18 +287,22 @@ async function ensureDrawerClosed(page: Page): Promise<boolean> {
   // 1. Click the '×' close control (instant & most reliable)
   const closeSpan = page.locator(FLYOUT_CLOSE).first();
   if (await closeSpan.isVisible().catch(() => false)) {
-    await closeSpan.click({ force: true }).catch(() => {});
+    await closeSpan.click({ force: true, timeout: 1_500 }).catch(() => {});
     if (await panel.waitFor({ state: "hidden", timeout: 2_000 }).then(() => true).catch(() => false)) {
       await overlay.waitFor({ state: "hidden", timeout: 1_000 }).catch(() => {});
       return true;
     }
   }
 
-  // 2. Click Close button if present (both inner shadow button and host)
+  // 2. Click Close button if present (inner shadow button or host, never both sequentially)
   const closeBtn = page.locator(CLOSE_BUTTON).first();
   if (await closeBtn.isVisible().catch(() => false)) {
-    await closeBtn.locator("button").first().click({ force: true }).catch(() => {});
-    await closeBtn.click({ force: true }).catch(() => {});
+    const innerBtn = closeBtn.locator("button").first();
+    if (await innerBtn.isVisible().catch(() => false)) {
+      await innerBtn.click({ force: true, timeout: 1_500 }).catch(() => {});
+    } else {
+      await closeBtn.click({ force: true, timeout: 1_500 }).catch(() => {});
+    }
     if (await panel.waitFor({ state: "hidden", timeout: 2_000 }).then(() => true).catch(() => false)) {
       await overlay.waitFor({ state: "hidden", timeout: 1_000 }).catch(() => {});
       return true;
@@ -233,13 +311,13 @@ async function ensureDrawerClosed(page: Page): Promise<boolean> {
 
   // 3. Try Escape key
   await page.keyboard.press("Escape").catch(() => {});
-  if (await panel.waitFor({ state: "hidden", timeout: 2_000 }).then(() => true).catch(() => false)) {
+  if (await panel.waitFor({ state: "hidden", timeout: 1_500 }).then(() => true).catch(() => false)) {
     await overlay.waitFor({ state: "hidden", timeout: 1_000 }).catch(() => {});
     return true;
   }
 
   // 4. Click the overlay backdrop
-  await overlay.first().click({ force: true }).catch(() => {});
+  await overlay.first().click({ force: true, timeout: 1_500 }).catch(() => {});
   const ok = await panel.waitFor({ state: "hidden", timeout: 2_000 }).then(() => true).catch(() => false);
   if (ok) {
     await overlay.waitFor({ state: "hidden", timeout: 1_000 }).catch(() => {});
@@ -268,187 +346,212 @@ async function checkboxTicked(page: Page): Promise<boolean> {
 export async function processSafetyWarnings(
   page: Page, mp: GsprMarketplace, dumpDir: string, userSkip: Set<string>
 ): Promise<GsprWarningOutcome[]> {
-  // The per-ASIN rows carry stable testids: the reason cell ends with
-  // _{ASIN}_COSS.GPSR_PSI_ASIN and the action button (when the row is
-  // actionable) is ahd-action-button-{ASIN}. Grouped/expandable warnings
-  // don't match that suffix and are skipped for now.
-  interface RowInfo { asin: string; statusText: string; hasButton: boolean; }
-  const rows: RowInfo[] = await page.evaluate(
-    ({ rowSel, reason }: { rowSel: string; reason: string }) => {
-      const found: { asin: string; statusText: string; hasButton: boolean }[] = [];
-      for (const row of Array.from(document.querySelectorAll(rowSel))) {
-        const reasonCell = row.querySelector('[data-testid^="ahd-ppc-row-reason-"]');
-        if (!reasonCell?.textContent?.includes(reason)) continue;
-        const m = reasonCell.getAttribute("data-testid")
-          ?.match(/_([A-Z0-9]{10})_COSS\.GPSR_PSI_ASIN$/);
-        if (!m?.[1]) continue;
-        const statusEl = row.querySelector('[data-testid^="ahd-ppc-row-next-steps-"]');
-        found.push({
-          asin: m[1],
-          statusText: (statusEl?.textContent ?? "").replace(/\s+/g, " ").trim(),
-          hasButton: !!row.querySelector(`[data-testid="ahd-action-button-${m[1]}"]`),
-        });
-      }
-      return found;
-    }, { rowSel: ROW_SELECTOR, reason: REASON_PSI });
-
   const skip = new Set(mp.skipAsins ?? []);
-  log(`[gspr:${mp.country}] ${rows.length} "${REASON_PSI}" row(s) on the page`);
+  const seenAsins = new Set<string>();
   const out: GsprWarningOutcome[] = [];
   // Emit each outcome the moment it is known: the Qt app records it live, so
   // an interrupted run keeps the progress made so far.
   const record = (o: GsprWarningOutcome) => { emitOutcome(mp.country, o); out.push(o); };
   let firstForm = true;
+  let stopped = false;
 
-  for (const row of rows) {
-    const { asin } = row;
-
-    if (userSkip.has(asin)) {
-      log(`[gspr:${mp.country}] ${asin}: skipped by the user`);
-      record({ asin, ok: true, status: "user-skipped", statusText: row.statusText });
-      continue;
-    }
-    if (skip.has(asin)) {
-      log(`[gspr:${mp.country}] ${asin}: already done earlier — skipped`);
-      record({ asin, ok: true, status: "skipped", statusText: row.statusText });
-      continue;
-    }
-    // No Submit button, or a status other than "submission is required":
-    // someone (or a previous run) already submitted — never touch it again.
-    if (!row.hasButton || !/submission is required/i.test(row.statusText)) {
-      log(`[gspr:${mp.country}] ${asin}: not actionable (${row.statusText || "no status"}) — pending`);
-      record({ asin, ok: true, status: "pending", statusText: row.statusText });
-      continue;
-    }
-
-    try {
-      // A pane left open from the previous ASIN swallows the Submit click.
-      if (!(await ensureDrawerClosed(page))) {
-        log(`[gspr:${mp.country}] ${asin}: previous pane would not close — stopping`);
-        record({ asin, ok: false, status: "failed", reason: "previous pane would not close" });
-        break;
-      }
-
-      // Amazon renders hidden "shadow-compare" duplicates of rows with the
-      // SAME testids — :visible avoids waiting 30 s on the hidden copy.
-      const btn = page.locator(`kat-button[data-testid="ahd-action-button-${asin}"]:visible`).first();
-      await btn.scrollIntoViewIfNeeded().catch(() => {});
-      await btn.click();
-      await page.locator(FLYOUT_PANEL).waitFor({ state: "visible", timeout: 10_000 });
-
-      const card = page.locator(ATTEST_CARD).first();
-      if (!(await card.waitFor({ state: "visible", timeout: 10_000 })
-              .then(() => true).catch(() => false))) {
-        log(`[gspr:${mp.country}] ${asin}: no "Safety attestation" option`);
-        await dumpDebug(page, dumpDir, `no-attestation-${asin}`);
-        record({ asin, ok: false, status: "failed", reason: "Safety attestation option not available" });
-        continue;
-      }
-      await card.click();
-
-      // The attestation view is either the form (checkbox + Save) or an
-      // "Under review" notice when a submission already exists — the table
-      // row's status lags behind, so this is where pending is detected.
-      // Race both markers instead of burning the full timeout on one.
-      const checkbox   = page.locator(ATTEST_CHECKBOX).first();
-      const reviewNote = page.locator(FLYOUT)
-        .getByText(/submission is under review/i).first();
-      const formState = await Promise.race([
-        checkbox.waitFor({ state: "visible", timeout: 10_000 })
-          .then(() => "form").catch(() => null),
-        reviewNote.waitFor({ state: "visible", timeout: 10_000 })
-          .then(() => "review").catch(() => null),
-      ]);
-      if (formState === "review") {
-        log(`[gspr:${mp.country}] ${asin}: already under review — pending`);
-        record({ asin, ok: true, status: "pending",
-                   statusText: "Under review (submission pane)" });
-        await ensureDrawerClosed(page);
-        continue;
-      }
-      if (formState === null) {
-        log(`[gspr:${mp.country}] ${asin}: attestation checkbox not found`);
-        await dumpDebug(page, dumpDir, `no-checkbox-${asin}`);
-        record({ asin, ok: false, status: "failed", reason: "attestation checkbox not found" });
-        continue;
-      }
-      if (firstForm) {  // one full dump of the attestation form for reference
-        await dumpDebug(page, dumpDir, `attest-form-${asin}`);
-        firstForm = false;
-      }
-
-      // kat-checkbox is a shadow-DOM web component: a normal click never
-      // passes Playwright's hit-target check (its inner layers "intercept
-      // pointer events"), so force the click, then verify — with a JS-level
-      // fallback that sets the property and emits change.
-      await checkbox.click({ force: true });
-      await page.waitForTimeout(500);
-      if (!(await checkboxTicked(page))) {
-        await checkbox.evaluate((el: Element) => {
-          const cb = el as Element & { checked?: boolean; value?: string };
-          cb.checked = true;
-          cb.value = "true";
-          el.dispatchEvent(new Event("input",  { bubbles: true, composed: true }));
-          el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
-        });
-        await page.waitForTimeout(500);
-      }
-      if (!(await checkboxTicked(page))) {
-        log(`[gspr:${mp.country}] ${asin}: could not tick the attestation checkbox`);
-        await dumpDebug(page, dumpDir, `checkbox-stuck-${asin}`);
-        record({ asin, ok: false, status: "failed", reason: "could not tick the attestation checkbox" });
-        continue;
-      }
-
-      const save = page.locator(SAVE_BUTTON).last();
-      if (!(await save.waitFor({ state: "visible", timeout: 5_000 })
-              .then(() => true).catch(() => false))) {
-        log(`[gspr:${mp.country}] ${asin}: Save button not found`);
-        await dumpDebug(page, dumpDir, `no-save-${asin}`);
-        record({ asin, ok: false, status: "failed", reason: "Save button not found" });
-        continue;
-      }
-      await save.click();
-
-      // A successful save does NOT close the pane: it shows a confirmation
-      // (kat-box data-testid="success-page") with a Close button. Click it as
-      // soon as it appears instead of waiting on timeouts.
-      const successBox = page.locator(`${FLYOUT} [data-testid="success-page"]`).first();
-      if (await successBox.waitFor({ state: "visible", timeout: 15_000 })
-            .then(() => true).catch(() => false)) {
-        await page.locator(`${FLYOUT} kat-button[label="Close"]`).first()
-          .click().catch(() => {});
-        await page.locator(FLYOUT_PANEL)
-          .waitFor({ state: "hidden", timeout: 5_000 }).catch(() => {});
-      } else if (!(await page.locator(FLYOUT_PANEL).isHidden().catch(() => false))) {
-        // No confirmation and the pane is still open — a validation error.
-        log(`[gspr:${mp.country}] ${asin}: no confirmation after Save`);
-        await dumpDebug(page, dumpDir, `after-save-${asin}`);
-        record({ asin, ok: false, status: "failed", reason: "no confirmation after Save (validation error?)" });
-        continue;
-      }
-
-      log(`[gspr:${mp.country}] ${asin}: safety attestation saved`);
-      record({ asin, ok: true, status: "submitted" });
-    } catch (e) {
-      const msg = (e as Error).message ?? String(e);
-      if (pageCrashed || /crashed/i.test(msg) || e instanceof PageCrashedError) {
-        log(`[gspr:${mp.country}] page crashed during safety warning for ${asin} — aborting phase for relaunch`);
-        throw (e instanceof PageCrashedError ? e : new PageCrashedError(msg));
-      }
-      // A closed browser is the user stopping the run, not an ASIN failure —
-      // don't record anything for it.
-      if (/has been closed|Target (page|browser).*closed/i.test(msg)) {
-        log(`[gspr:${mp.country}] browser closed — treating as stop`);
-        break;
-      }
-      log(`[gspr:${mp.country}] ${asin} FAILED: ${msg}`);
-      await dumpDebug(page, dumpDir, `error-${asin}`).catch(() => {});
-      record({ asin, ok: false, status: "failed", reason: msg });
+  const maxMainPages = await getMainTablePageCount(page);
+  for (let mainPage = 1; mainPage <= maxMainPages && !stopped; mainPage++) {
+    if (mainPage > 1) {
       await ensureDrawerClosed(page);
+      if (!(await goToMainTablePage(page, mp.country, mainPage))) break;
+    }
+
+    // The per-ASIN rows carry stable testids: the reason cell ends with
+    // _{ASIN}_COSS.GPSR_PSI_ASIN and the action button (when the row is
+    // actionable) is ahd-action-button-{ASIN}. Grouped/expandable warnings
+    // don't match that suffix and are skipped for now.
+    interface RowInfo { asin: string; statusText: string; hasButton: boolean; }
+    const rows: RowInfo[] = await page.evaluate(
+      ({ rowSel, reason }: { rowSel: string; reason: string }) => {
+        const found: { asin: string; statusText: string; hasButton: boolean }[] = [];
+        for (const row of Array.from(document.querySelectorAll(rowSel))) {
+          const reasonCell = row.querySelector('[data-testid^="ahd-ppc-row-reason-"]');
+          if (!reasonCell?.textContent?.includes(reason)) continue;
+          const m = reasonCell.getAttribute("data-testid")
+            ?.match(/_([A-Z0-9]{10})_COSS\.GPSR_PSI_ASIN$/);
+          if (!m?.[1]) continue;
+          const statusEl = row.querySelector('[data-testid^="ahd-ppc-row-next-steps-"]');
+          found.push({
+            asin: m[1],
+            statusText: (statusEl?.textContent ?? "").replace(/\s+/g, " ").trim(),
+            hasButton: !!row.querySelector(`[data-testid="ahd-action-button-${m[1]}"]`),
+          });
+        }
+        return found;
+      }, { rowSel: ROW_SELECTOR, reason: REASON_PSI });
+
+    log(`[gspr:${mp.country}] ${rows.length} "${REASON_PSI}" row(s) on the page`
+        + (maxMainPages > 1 ? ` (page ${mainPage}/${maxMainPages})` : ""));
+
+    for (const row of rows) {
+      const { asin } = row;
+      if (seenAsins.has(asin)) continue;
+      seenAsins.add(asin);
+
+      if (userSkip.has(asin)) {
+        log(`[gspr:${mp.country}] ${asin}: skipped by the user`);
+        record({ asin, ok: true, status: "user-skipped", statusText: row.statusText });
+        continue;
+      }
+      if (skip.has(asin)) {
+        log(`[gspr:${mp.country}] ${asin}: already done earlier — skipped`);
+        record({ asin, ok: true, status: "skipped", statusText: row.statusText });
+        continue;
+      }
+      // No Submit button, or a status other than "submission is required":
+      // someone (or a previous run) already submitted — never touch it again.
+      if (!row.hasButton || !/submission is required/i.test(row.statusText)) {
+        log(`[gspr:${mp.country}] ${asin}: not actionable (${row.statusText || "no status"}) — pending`);
+        record({ asin, ok: true, status: "pending", statusText: row.statusText });
+        continue;
+      }
+
+      try {
+        // A pane left open from the previous ASIN swallows the Submit click.
+        if (!(await ensureDrawerClosed(page))) {
+          log(`[gspr:${mp.country}] ${asin}: previous pane would not close — stopping`);
+          record({ asin, ok: false, status: "failed", reason: "previous pane would not close" });
+          stopped = true;
+          break;
+        }
+
+        // Amazon renders hidden "shadow-compare" duplicates of rows with the
+        // SAME testids — :visible avoids waiting 30 s on the hidden copy.
+        const btn = page.locator(`kat-button[data-testid="ahd-action-button-${asin}"]:visible`).first();
+        await btn.scrollIntoViewIfNeeded().catch(() => {});
+        await btn.click();
+        await page.locator(FLYOUT_PANEL).waitFor({ state: "visible", timeout: 10_000 });
+        await page.locator(`${FLYOUT} .skeleton, ${FLYOUT} [role="status"][aria-label="Loading"]`)
+          .waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
+
+        const card = page.locator(ATTEST_CARD).first();
+        if (!(await card.waitFor({ state: "visible", timeout: 10_000 })
+                .then(() => true).catch(() => false))) {
+          log(`[gspr:${mp.country}] ${asin}: no "Safety attestation" option`);
+          await dumpDebug(page, dumpDir, `no-attestation-${asin}`);
+          record({ asin, ok: false, status: "failed", reason: "Safety attestation option not available" });
+          continue;
+        }
+
+        // In the new drawer UI (chunk 259), the card's aria-label already
+        // includes the status (e.g. "Safety attestation, Status: Under review").
+        const cardAria = (await card.getAttribute("aria-label").catch(() => "")) ?? "";
+        if (/under review/i.test(cardAria)) {
+          log(`[gspr:${mp.country}] ${asin}: already under review — pending`);
+          record({ asin, ok: true, status: "pending",
+                   statusText: "Under review (submission pane)" });
+          await ensureDrawerClosed(page);
+          continue;
+        }
+
+        await card.scrollIntoViewIfNeeded().catch(() => {});
+        await card.click();
+
+        // The attestation view is either the form (checkbox + Save/Submit) or an
+        // "Under review" notice when a submission already exists — the table
+        // row's status lags behind, so this is where pending is detected.
+        // Race both markers instead of burning the full timeout on one.
+        const checkbox   = page.locator(ATTEST_CHECKBOX).first();
+        const reviewNote = page.locator(UNDER_REVIEW_NOTE).first();
+        const formState = await Promise.race([
+          checkbox.waitFor({ state: "visible", timeout: 10_000 })
+            .then(() => "form").catch(() => null),
+          reviewNote.waitFor({ state: "visible", timeout: 10_000 })
+            .then(() => "review").catch(() => null),
+        ]);
+        if (formState === "review") {
+          log(`[gspr:${mp.country}] ${asin}: already under review — pending`);
+          record({ asin, ok: true, status: "pending",
+                     statusText: "Under review (submission pane)" });
+          await ensureDrawerClosed(page);
+          continue;
+        }
+        if (formState === null) {
+          log(`[gspr:${mp.country}] ${asin}: attestation checkbox not found`);
+          await dumpDebug(page, dumpDir, `no-checkbox-${asin}`);
+          record({ asin, ok: false, status: "failed", reason: "attestation checkbox not found" });
+          continue;
+        }
+        if (firstForm) {  // one full dump of the attestation form for reference
+          await dumpDebug(page, dumpDir, `attest-form-${asin}`);
+          firstForm = false;
+        }
+
+        // kat-checkbox is a shadow-DOM web component: a normal click never
+        // passes Playwright's hit-target check (its inner layers "intercept
+        // pointer events"), so force the click, then verify — with a JS-level
+        // fallback that sets the property and emits CustomEvent with detail.checked
+        // (required by the new drawer UI's `je` component in chunk 259).
+        await checkbox.scrollIntoViewIfNeeded().catch(() => {});
+        await checkbox.click({ force: true });
+        await page.waitForTimeout(500);
+        if (!(await checkboxTicked(page))) {
+          await checkbox.evaluate((el: Element) => {
+            const cb = el as Element & { checked?: boolean; value?: string };
+            cb.checked = true;
+            cb.value = "true";
+            el.setAttribute("checked", "");
+            el.setAttribute("value", "true");
+            el.dispatchEvent(new CustomEvent("input", {
+              detail: { checked: true, value: "true" },
+              bubbles: true,
+              composed: true,
+            }));
+            el.dispatchEvent(new CustomEvent("change", {
+              detail: { checked: true, value: "true" },
+              bubbles: true,
+              composed: true,
+            }));
+          });
+          await page.waitForTimeout(500);
+        }
+        if (!(await checkboxTicked(page))) {
+          log(`[gspr:${mp.country}] ${asin}: could not tick the attestation checkbox`);
+          await dumpDebug(page, dumpDir, `checkbox-stuck-${asin}`);
+          record({ asin, ok: false, status: "failed", reason: "could not tick the attestation checkbox" });
+          continue;
+        }
+
+        const failReason = await saveAndClose(page, dumpDir, `psi-${asin}`);
+        if (failReason) {
+          log(`[gspr:${mp.country}] ${asin}: ${failReason}`);
+          record({ asin, ok: false, status: "failed", reason: failReason });
+          await ensureDrawerClosed(page);
+          continue;
+        }
+
+        log(`[gspr:${mp.country}] ${asin}: safety attestation saved`);
+        record({ asin, ok: true, status: "submitted" });
+      } catch (e) {
+        const msg = (e as Error).message ?? String(e);
+        if (pageCrashed || /crashed/i.test(msg) || e instanceof PageCrashedError) {
+          log(`[gspr:${mp.country}] page crashed during safety warning for ${asin} — aborting phase for relaunch`);
+          throw (e instanceof PageCrashedError ? e : new PageCrashedError(msg));
+        }
+        // A closed browser is the user stopping the run, not an ASIN failure —
+        // don't record anything for it.
+        if (/has been closed|Target (page|browser).*closed/i.test(msg)) {
+          log(`[gspr:${mp.country}] browser closed — treating as stop`);
+          stopped = true;
+          break;
+        }
+        log(`[gspr:${mp.country}] ${asin} FAILED: ${msg}`);
+        await dumpDebug(page, dumpDir, `error-${asin}`).catch(() => {});
+        record({ asin, ok: false, status: "failed", reason: msg });
+        await ensureDrawerClosed(page);
+      }
     }
   }
   await ensureDrawerClosed(page);
+  if (maxMainPages > 1 && !stopped) {
+    await goToMainTablePage(page, mp.country, 1).catch(() => {});
+  }
   return out;
 }
 
@@ -470,10 +573,17 @@ async function saveAndClose(page: Page, dumpDir: string, tag: string): Promise<s
     await dumpDebug(page, dumpDir, `${tag}-no-save`);
     return "Save/Submit button not found";
   }
+  await save.scrollIntoViewIfNeeded().catch(() => {});
   await save.click({ force: true });
+
+  // Old UI (chunk 475): [data-testid="success-page"]
+  // New UI (chunk 259): `rn` renders [role="status"][aria-label="Loading"] while
+  // submitting, then renders `nn` (kat-icon[name="clock"]) and enables the
+  // primary Close button (kat-button:not([disabled])).
   const successBox = page.locator(
     `${FLYOUT} [data-testid="success-page"], `
     + `${FLYOUT} kat-box[variant="success"], `
+    + `${FLYOUT} kat-icon[name="clock"], `
     + `${FLYOUT} :text-matches("success|submitted|under review", "i")`
   ).first();
   const closeBtn = page.locator(CLOSE_BUTTON).first();
@@ -484,20 +594,16 @@ async function saveAndClose(page: Page, dumpDir: string, tag: string): Promise<s
     page.locator(FLYOUT_PANEL).waitFor({ state: "hidden", timeout: 15_000 }).then(() => true).catch(() => false),
   ]);
 
+  // If the new UI rendered an error alert on the confirmation screen, fail cleanly.
+  const errorAlert = page.locator(`${FLYOUT} kat-alert[variant="danger"], ${FLYOUT} [role="alert"]`).first();
+  if (await errorAlert.isVisible().catch(() => false)) {
+    await dumpDebug(page, dumpDir, `${tag}-after-save`);
+    const errText = (await errorAlert.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+    return errText ? `submission error: ${errText}` : "submission error after Save";
+  }
+
   if (confirmed) {
-    const closeSpan = page.locator(FLYOUT_CLOSE).first();
-    if (await closeSpan.isVisible().catch(() => false)) {
-      await closeSpan.click({ force: true }).catch(() => {});
-    }
-    if (await closeBtn.isVisible().catch(() => false)) {
-      await closeBtn.locator("button").first().click({ force: true }).catch(() => {});
-      await closeBtn.click({ force: true }).catch(() => {});
-    }
-    const closed = await page.locator(FLYOUT_PANEL)
-      .waitFor({ state: "hidden", timeout: 3_000 }).then(() => true).catch(() => false);
-    if (!closed) {
-      await ensureDrawerClosed(page);
-    }
+    await ensureDrawerClosed(page);
     return null;
   }
   if (await page.locator(FLYOUT_PANEL).isHidden().catch(() => false))
@@ -506,11 +612,57 @@ async function saveAndClose(page: Page, dumpDir: string, tag: string): Promise<s
   return "no confirmation after Save (validation error?)";
 }
 
+/** Whether a registry kat-card (RP or MFR) is currently selected. */
+async function isRegistryCardSelected(card: Locator): Promise<boolean> {
+  return card.evaluate((el: Element) => {
+    const ctl = el.querySelector(
+      'kat-radiobutton, kat-checkbox, input[type="radio"], input[type="checkbox"]'
+    ) as (Element & { checked?: boolean }) | null;
+    if (!ctl) return false;
+    return ctl.checked === true || ctl.getAttribute("checked") === "true"
+        || ctl.hasAttribute("checked") || ctl.getAttribute("value") === "selected"
+        || ctl.getAttribute("value") === "true";
+  }).catch(() => false);
+}
+
+/**
+ * Select a registry kat-card in either the old drawer UI (kat-radiobutton)
+ * or the new drawer UI (chunk 259, which renders either kat-radiobutton or
+ * kat-checkbox and attaches `onClick: () => onSelectionChange(!isSelected)`
+ * to the kat-card itself). Avoids double-toggling or unticking an already-selected card.
+ */
+async function selectRegistryCard(page: Page, card: Locator): Promise<void> {
+  await card.scrollIntoViewIfNeeded().catch(() => {});
+  if (await isRegistryCardSelected(card)) return;
+
+  // Click the card title first (triggers kat-card.onClick in the new UI without
+  // bubbling from an inner checkbox's own onChange).
+  const titleSlot = card.locator('[slot="title"]').first();
+  if (await titleSlot.count()) {
+    await titleSlot.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(300);
+    if (await isRegistryCardSelected(card)) return;
+  }
+
+  // Fallback: click the radio button or checkbox directly (old UI).
+  const ctl = card.locator(
+    'kat-radiobutton, kat-checkbox, input[type="radio"], input[type="checkbox"], [part="radiobutton-icon"], [part="checkbox-box"]'
+  ).first();
+  if (await ctl.count()) {
+    await ctl.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(300);
+    if (await isRegistryCardSelected(card)) return;
+  }
+
+  await card.click({ force: true }).catch(() => {});
+  await page.waitForTimeout(300);
+}
+
 /**
  * Handle one Responsible Person row (either a flat standalone row or an
  * expandable group sub-row). Opens the submission drawer, steps through
- * the "Responsible Person Information" navigation card if present, selects
- * the option matching pattern / optionRegex, and saves.
+ * the "Responsible Person Information" / "Single product upload" navigation
+ * card if present, selects the option matching pattern / optionRegex, and saves.
  */
 async function processOneRpRow(
   page: Page,
@@ -567,7 +719,8 @@ async function processOneRpRow(
     await btn.scrollIntoViewIfNeeded().catch(() => {});
     await btn.click();
     await page.locator(FLYOUT_PANEL).waitFor({ state: "visible", timeout: 10_000 });
-    await page.locator(`${FLYOUT} .skeleton`).waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
+    await page.locator(`${FLYOUT} .skeleton, ${FLYOUT} [role="status"][aria-label="Loading"]`)
+      .waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
     await page.waitForTimeout(500);
 
     if (firstPaneRef.value) { // reference dump of this warning type's pane
@@ -575,9 +728,8 @@ async function processOneRpRow(
       firstPaneRef.value = false;
     }
 
-    // Already submitted? Matches both "Your submission is under review" and "previously submitted is under review"
-    const reviewNote = page.locator(FLYOUT)
-      .getByText(/submission is under review/i).first();
+    // Already submitted? Matches both "Your submission is under review" and "Under review" heading
+    const reviewNote = page.locator(UNDER_REVIEW_NOTE).first();
     if (await reviewNote.isVisible().catch(() => false)) {
       log(`[gspr:${mp.country}] RP ${asin}: already under review — pending`);
       record({ asin, ok: true, status: "pending", type: "rp",
@@ -586,9 +738,10 @@ async function processOneRpRow(
       return "ok";
     }
 
-    // If the landing screen has the "Responsible Person Information" card, click it to open the selection screen
+    // Old UI (chunk 475): landing card is "Responsible Person Information".
+    // New UI (chunk 259): landing card is "Single product upload".
     const rpCard = page.locator(`${FLYOUT} kat-card, ${FLYOUT} [role="button"]`).filter({
-      hasText: /Responsible Person Information/i
+      hasText: /Responsible Person Information|Single product upload/i
     }).first();
     const radioCard = page.locator(`${FLYOUT} kat-card`).filter({ hasText: optionRegex }).first();
 
@@ -607,9 +760,19 @@ async function processOneRpRow(
     }
 
     if (step1Choice === "rpCard") {
+      const cardAria = (await rpCard.getAttribute("aria-label").catch(() => "")) ?? "";
+      if (/under review/i.test(cardAria)) {
+        log(`[gspr:${mp.country}] RP ${asin}: already under review — pending`);
+        record({ asin, ok: true, status: "pending", type: "rp",
+                 statusText: "Under review (submission pane)" });
+        await ensureDrawerClosed(page);
+        return "ok";
+      }
+      await rpCard.scrollIntoViewIfNeeded().catch(() => {});
       await rpCard.click();
       await page.waitForTimeout(1000);
-      await page.locator(`${FLYOUT} .skeleton`).waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
+      await page.locator(`${FLYOUT} .skeleton, ${FLYOUT} [role="status"][aria-label="Loading"]`)
+        .waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
       await page.waitForTimeout(500);
 
       // Re-check for under review in case the inner view shows it
@@ -622,7 +785,7 @@ async function processOneRpRow(
       }
     }
 
-    // First look for a kat-card matching the EC Rep pattern (the modern card layout with radio button)
+    // First look for a kat-card matching the EC Rep pattern (the modern card layout with radio/checkbox)
     let card = page.locator(`${FLYOUT} kat-card`).filter({ hasText: optionRegex }).first();
     let option = page.locator(FLYOUT).getByText(optionRegex).first();
 
@@ -635,7 +798,7 @@ async function processOneRpRow(
         await searchInput.fill(pattern);
         await page.waitForTimeout(1000);
       } else {
-        const dropdown = page.locator(`${FLYOUT} kat-dropdown`).first();
+        const dropdown = page.locator(`${FLYOUT} kat-dropdown:not([multiple])`).first();
         if (await dropdown.count()) {
           await dropdown.click({ force: true }).catch(() => {});
           await page.waitForTimeout(800);
@@ -646,12 +809,7 @@ async function processOneRpRow(
     }
 
     if (await card.waitFor({ state: "visible", timeout: 8_000 }).then(() => true).catch(() => false)) {
-      const radio = card.locator('kat-radiobutton, input[type="radio"], [part="radiobutton-icon"]').first();
-      if (await radio.count()) {
-        await radio.click({ force: true });
-      } else {
-        await card.click({ force: true });
-      }
+      await selectRegistryCard(page, card);
       await page.waitForTimeout(500);
     } else if (await option.isVisible().catch(() => false)) {
       await option.click({ force: true });
@@ -702,8 +860,9 @@ async function processOneRpRow(
  * Process every "GPSR: Responsible Person contact details" warning:
  * Both flat (standalone) rows and expandable groups (walking each group's
  * nested pagination). In the submission pane, advances through the
- * "Responsible Person Information" card, picks the first choice whose text
- * starts with ecRepPattern (case-insensitive, both sides trimmed), then saves.
+ * "Responsible Person Information" / "Single product upload" card, picks the
+ * first choice whose text starts with ecRepPattern (case-insensitive, both
+ * sides trimmed), then saves.
  */
 export async function processResponsiblePerson(
   page: Page, mp: GsprMarketplace, dumpDir: string, ecRepPattern: string,
@@ -719,81 +878,97 @@ export async function processResponsiblePerson(
   const optionRegex = new RegExp("^\\s*" + escapeRegex(pattern), "i");
   const skip = new Set(mp.skipAsinsRp ?? []);
   const firstPaneRef = { value: true };
+  let stopped = false;
 
-  // 1. Flat (non-expandable) RP rows on the page
-  const flatRows = page.locator(ROW_SELECTOR)
-    .filter({ hasNot: page.locator(".ahd-accordion") })
-    .filter({ hasText: REASON_RP });
-  const nFlat = await flatRows.count();
-  if (nFlat > 0) {
-    log(`[gspr:${mp.country}] ${nFlat} flat "${REASON_RP}" row(s)`);
-    for (let i = 0; i < nFlat; i++) {
-      const row = flatRows.nth(i);
-      const status = await processOneRpRow(
-        page, row, mp, dumpDir, pattern, optionRegex,
-        userSkip, skip, record, firstPaneRef
-      );
-      if (status === "stopped") return out;
-    }
-    await ensureDrawerClosed(page);
-  }
-
-  // 2. Expandable RP groups (accordion)
-  const groups = page.locator(ROW_SELECTOR)
-    .filter({ has: page.locator(".ahd-accordion") })
-    .filter({ hasText: REASON_RP });
-  const nGroups = await groups.count();
-  log(`[gspr:${mp.country}] ${nGroups} expandable "${REASON_RP}" group(s)`);
-
-  for (let g = 0; g < nGroups; g++) {
-    await ensureDrawerClosed(page);
-    const group = groups.nth(g);
-
-    // Expand (the chevron button is labelled "expand" while collapsed).
-    const expander = group.locator('.ahd-accordion__button[aria-label="expand"]').first();
-    if (await expander.isVisible().catch(() => false)) {
-      await expander.click().catch(() => {});
-      await page.waitForTimeout(1000);
-    }
-    const body = group.locator(".ahd-accordion__body").first();
-    if (!(await body.locator('[data-testid="ahd-nested-product-policy"]').first()
-            .waitFor({ state: "visible", timeout: 10_000 })
-            .then(() => true).catch(() => false))) {
-      log(`[gspr:${mp.country}] RP group ${g + 1}: no sub-rows after expanding`);
-      await dumpDebug(page, dumpDir, `rp-group${g + 1}-empty`);
-      continue;
+  const maxMainPages = await getMainTablePageCount(page);
+  for (let mainPage = 1; mainPage <= maxMainPages && !stopped; mainPage++) {
+    if (mainPage > 1) {
+      await ensureDrawerClosed(page);
+      if (!(await goToMainTablePage(page, mp.country, mainPage))) break;
     }
 
-    // Walk the group's nested pagination (10 sub-rows per page).
-    for (let nestedPage = 1; ; nestedPage++) {
-      const subs = body.locator('[data-testid="ahd-nested-product-policy"]');
-      const nSubs = await subs.count();
-      log(`[gspr:${mp.country}] RP group ${g + 1} page ${nestedPage}: ${nSubs} sub-row(s)`);
-
-      for (let i = 0; i < nSubs; i++) {
-        const sub = subs.nth(i);
+    // 1. Flat (non-expandable) RP rows on the page
+    const flatRows = page.locator(ROW_SELECTOR)
+      .filter({ hasNot: page.locator(".ahd-accordion") })
+      .filter({ hasText: REASON_RP });
+    const nFlat = await flatRows.count();
+    if (nFlat > 0) {
+      log(`[gspr:${mp.country}] ${nFlat} flat "${REASON_RP}" row(s)`
+          + (maxMainPages > 1 ? ` (page ${mainPage}/${maxMainPages})` : ""));
+      for (let i = 0; i < nFlat; i++) {
+        const row = flatRows.nth(i);
         const status = await processOneRpRow(
-          page, sub, mp, dumpDir, pattern, optionRegex,
+          page, row, mp, dumpDir, pattern, optionRegex,
           userSkip, skip, record, firstPaneRef
         );
-        if (status === "stopped") return out;
+        if (status === "stopped") { stopped = true; break; }
+      }
+      await ensureDrawerClosed(page);
+      if (stopped) break;
+    }
+
+    // 2. Expandable RP groups (accordion)
+    const groups = page.locator(ROW_SELECTOR)
+      .filter({ has: page.locator(".ahd-accordion") })
+      .filter({ hasText: REASON_RP });
+    const nGroups = await groups.count();
+    log(`[gspr:${mp.country}] ${nGroups} expandable "${REASON_RP}" group(s)`
+        + (maxMainPages > 1 ? ` (page ${mainPage}/${maxMainPages})` : ""));
+
+    for (let g = 0; g < nGroups && !stopped; g++) {
+      await ensureDrawerClosed(page);
+      const group = groups.nth(g);
+
+      // Expand (the chevron button is labelled "expand" while collapsed).
+      const expander = group.locator('.ahd-accordion__button[aria-label="expand"]').first();
+      if (await expander.isVisible().catch(() => false)) {
+        await expander.click().catch(() => {});
+        await page.waitForTimeout(1000);
+      }
+      const body = group.locator(".ahd-accordion__body").first();
+      if (!(await body.locator('[data-testid="ahd-nested-product-policy"]').first()
+              .waitFor({ state: "visible", timeout: 10_000 })
+              .then(() => true).catch(() => false))) {
+        log(`[gspr:${mp.country}] RP group ${g + 1}: no sub-rows after expanding`);
+        await dumpDebug(page, dumpDir, `rp-group${g + 1}-empty`);
+        continue;
       }
 
-      // Next nested page, if any: fill the page-number input and click Go.
-      const pageInput = body.locator('[data-testid="ahd-nested-pagination-number-input"]').first();
-      if (!(await pageInput.count()))
-        break; // no nested pagination in this group
-      const maxAttr = await pageInput.getAttribute("max").catch(() => null);
-      const maxPage = maxAttr ? parseInt(maxAttr, 10) : 1;
-      if (nestedPage >= maxPage)
-        break;
-      await pageInput.fill(String(nestedPage + 1)).catch(() => {});
-      await body.locator('[data-testid="ahd-nested-pagination-submit-button"]')
-        .first().click().catch(() => {});
-      await page.waitForTimeout(1500);
+      // Walk the group's nested pagination (10 sub-rows per page).
+      for (let nestedPage = 1; !stopped; nestedPage++) {
+        const subs = body.locator('[data-testid="ahd-nested-product-policy"]');
+        const nSubs = await subs.count();
+        log(`[gspr:${mp.country}] RP group ${g + 1} page ${nestedPage}: ${nSubs} sub-row(s)`);
+
+        for (let i = 0; i < nSubs; i++) {
+          const sub = subs.nth(i);
+          const status = await processOneRpRow(
+            page, sub, mp, dumpDir, pattern, optionRegex,
+            userSkip, skip, record, firstPaneRef
+          );
+          if (status === "stopped") { stopped = true; break; }
+        }
+        if (stopped) break;
+
+        // Next nested page, if any: fill the page-number input and click Go.
+        const pageInput = body.locator('[data-testid="ahd-nested-pagination-number-input"]').first();
+        if (!(await pageInput.count()))
+          break; // no nested pagination in this group
+        const maxAttr = await pageInput.getAttribute("max").catch(() => null);
+        const maxPage = maxAttr ? parseInt(maxAttr, 10) : 1;
+        if (nestedPage >= maxPage)
+          break;
+        await pageInput.fill(String(nestedPage + 1)).catch(() => {});
+        await body.locator('[data-testid="ahd-nested-pagination-submit-button"]')
+          .first().click().catch(() => {});
+        await page.waitForTimeout(1500);
+      }
     }
   }
   await ensureDrawerClosed(page);
+  if (maxMainPages > 1 && !stopped) {
+    await goToMainTablePage(page, mp.country, 1).catch(() => {});
+  }
   return out;
 }
 
@@ -990,7 +1165,8 @@ async function processOneMfrRow(
     await btn.scrollIntoViewIfNeeded().catch(() => {});
     await btn.click();
     await page.locator(FLYOUT_PANEL).waitFor({ state: "visible", timeout: 10_000 });
-    await page.locator(`${FLYOUT} .skeleton`).waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
+    await page.locator(`${FLYOUT} .skeleton, ${FLYOUT} [role="status"][aria-label="Loading"]`)
+      .waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
     await page.waitForTimeout(500);
 
     if (firstPaneRef.value) { // reference dump of this warning type's pane
@@ -998,8 +1174,7 @@ async function processOneMfrRow(
       firstPaneRef.value = false;
     }
 
-    const reviewNote = page.locator(FLYOUT)
-      .getByText(/submission is under review/i).first();
+    const reviewNote = page.locator(UNDER_REVIEW_NOTE).first();
     if (await reviewNote.isVisible().catch(() => false)) {
       log(`[gspr:${mp.country}] MFR ${asin}: already under review — pending`);
       record({ asin, ok: true, status: "pending", type: "mfr",
@@ -1008,18 +1183,27 @@ async function processOneMfrRow(
       return "ok";
     }
 
-    // Step 1: Landing card vs inner search
+    // Step 1: Landing card vs inner search / registry list
+    // Legacy UI uses "Manufacturer information"; new MYCWebWidget UI uses "Single product upload".
     const mfrCard = page.locator(`${FLYOUT} kat-card, ${FLYOUT} [role="button"]`).filter({
-      hasText: /Manufacturer information/i
+      hasText: /Manufacturer information|Single product upload/i
     }).first();
     const searchInput = page.locator(
       `${FLYOUT} kat-input[label="Search"] input, ${FLYOUT} kat-input input, ${FLYOUT} input[placeholder*="Search"]`
     ).first();
+    const existingCard = page.locator(`${FLYOUT} kat-card`).filter({
+      hasText: new RegExp(escapeRegex(entry.name.slice(0, 25)), "i")
+    }).first();
+    const createNew = page.locator(`${FLYOUT} [role="button"], ${FLYOUT} a, ${FLYOUT} span, ${FLYOUT} div`).filter({
+      hasText: /^Create new record$/i
+    }).first();
 
     const step1Choice = await Promise.race([
       mfrCard.waitFor({ state: "visible", timeout: 10_000 }).then(() => "mfrCard").catch(() => null),
       reviewNote.waitFor({ state: "visible", timeout: 10_000 }).then(() => "review").catch(() => null),
       searchInput.waitFor({ state: "visible", timeout: 10_000 }).then(() => "searchInput").catch(() => null),
+      existingCard.waitFor({ state: "visible", timeout: 10_000 }).then(() => "registryList").catch(() => null),
+      createNew.waitFor({ state: "visible", timeout: 10_000 }).then(() => "registryList").catch(() => null),
     ]);
 
     if (step1Choice === "review" || (await reviewNote.isVisible().catch(() => false))) {
@@ -1031,9 +1215,18 @@ async function processOneMfrRow(
     }
 
     if (step1Choice === "mfrCard") {
+      const cardAria = (await mfrCard.getAttribute("aria-label").catch(() => "")) ?? "";
+      if (/under review/i.test(cardAria)) {
+        log(`[gspr:${mp.country}] MFR ${asin}: already under review — pending`);
+        record({ asin, ok: true, status: "pending", type: "mfr",
+                 statusText: "Under review (submission pane)" });
+        await ensureDrawerClosed(page);
+        return "ok";
+      }
       await mfrCard.click();
       await page.waitForTimeout(1000);
-      await page.locator(`${FLYOUT} .skeleton`).waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
+      await page.locator(`${FLYOUT} .skeleton, ${FLYOUT} [role="status"][aria-label="Loading"]`)
+        .waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
       await page.waitForTimeout(500);
 
       if (await reviewNote.isVisible().catch(() => false)) {
@@ -1045,7 +1238,7 @@ async function processOneMfrRow(
       }
     }
 
-    // Now on inner screen: search for manufacturer name
+    // Now on inner screen: search for manufacturer name (search input is only rendered when >= 5 records)
     const innerSearch = page.locator(
       `${FLYOUT} kat-input[label="Search"] input, ${FLYOUT} kat-input input, ${FLYOUT} input[placeholder*="Search"]`
     ).first();
@@ -1063,18 +1256,9 @@ async function processOneMfrRow(
     const isFound = await card.waitFor({ state: "visible", timeout: 5_000 }).then(() => true).catch(() => false);
     if (isFound) {
       log(`[gspr:${mp.country}] MFR ${asin}: selecting existing entry "${entry.name}"`);
-      const radio = card.locator('kat-radiobutton, input[type="radio"], [part="radiobutton-icon"]').first();
-      if (await radio.count()) {
-        await radio.click({ force: true });
-      } else {
-        await card.click({ force: true });
-      }
-      await page.waitForTimeout(500);
+      await selectRegistryCard(page, card);
     } else {
       log(`[gspr:${mp.country}] MFR ${asin}: creating entry "${entry.name}"`);
-      const createNew = page.locator(`${FLYOUT} [role="button"], ${FLYOUT} a, ${FLYOUT} span, ${FLYOUT} div`).filter({
-        hasText: /^Create new record$/i
-      }).first();
       if (!(await createNew.waitFor({ state: "visible", timeout: 5_000 }).then(() => true).catch(() => false))) {
         log(`[gspr:${mp.country}] MFR ${asin}: neither matching card nor "Create new record" found`);
         await dumpDebug(page, dumpDir, `mfr-noentry-${asin}`);
@@ -1086,7 +1270,8 @@ async function processOneMfrRow(
 
       await createNew.click();
       await page.waitForTimeout(1000);
-      await page.locator(`${FLYOUT} .skeleton`).waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
+      await page.locator(`${FLYOUT} .skeleton, ${FLYOUT} [role="status"][aria-label="Loading"]`)
+        .waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
       await page.waitForTimeout(500);
 
       if (firstFormRef.value) { // reference dump of the add-new form
@@ -1136,8 +1321,8 @@ async function processOneMfrRow(
         return "ok";
       }
 
-      // Country dropdown
-      const dd = page.locator(`${FLYOUT} kat-dropdown`).first();
+      // Country dropdown (exclude the multi-marketplace selector kat-dropdown[multiple])
+      const dd = page.locator(`${FLYOUT} kat-dropdown[kat-aria-label*="Country"], ${FLYOUT} kat-dropdown:not([multiple])`).first();
       if (await dd.isVisible().catch(() => false)) {
         await dd.click({ force: true }).catch(() => {});
         await page.waitForTimeout(800);
@@ -1232,75 +1417,88 @@ export async function processManufacturer(
   const skip = new Set(mp.skipAsinsMfr ?? []);
   const firstPaneRef = { value: true };
   const firstFormRef = { value: true };
+  const maxMainPages = await getMainTablePageCount(page);
+  let stopped = false;
 
-  // 1. Flat (non-expandable) MFR rows on the page
-  const flatRows = page.locator(ROW_SELECTOR)
-    .filter({ hasNot: page.locator(".ahd-accordion") })
-    .filter({ hasText: REASON_MFR });
-  const nFlat = await flatRows.count();
-  if (nFlat > 0) {
-    log(`[gspr:${mp.country}] ${nFlat} flat "${REASON_MFR}" row(s)`);
-    for (let i = 0; i < nFlat; i++) {
-      const row = flatRows.nth(i);
-      const status = await processOneMfrRow(
-        page, row, mp, dumpDir, manufacturers, ask, userSkip, skip,
-        record, manualSave, firstPaneRef, firstFormRef
-      );
-      if (status === "stopped") return out;
-    }
-    await ensureDrawerClosed(page);
-  }
-
-  // 2. Expandable MFR groups (accordion)
-  const groups = page.locator(ROW_SELECTOR)
-    .filter({ has: page.locator(".ahd-accordion") })
-    .filter({ hasText: REASON_MFR });
-  const nGroups = await groups.count();
-  log(`[gspr:${mp.country}] ${nGroups} expandable "${REASON_MFR}" group(s)`);
-
-  for (let g = 0; g < nGroups; g++) {
-    await ensureDrawerClosed(page);
-    const group = groups.nth(g);
-    const expander = group.locator('.ahd-accordion__button[aria-label="expand"]').first();
-    if (await expander.isVisible().catch(() => false)) {
-      await expander.click().catch(() => {});
-      await page.waitForTimeout(1000);
-    }
-    const body = group.locator(".ahd-accordion__body").first();
-    if (!(await body.locator('[data-testid="ahd-nested-product-policy"]').first()
-            .waitFor({ state: "visible", timeout: 10_000 })
-            .then(() => true).catch(() => false))) {
-      log(`[gspr:${mp.country}] MFR group ${g + 1}: no sub-rows after expanding`);
-      await dumpDebug(page, dumpDir, `mfr-group${g + 1}-empty`);
-      continue;
+  for (let mainPage = 1; mainPage <= maxMainPages && !stopped; mainPage++) {
+    if (mainPage > 1) {
+      if (!(await goToMainTablePage(page, mp.country, mainPage))) break;
     }
 
-    for (let nestedPage = 1; ; nestedPage++) {
-      const subs = body.locator('[data-testid="ahd-nested-product-policy"]');
-      const nSubs = await subs.count();
-      log(`[gspr:${mp.country}] MFR group ${g + 1} page ${nestedPage}: ${nSubs} sub-row(s)`);
-
-      for (let i = 0; i < nSubs; i++) {
-        const sub = subs.nth(i);
+    // 1. Flat (non-expandable) MFR rows on the page
+    const flatRows = page.locator(ROW_SELECTOR)
+      .filter({ hasNot: page.locator(".ahd-accordion") })
+      .filter({ hasText: REASON_MFR });
+    const nFlat = await flatRows.count();
+    if (nFlat > 0) {
+      log(`[gspr:${mp.country}] ${nFlat} flat "${REASON_MFR}" row(s)${maxMainPages > 1 ? ` on page ${mainPage}/${maxMainPages}` : ""}`);
+      for (let i = 0; i < nFlat; i++) {
+        const row = flatRows.nth(i);
         const status = await processOneMfrRow(
-          page, sub, mp, dumpDir, manufacturers, ask, userSkip, skip,
+          page, row, mp, dumpDir, manufacturers, ask, userSkip, skip,
           record, manualSave, firstPaneRef, firstFormRef
         );
-        if (status === "stopped") return out;
+        if (status === "stopped") { stopped = true; break; }
+      }
+      await ensureDrawerClosed(page);
+      if (stopped) break;
+    }
+
+    // 2. Expandable MFR groups (accordion)
+    const groups = page.locator(ROW_SELECTOR)
+      .filter({ has: page.locator(".ahd-accordion") })
+      .filter({ hasText: REASON_MFR });
+    const nGroups = await groups.count();
+    log(`[gspr:${mp.country}] ${nGroups} expandable "${REASON_MFR}" group(s)${maxMainPages > 1 ? ` on page ${mainPage}/${maxMainPages}` : ""}`);
+
+    for (let g = 0; g < nGroups && !stopped; g++) {
+      await ensureDrawerClosed(page);
+      const group = groups.nth(g);
+      const expander = group.locator('.ahd-accordion__button[aria-label="expand"]').first();
+      if (await expander.isVisible().catch(() => false)) {
+        await expander.click().catch(() => {});
+        await page.waitForTimeout(1000);
+      }
+      const body = group.locator(".ahd-accordion__body").first();
+      if (!(await body.locator('[data-testid="ahd-nested-product-policy"]').first()
+              .waitFor({ state: "visible", timeout: 10_000 })
+              .then(() => true).catch(() => false))) {
+        log(`[gspr:${mp.country}] MFR group ${g + 1}: no sub-rows after expanding`);
+        await dumpDebug(page, dumpDir, `mfr-group${g + 1}-empty`);
+        continue;
       }
 
-      const pageInput = body.locator('[data-testid="ahd-nested-pagination-number-input"]').first();
-      if (!(await pageInput.count()))
-        break;
-      const maxAttr = await pageInput.getAttribute("max").catch(() => null);
-      const maxPage = maxAttr ? parseInt(maxAttr, 10) : 1;
-      if (nestedPage >= maxPage)
-        break;
-      await pageInput.fill(String(nestedPage + 1)).catch(() => {});
-      await body.locator('[data-testid="ahd-nested-pagination-submit-button"]')
-        .first().click().catch(() => {});
-      await page.waitForTimeout(1500);
+      for (let nestedPage = 1; !stopped; nestedPage++) {
+        const subs = body.locator('[data-testid="ahd-nested-product-policy"]');
+        const nSubs = await subs.count();
+        log(`[gspr:${mp.country}] MFR group ${g + 1} page ${nestedPage}: ${nSubs} sub-row(s)`);
+
+        for (let i = 0; i < nSubs; i++) {
+          const sub = subs.nth(i);
+          const status = await processOneMfrRow(
+            page, sub, mp, dumpDir, manufacturers, ask, userSkip, skip,
+            record, manualSave, firstPaneRef, firstFormRef
+          );
+          if (status === "stopped") { stopped = true; break; }
+        }
+        if (stopped) break;
+
+        const pageInput = body.locator('[data-testid="ahd-nested-pagination-number-input"]').first();
+        if (!(await pageInput.count()))
+          break;
+        const maxAttr = await pageInput.getAttribute("max").catch(() => null);
+        const maxPage = maxAttr ? parseInt(maxAttr, 10) : 1;
+        if (nestedPage >= maxPage)
+          break;
+        await pageInput.fill(String(nestedPage + 1)).catch(() => {});
+        await body.locator('[data-testid="ahd-nested-pagination-submit-button"]')
+          .first().click().catch(() => {});
+        await page.waitForTimeout(1500);
+      }
     }
+  }
+  if (maxMainPages > 1 && !stopped) {
+    await goToMainTablePage(page, mp.country, 1).catch(() => {});
   }
   await ensureDrawerClosed(page);
   return out;

@@ -16,3 +16,17 @@
 
 - In `splitAddress()`, `COUNTRY_ALIASES` maps the last address token to standard country names accepted by Amazon Seller Central dropdowns.
 - `COUNTRY_ALIASES` now includes Turkey variations (`tr`, `turkey`, `turkie`, `turquie`, `turkiye`, `türkiye`) as well as major European countries (`de`, `germany`, `fr`, `france`, `it`, `italy`, `es`, `spain`, `uk`, `gb`, `united kingdom`) to prevent defaulting to "China".
+
+## 3. Seller Central Regulatory Compliance UI (`case-worker/src/gsprPage.ts`)
+
+- **Two federated drawer UIs (`MYCWebWidget`)**:
+  Amazon serves both the legacy compliance drawer (`475.7b8e31e0.chunk.js`) and a newer drawer (`259.42013625.chunk.js`). Key differences in `chunk 259`:
+  - **Safety attestation card**: `<div role="button">` has no `aria-label`; its child `<kat-card>` has `aria-label="Safety attestation, Status: Not started"` (or `Status: Under review`). Match both `[role="button"][aria-label*="Safety attestation" i]` and `kat-card[aria-label*="Safety attestation" i]`.
+  - **Safety attestation checkbox**: `onChange` reads `e.detail.checked` on `kat-checkbox`. JS fallback dispatch must send `new CustomEvent("change", { detail: { checked: true, value: "true" }, bubbles: true, composed: true })`.
+  - **Single-step submission confirmation**: Single-step tasks (`je`, `_e`) use a `Submit` primary button. While `isSubmitting === true`, the confirmation screen (`rn`) renders `[role="status"][aria-label="Loading"]` and a **disabled** `Close` button (`kat-button[disabled]`). When submission finishes (`isSubmitting === false`), `rn` renders `<kat-icon name="clock" size="xxlarge">` (`nn`) and enables the `Close` button (`kat-button:not([disabled])`). There is no `[data-testid="success-page"]` in `chunk 259`.
+  - **RP & MFR landing card**: The task card on the landing screen is titled `"Single product upload"` (`<kat-card aria-label="Single product upload, Status: Not started">`) instead of `"Responsible Person Information"` or `"Manufacturer information"`.
+  - **Registry list (`Ie` / `_e`)**: Search input is only rendered when `entries.length >= 5`. Cards use `kat-checkbox` in `MULTIPLE` selection mode (`kat-radiobutton` in `SINGLE`), and clicking `kat-card` toggles selection.
+  - **Multi-marketplace selector**: `chunk 259` renders `<kat-dropdown multiple="true">` at the top of the drawer, so Country/RP dropdown locators must use `kat-dropdown:not([multiple])`.
+- **Main table page size & pagination**:
+  - The main Regulatory Compliance table defaults to 25 rows per page (`#ahd-pp-pagination-page-size-dropdown value="25"`, options `"25"`, `"50"`, `"100"`). When a marketplace has >25 rows, rows and expandable RP/MFR accordion groups can be pushed onto page 2+.
+  - `maximizeMainTablePageSize()` dispatches `new CustomEvent("change", { detail: { value: "100" }, bubbles: true, composed: true })` on `#ahd-pp-pagination-page-size-dropdown`, and `getMainTablePageCount()` / `goToMainTablePage()` iterate across `#ahd-pp-pagination-katal-control` pages when total rows exceed 100.
