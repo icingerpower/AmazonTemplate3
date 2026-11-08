@@ -42,6 +42,7 @@ public:
         QString asin;
         int     available = 0;  // fulfillableQuantity
         int     inbound   = 0;  // working + shipped + receiving
+        QString productName;    // optional product title from report or live summary
     };
 
     // Per-SKU inventory age / health, parsed from GET_FBA_INVENTORY_PLANNING_DATA.

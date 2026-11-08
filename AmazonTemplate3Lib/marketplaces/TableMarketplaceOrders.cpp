@@ -71,6 +71,17 @@ QVariant TableMarketplaceOrders::headerData(int section, Qt::Orientation orienta
             default: break;
         }
     }
+    if (orientation == Qt::Horizontal && role == Qt::ToolTipRole) {
+        switch (section) {
+            case ColSource:         return tr("Fulfillment source and carrier handling the order");
+            case ColSourceOrderId:  return tr("Fulfillment order ID at the fulfillment source");
+            case ColTargetOrderId:  return tr("Order item ID on the target marketplace");
+            case ColTracking:       return tr("Carrier tracking number from the fulfillment source");
+            case ColTargetStore:    return tr("Target marketplace store where the order was placed");
+            case ColOrderDate:      return tr("Date and time when the order was placed (local time)");
+            default: break;
+        }
+    }
     return {};
 }
 

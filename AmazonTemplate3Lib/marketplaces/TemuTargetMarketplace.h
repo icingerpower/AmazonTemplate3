@@ -27,6 +27,7 @@ public:
     QString lastError()     const override;
 
     QCoro::Task<void> fetchInventory(QStringList skus, QHash<QString,int> *out) override;
+    QHash<QString, QString> lastProductNames() const override;
     QCoro::Task<void> fetchSales(QStringList skus, int days, QHash<QString,int> *out) override;
     QCoro::Task<void> fetchOrderCount(QDateTime from, QDateTime to, int *out) override;
     QCoro::Task<void> updateInventory(QHash<QString,int> qtyBySku, ProgressFn onProgress) override;

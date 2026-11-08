@@ -47,6 +47,11 @@ QCoro::Task<void> TemuTargetMarketplace::fetchInventory(QStringList skus, QHash<
     co_await m_api->fetchInventory(skus, out);
 }
 
+QHash<QString, QString> TemuTargetMarketplace::lastProductNames() const
+{
+    return m_api->lastProductNames();
+}
+
 QCoro::Task<void> TemuTargetMarketplace::fetchSales(QStringList skus, int days, QHash<QString,int> *out)
 {
     co_await m_api->fetchSales(skus, days, out);

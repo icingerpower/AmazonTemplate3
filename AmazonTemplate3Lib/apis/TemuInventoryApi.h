@@ -29,6 +29,9 @@ public:
     // listed in the store (keys use the store's original skuSn casing).
     QCoro::Task<void> fetchInventory(QStringList skus, QHash<QString,int> *out);
 
+    // SKU → localized product title captured during the most recent inventory/sales scan.
+    QHash<QString, QString> lastProductNames() const { return m_lastProductNames; }
+
     // SKU → units sold over `days` calendar days
     QCoro::Task<void> fetchSales(QStringList skus, int days, QHash<QString,int> *out);
 
@@ -178,6 +181,7 @@ private:
 
     // Category-path cache reused across resolveCategoryPaths() calls.
     QHash<qint64, QString> m_catPathCache;
+    QHash<QString, QString> m_lastProductNames;
 
     QCoro::Task<void> _postRequest(const QString &method, const QJsonObject &businessParams, QJsonObject *resultOut);
 

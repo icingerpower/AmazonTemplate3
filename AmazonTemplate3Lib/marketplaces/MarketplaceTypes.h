@@ -86,6 +86,7 @@ struct StockRecord {
     QString asin;          // source-internal product id (Amazon: ASIN)
     int     available = -1; // sellable units (-1 = unknown)
     int     inbound   = -1;
+    QString productName;   // optional product title from the fulfillment source
 };
 
 // Tracking of a fulfilled (or in-progress) outbound order.

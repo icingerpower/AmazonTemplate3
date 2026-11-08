@@ -36,10 +36,11 @@ QList<StockRecord> toStockRecords(const QList<AmazonInventoryApi::InventorySumma
     out.reserve(summaries.size());
     for (const auto &s : summaries) {
         StockRecord r;
-        r.sku       = s.sku;
-        r.asin      = s.asin;
-        r.available = s.available;
-        r.inbound   = s.inbound;
+        r.sku         = s.sku;
+        r.asin        = s.asin;
+        r.available   = s.available;
+        r.inbound     = s.inbound;
+        r.productName = s.productName;
         out.append(r);
     }
     return out;

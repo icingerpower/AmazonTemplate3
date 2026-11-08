@@ -32,6 +32,8 @@ public:
     // SKU → available quantity. Empty `skus` = every SKU listed in the store.
     virtual QCoro::Task<void> fetchInventory(QStringList skus,
                                              QHash<QString,int> *out) = 0;
+    // SKU → localized product title captured by the store (if any).
+    virtual QHash<QString, QString> lastProductNames() const { return {}; }
     // SKU → units sold over the last `days` days.
     virtual QCoro::Task<void> fetchSales(QStringList skus, int days,
                                          QHash<QString,int> *out) = 0;

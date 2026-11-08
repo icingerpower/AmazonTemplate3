@@ -31,6 +31,9 @@
 #include <QVBoxLayout>
 
 #include "../../common/workingdirectory/WorkingDirectoryManager.h"
+#include "pricing/AmazonDataCache.h"
+#include <QDir>
+#include <QFile>
 #include <QSettings>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -53,6 +56,8 @@ static void saveAmazonCache(const QList<StockRecord> &records, const QHash<QStri
         obj.insert(QStringLiteral("asin"), item.asin);
         obj.insert(QStringLiteral("available"), item.available);
         obj.insert(QStringLiteral("inbound"), item.inbound);
+        if (!item.productName.isEmpty())
+            obj.insert(QStringLiteral("productName"), item.productName);
         invArray.append(obj);
     }
     s->setValue(QStringLiteral("AmazonCache/inventory"), QString::fromUtf8(QJsonDocument(invArray).toJson(QJsonDocument::Compact)));
@@ -92,6 +97,7 @@ static bool loadAmazonCache(QList<StockRecord> *recordsOut, QHash<QString, int> 
         item.asin = obj.value(QStringLiteral("asin")).toString();
         item.available = obj.value(QStringLiteral("available")).toInt();
         item.inbound = obj.value(QStringLiteral("inbound")).toInt();
+        item.productName = obj.value(QStringLiteral("productName")).toString();
         recordsOut->append(item);
     }
 
@@ -178,6 +184,9 @@ PaneMarketplaces::PaneMarketplaces(QWidget *parent)
         s->remove(QStringLiteral("AmazonCache/sales"));
         QMessageBox::information(this, tr("Cache Cleared"), tr("Amazon data cache has been successfully cleared."));
     });
+
+    connect(ui->buttonViewRedOnly, &QPushButton::toggled,
+            this, &PaneMarketplaces::_applyRedOnlyFilter);
 
     // Right-click a product row: invalidate the Amazon cache for that SKU only,
     // so the next Load re-fetches it while the rest stays cached.
@@ -278,6 +287,116 @@ AbstractTargetMarketplace *PaneMarketplaces::_marketplaceById(const QString &id)
         if (m->id() == id)
             return m;
     return nullptr;
+}
+
+void PaneMarketplaces::_applyRedOnlyFilter()
+{
+    if (!m_model)
+        return;
+    const bool redOnly = ui->buttonViewRedOnly->isChecked();
+    const int rows = m_model->rowCount();
+    for (int r = 0; r < rows; ++r) {
+        ui->tableViewProducts->setRowHidden(r, redOnly && !m_model->hasRedInRow(r));
+    }
+    const int cols = m_model->columnCount();
+    for (int c = 0; c < TableMarketplaceProducts::k_fixedCols && c < cols; ++c) {
+        ui->tableViewProducts->setColumnHidden(c, false);
+    }
+    const int stores = m_model->storeCount();
+    for (int si = 0; si < stores; ++si) {
+        const bool hideStore = redOnly && !m_model->hasRedInStore(si);
+        const int baseCol = TableMarketplaceProducts::k_fixedCols + si * 3;
+        for (int sub = 0; sub < 3; ++sub) {
+            if (baseCol + sub < cols)
+                ui->tableViewProducts->setColumnHidden(baseCol + sub, hideStore);
+        }
+    }
+}
+
+void PaneMarketplaces::_applyLocalProductNames()
+{
+    if (!m_model)
+        return;
+    const QDir workDir = WorkingDirectoryManager::instance()->workingDir();
+    if (workDir.path().isEmpty())
+        return;
+
+    static const QList<QPair<QString, QString>> kMarketplaces = {
+        {QStringLiteral("A1F83G8C2ARO7P"), QStringLiteral("GB")},
+        {QStringLiteral("ATVPDKIKX0DER"),  QStringLiteral("US")},
+        {QStringLiteral("A2EUQ1WTGCTBG2"), QStringLiteral("CA")},
+        {QStringLiteral("A39IBJ37TRP1C6"), QStringLiteral("AU")},
+        {QStringLiteral("A13V1IB3VIYZZH"), QStringLiteral("FR")},
+        {QStringLiteral("AMEN7PMS3EDWL"),  QStringLiteral("BE")},
+        {QStringLiteral("A1PA6795UKMFR9"), QStringLiteral("DE")},
+        {QStringLiteral("APJ6JRA9NG5V4"),  QStringLiteral("IT")},
+        {QStringLiteral("A1RKKUPIHCS9HS"), QStringLiteral("ES")},
+        {QStringLiteral("A1805IZSGTT6HS"), QStringLiteral("NL")},
+        {QStringLiteral("A2NODRKZP88ZB9"), QStringLiteral("SE")},
+        {QStringLiteral("A1C3SOZRARQ6R3"), QStringLiteral("PL")},
+    };
+
+    // 1. Read local store catalog files (stores/{marketplaceId}.json)
+    for (const auto &[mpId, country] : kMarketplaces) {
+        QFile f(workDir.filePath(QStringLiteral("stores/%1.json").arg(mpId)));
+        if (!f.open(QIODevice::ReadOnly))
+            continue;
+        const QJsonArray arr = QJsonDocument::fromJson(f.readAll()).array();
+        QHash<QString, QString> bySku;
+        QHash<QString, QString> byAsin;
+        for (const QJsonValue &v : arr) {
+            const QJsonObject o = v.toObject();
+            const QString title = o.value(QStringLiteral("title")).toString().trimmed();
+            if (title.isEmpty())
+                continue;
+            const QString sku  = o.value(QStringLiteral("sku")).toString().trimmed();
+            const QString asin = o.value(QStringLiteral("asin")).toString().trimmed();
+            if (!sku.isEmpty())
+                bySku.insert(sku, title);
+            if (!asin.isEmpty())
+                byAsin.insert(asin, title);
+        }
+        m_model->applyProductNames(bySku, country);
+        m_model->applyProductNamesByAsin(byAsin, country);
+    }
+
+    // 2. Read cached per-marketplace SP-API listings from AmazonDataCache for the table SKUs
+    auto s = WorkingDirectoryManager::instance()->settings();
+    const QString sellerId   = s->value(QStringLiteral("AmazonApi/eu/sellerId")).toString();
+    const QString naSellerId = s->value(QStringLiteral("AmazonApi/na/sellerId")).toString();
+    AmazonDataCache dataCache(workDir, sellerId + QLatin1Char('|') + naSellerId);
+
+    const QStringList tableSkus = m_model->skus();
+    for (const auto &[mpId, country] : kMarketplaces) {
+        QHash<QString, QString> summaryNames;
+        for (const QString &sku : tableSkus) {
+            const QJsonObject rec = dataCache.read(
+                QStringLiteral("listing"), AmazonDataCache::listingKey(mpId, sku));
+            if (rec.isEmpty())
+                continue;
+            const QJsonObject body = rec.value(QStringLiteral("payload")).toObject()
+                                        .value(QStringLiteral("body")).toObject();
+            for (const QJsonValue &sv : body.value(QStringLiteral("summaries")).toArray()) {
+                const QJsonObject sum = sv.toObject();
+                if (sum.value(QStringLiteral("marketplaceId")).toString() == mpId) {
+                    const QString itemName = sum.value(QStringLiteral("itemName")).toString().trimmed();
+                    if (!itemName.isEmpty())
+                        summaryNames.insert(sku, itemName);
+                }
+            }
+            const QJsonArray itemNames = body.value(QStringLiteral("attributes")).toObject()
+                                            .value(QStringLiteral("item_name")).toArray();
+            for (const QJsonValue &iv : itemNames) {
+                const QJsonObject io = iv.toObject();
+                const QString val  = io.value(QStringLiteral("value")).toString().trimmed();
+                const QString lang = io.value(QStringLiteral("language_tag")).toString().trimmed();
+                if (!val.isEmpty())
+                    m_model->applyProductNames({{sku, val}}, lang.isEmpty() ? country : lang);
+            }
+        }
+        if (!summaryNames.isEmpty())
+            m_model->applyProductNames(summaryNames, country);
+    }
 }
 
 QCoro::Task<void> PaneMarketplaces::_onLoad()
@@ -394,10 +513,18 @@ QCoro::Task<void> PaneMarketplaces::_onLoad()
     m_model->setSyncParams(ui->spinBoxPercentageToTargetMkt->value(),
                            ui->spinBoxMaxTarget->value(),
                            ui->spinBoxMinDays->value());
+    connect(m_model, &QAbstractItemModel::dataChanged,
+            this, &PaneMarketplaces::_applyRedOnlyFilter);
+    connect(m_model, &QAbstractItemModel::modelReset,
+            this, &PaneMarketplaces::_applyRedOnlyFilter);
     ui->tableViewProducts->setModel(m_model);
 
     for (auto it = storeQtyByStoreId.begin(); it != storeQtyByStoreId.end(); ++it)
         m_model->applyStoreInventory(it.key(), it.value());
+    for (const auto *mkt : m_marketplaces)
+        m_model->applyProductNames(mkt->lastProductNames(), mkt->countryCode());
+    _applyLocalProductNames();
+    _applyRedOnlyFilter();
 
     if (allSkus.isEmpty()) {
         appendLog(tr("→ No SKU found in any target marketplace — nothing to load."));
@@ -567,8 +694,12 @@ QCoro::Task<void> PaneMarketplaces::_onLoad()
         } else {
             appendLog(tr("  ✓ Sales retrieved successfully."));
             m_model->applyStoreSales(mkt->id(), salesBySku);
+            m_model->applyProductNames(mkt->lastProductNames(), mkt->countryCode());
         }
     }
+
+    _applyLocalProductNames();
+    _applyRedOnlyFilter();
 
     // --- Done ---
     if (barPtr) { barPtr->setRange(0, 1); barPtr->setValue(1); }

@@ -42,6 +42,20 @@ public:
     void applyStoreInventory(const QString &storeId, const QHash<QString,int> &qtyBySku);
     void applyStoreSales    (const QString &storeId, const QHash<QString,int> &salesBySku);
 
+    // Product titles for SKU cell hover tooltips. English and French are
+    // prioritized first when titles in several languages are available.
+    void applyProductNames      (const QHash<QString, QString> &nameBySku,
+                                 const QString &langOrCountry = {});
+    void applyProductNamesByAsin(const QHash<QString, QString> &nameByAsin,
+                                 const QString &langOrCountry = {});
+    QString productNameForSku(const QString &sku) const;
+
+    // Red-warning queries used by the "View red only" filter in PaneMarketplaces.
+    int  storeCount() const { return m_stores.size(); }
+    bool isStoreSyncQtyRed(int row, int storeIdx) const;
+    bool hasRedInRow(int row) const;
+    bool hasRedInStore(int storeIdx) const;
+
     // All SKUs shown in the table (row order).
     QStringList skus() const;
 
@@ -74,6 +88,9 @@ private:
     struct Row {
         QString sku;
         QString asin;
+        QString nameEn;
+        QString nameFr;
+        QString nameOther;
         int available  = -1;
         int inbound    = -1;
         int sales90d   = -1;
@@ -94,6 +111,8 @@ private:
     int  _storeIndex  (const QString &storeId) const;
     void _recalcEstDays(Row &row) const;
     int  _targetQty   (const Row &row) const;
+    static void    _applyProductName(Row &row, const QString &name, const QString &langOrCountry);
+    static QString _productName     (const Row &row);
 };
 
 #endif // TABLEMARKETPLACEPRODUCTS_H

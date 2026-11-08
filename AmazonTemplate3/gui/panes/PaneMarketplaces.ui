@@ -45,6 +45,19 @@
           </widget>
          </item>
          <item>
+          <widget class="QPushButton" name="buttonViewRedOnly">
+           <property name="toolTip">
+            <string>Display only rows with red cells and only store/language columns that have at least one red in quantity to update</string>
+           </property>
+           <property name="text">
+            <string>View red only</string>
+           </property>
+           <property name="checkable">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+         <item>
           <widget class="Line" name="line">
            <property name="orientation">
             <enum>Qt::Orientation::Vertical</enum>

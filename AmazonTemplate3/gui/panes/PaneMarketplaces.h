@@ -48,6 +48,8 @@ private:
     AbstractInventorySource   *_source() const; // first configured source, or nullptr
     AbstractTargetMarketplace *_marketplaceById(const QString &id) const;
     void                _invalidateAmazonCacheForSku(const QString &sku);
+    void                _applyRedOnlyFilter();
+    void                _applyLocalProductNames();
     QCoro::Task<void>   _onLoad();
     QCoro::Task<void>   _onLoadOrders();
     QCoro::Task<void>   _onSyncOrders();

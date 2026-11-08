@@ -21,3 +21,9 @@ Lessons from PaneMarketplaces inventory work (2026-07-04):
 - Sync Qty cells accept nonnegative integer overrides per SKU/store. `PaneMarketplaces::_onSyncInventory` uses `targetQtyForSku(sku, storeId)` for each store, so the uploaded target matches the edited cell. Overrides survive applying sync parameters and disappear on Load (which replaces the model).
 - The dark-red warning remains based on the automatic target being lower than current store stock, even when an override raises the displayed target; an edited target below current stock also warns. SKU has an editable flag solely to open a text editor for selection/copying; `setData` rejects SKU writes. Other columns and unknown-source-stock Sync Qty cells are read-only.
 - Offline regression coverage: `TableMarketplaceProductsTests` checks stock/coverage boundaries, percentage/cap behavior, store-specific overrides, warning retention, and invalid edits. No live inventory writes were used to validate this change.
+
+## View red only filter, column tooltips, and SKU product-name hover (2026-11-08)
+
+- `PaneMarketplaces` adds a checkable `buttonViewRedOnly` ("View red only"). When checked, `_applyRedOnlyFilter()` hides rows without any red `Sync Qty` cell (`!m_model->hasRedInRow(r)`) and hides all 3 columns (`Qty`, `Sync Qty`, `Sales 90d`) of any store that has no red `Sync Qty` cell (`!m_model->hasRedInStore(si)`), keeping the 6 fixed columns visible.
+- `TableMarketplaceProducts::headerData` and `TableMarketplaceOrders::headerData` return descriptive `Qt::ToolTipRole` text for all horizontal column headers.
+- Hovering a `ColSku` cell (`Qt::ToolTipRole` in `TableMarketplaceProducts::data`) displays the product name, prioritizing English (`EN`/`GB`/`UK`/`US`/`CA`/`AU`/`IE`) first, then French (`FR`/`BE`), then any other language/fallback (`StockRecord::productName`, target marketplace `lastProductNames()`, local `stores/*.json`, and `AmazonDataCache` `"listing"` records).

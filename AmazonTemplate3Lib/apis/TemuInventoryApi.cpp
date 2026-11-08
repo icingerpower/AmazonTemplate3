@@ -245,6 +245,13 @@ QCoro::Task<void> TemuInventoryApi::_scanSkuStocks(QHash<QString, SkuStockInfo> 
                 info.skuId   = s.value(QStringLiteral("skuId")).toVariant().toLongLong();
                 info.stock   = s.value(QStringLiteral("stock")).toInt(0);
                 out->insert(skuSn.toLower(), info);
+                QString goodsName = s.value(QStringLiteral("goodsName")).toString().trimmed();
+                if (goodsName.isEmpty())
+                    goodsName = s.value(QStringLiteral("productName")).toString().trimmed();
+                if (goodsName.isEmpty())
+                    goodsName = s.value(QStringLiteral("skuName")).toString().trimmed();
+                if (!goodsName.isEmpty())
+                    m_lastProductNames.insert(skuSn, goodsName);
                 ++typeCount;
             }
 
@@ -401,6 +408,10 @@ QCoro::Task<void> TemuInventoryApi::fetchSales(QStringList skus, int days, QHash
                 if (sku.isEmpty()) sku = itemObj.value(QStringLiteral("skuId")).toVariant().toString();
                 if (sku.isEmpty()) sku = itemObj.value(QStringLiteral("sku_id")).toVariant().toString();
 
+                QString itemGoodsName = itemObj.value(QStringLiteral("goodsName")).toString().trimmed();
+                if (itemGoodsName.isEmpty())
+                    itemGoodsName = itemObj.value(QStringLiteral("productName")).toString().trimmed();
+
                 // Try nested productList in order item
                 QJsonArray prodList = itemObj.value(QStringLiteral("productList")).toArray();
                 if (prodList.isEmpty()) prodList = itemObj.value(QStringLiteral("product_list")).toArray();
@@ -418,6 +429,13 @@ QCoro::Task<void> TemuInventoryApi::fetchSales(QStringList skus, int days, QHash
                     if (pSku.isEmpty()) pSku = prodObj.value(QStringLiteral("productId")).toVariant().toString();
                     if (!pSku.isEmpty()) {
                         nestedSkus.append(pSku);
+                        QString pName = prodObj.value(QStringLiteral("goodsName")).toString().trimmed();
+                        if (pName.isEmpty())
+                            pName = prodObj.value(QStringLiteral("productName")).toString().trimmed();
+                        if (pName.isEmpty())
+                            pName = itemGoodsName;
+                        if (!pName.isEmpty() && !m_lastProductNames.contains(pSku))
+                            m_lastProductNames.insert(pSku, pName);
                     }
                 }
 
@@ -440,6 +458,8 @@ QCoro::Task<void> TemuInventoryApi::fetchSales(QStringList skus, int days, QHash
                     }
                     if (!matchedSku.isEmpty()) {
                         (*out)[matchedSku] += qty;
+                        if (!itemGoodsName.isEmpty() && !m_lastProductNames.contains(matchedSku))
+                            m_lastProductNames.insert(matchedSku, itemGoodsName);
                     }
                 }
 
@@ -454,6 +474,8 @@ QCoro::Task<void> TemuInventoryApi::fetchSales(QStringList skus, int days, QHash
                     }
                     if (!matchedSku.isEmpty()) {
                         (*out)[matchedSku] += qty;
+                        if (!itemGoodsName.isEmpty() && !m_lastProductNames.contains(matchedSku))
+                            m_lastProductNames.insert(matchedSku, itemGoodsName);
                     }
                 }
             }

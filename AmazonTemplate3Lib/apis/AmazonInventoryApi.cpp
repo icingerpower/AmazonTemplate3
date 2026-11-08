@@ -277,6 +277,7 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventory(QStringList skus, QList<
                 InventorySummary s;
                 s.sku = o.value("sellerSku").toString();
                 s.asin = o.value("asin").toString();
+                s.productName = o.value("productName").toString().trimmed();
                 const QJsonObject det = o.value("inventoryDetails").toObject();
                 const QJsonObject res = det.value("reservedQuantity").toObject();
                 const int fulfillable = det.value("fulfillableQuantity").toInt();
@@ -511,6 +512,7 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventoryReport(
     int skuCol  = headers.indexOf(QStringLiteral("sku"));
     if (skuCol < 0) skuCol = headers.indexOf(QStringLiteral("seller-sku"));
     const int asinCol = headers.indexOf(QStringLiteral("asin"));
+    const int nameCol = headers.indexOf(QStringLiteral("product-name"));
     const int qtyCol  = headers.indexOf(QStringLiteral("afn-fulfillable-quantity"));
     // Full quantity breakdown, for the Inbound column and diagnostics.
     const int warehouseCol   = headers.indexOf(QStringLiteral("afn-warehouse-quantity"));
@@ -548,6 +550,8 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventoryReport(
         InventorySummary s;
         s.sku       = sku;
         s.asin      = cols[asinCol].trimmed();
+        if (nameCol >= 0 && nameCol < cols.size())
+            s.productName = cols[nameCol].trimmed();
         s.available = colInt(qtyCol);
         s.inbound   = colInt(inbWorkingCol) + colInt(inbShippedCol) + colInt(inbReceivingCol);
 
@@ -632,6 +636,8 @@ QCoro::Task<void> AmazonInventoryApi::fetchFbaInventoryReport(
                              .arg(ls.sku).arg(s.available).arg(ls.available));
                     s.available = ls.available;
                     s.inbound   = qMax(s.inbound, ls.inbound);
+                    if (s.productName.isEmpty() && !ls.productName.isEmpty())
+                        s.productName = ls.productName;
                 }
             }
             // A cross-check failure must not fail the whole report load.
