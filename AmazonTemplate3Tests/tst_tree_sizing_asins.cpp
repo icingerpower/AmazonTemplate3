@@ -17,6 +17,7 @@
 
 #include "apis/AmazonCatalogApi.h"
 #include "apis/TreeSizingAsins.h"
+#include "aplus/APlusContent.h"
 
 // ---------------------------------------------------------------------------
 // Mock JSON helpers
@@ -122,6 +123,8 @@ private slots:
     void test_load_error_on_empty_response();
     void test_dedup_german_compound_color_when_missing_on_uk();
     void test_fetch_child_health_not_found_error_body();
+    void test_aplus_active_faq_paths_excludes_old_versions();
+    void test_aplus_parse_assessment_and_delete_failed_items();
 
 #ifdef DO_REAL_AMAZON_TESTS
     void test_real_b0dftx45y9_eu();
@@ -531,6 +534,129 @@ void Test_Tree_Sizing_Asins::test_fetch_child_health_not_found_error_body()
 // ---------------------------------------------------------------------------
 // Real API tests (opt-in)
 // ---------------------------------------------------------------------------
+
+void Test_Tree_Sizing_Asins::test_aplus_active_faq_paths_excludes_old_versions()
+{
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
+    QDir aplusDir(tmp.path());
+    aplusDir.mkpath(QStringLiteral("faq"));
+
+    auto writeText = [&](const QString &rel, const QString &txt) {
+        QFile f(aplusDir.filePath(rel));
+        QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Text));
+        f.write(txt.toUtf8());
+    };
+
+    writeText(QStringLiteral("faq/v_20261104_094242.txt"), QStringLiteral("Q: Old?\nA: Yes."));
+    writeText(QStringLiteral("faq/v_20261104_173642.txt"), QStringLiteral("Q: New?\nA: Yes."));
+    writeText(QStringLiteral("faq/v_orphan.txt"), QStringLiteral("Orphan"));
+
+    APlusContent content;
+    content.setDir(aplusDir);
+
+    APlusVersion vOld{QDateTime::currentDateTime().addSecs(-3600),
+                      QStringLiteral("faq/v_20261104_094242.txt"),
+                      QStringLiteral("faq/v_20261104_094242.txt")};
+    APlusVersion vNew{QDateTime::currentDateTime(),
+                      QStringLiteral("faq/v_20261104_173642.txt"),
+                      QStringLiteral("faq/v_20261104_173642.txt")};
+    content.pushVersion(QStringLiteral("faq_en"), APlusElementType::Faq, QStringLiteral("FAQ (English)"), vOld);
+    content.pushVersion(QStringLiteral("faq_en"), APlusElementType::Faq, QStringLiteral("FAQ (English)"), vNew);
+
+    const QStringList activeFaqs = content.activeFaqFilePaths();
+    QCOMPARE(activeFaqs.size(), 1);
+    QCOMPARE(activeFaqs.first(), aplusDir.absoluteFilePath(QStringLiteral("faq/v_20261104_173642.txt")));
+
+    const int pruned = content.pruneOrphanFiles();
+    QCOMPARE(pruned, 1);
+    QVERIFY(!QFileInfo::exists(aplusDir.filePath(QStringLiteral("faq/v_orphan.txt"))));
+    QVERIFY(QFileInfo::exists(aplusDir.filePath(QStringLiteral("faq/v_20261104_173642.txt"))));
+}
+
+void Test_Tree_Sizing_Asins::test_aplus_parse_assessment_and_delete_failed_items()
+{
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
+    QDir aplusDir(tmp.path());
+    aplusDir.mkpath(QStringLiteral("image_aspirational"));
+    aplusDir.mkpath(QStringLiteral("image_detail_black"));
+    aplusDir.mkpath(QStringLiteral("faq"));
+
+    auto touch = [&](const QString &rel) {
+        QFile f(aplusDir.filePath(rel));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("data");
+    };
+
+    // Old and new versions for image_aspirational
+    touch(QStringLiteral("image_aspirational/v_old_desktop.png"));
+    touch(QStringLiteral("image_aspirational/v_old_mobile.png"));
+    touch(QStringLiteral("image_aspirational/v_new_desktop.png"));
+    touch(QStringLiteral("image_aspirational/v_new_mobile.png"));
+    // Single-side failure test on image_detail_black
+    touch(QStringLiteral("image_detail_black/v_old_desktop.png"));
+    touch(QStringLiteral("image_detail_black/v_old_mobile.png"));
+    touch(QStringLiteral("image_detail_black/v_new_desktop.png"));
+    touch(QStringLiteral("image_detail_black/v_new_mobile.png"));
+
+    APlusContent content;
+    content.setDir(aplusDir);
+    content.pushVersion(QStringLiteral("image_aspirational"), APlusElementType::Image, QStringLiteral("Aspirational"),
+                        {QDateTime::currentDateTime().addSecs(-100),
+                         QStringLiteral("image_aspirational/v_old_desktop.png"),
+                         QStringLiteral("image_aspirational/v_old_mobile.png")});
+    content.pushVersion(QStringLiteral("image_aspirational"), APlusElementType::Image, QStringLiteral("Aspirational"),
+                        {QDateTime::currentDateTime(),
+                         QStringLiteral("image_aspirational/v_new_desktop.png"),
+                         QStringLiteral("image_aspirational/v_new_mobile.png")});
+
+    content.pushVersion(QStringLiteral("image_detail_black"), APlusElementType::Image, QStringLiteral("Detail"),
+                        {QDateTime::currentDateTime().addSecs(-100),
+                         QStringLiteral("image_detail_black/v_old_desktop.png"),
+                         QStringLiteral("image_detail_black/v_old_mobile.png")});
+    content.pushVersion(QStringLiteral("image_detail_black"), APlusElementType::Image, QStringLiteral("Detail"),
+                        {QDateTime::currentDateTime(),
+                         QStringLiteral("image_detail_black/v_new_desktop.png"),
+                         QStringLiteral("image_detail_black/v_new_mobile.png")});
+
+    const QString cliOut = QStringLiteral(
+        "The aspirational images show Crystal Queen branding on the footbed instead of Pradize.\n"
+        "FAILED_ITEM: image_aspirational | both | Remove Crystal Queen logo from footbed.\n"
+        "FAILED_ITEM: image_detail_black | desktop | Remove text artifact on desktop image.\n"
+        "FAIL\n");
+
+    const APlusAssessmentParseResult parsed = content.parseAssessmentOutput(
+        cliOut, {QStringLiteral("image_aspirational"), QStringLiteral("image_detail_black")});
+    QCOMPARE(parsed.verdict, QStringLiteral("FAIL"));
+    QCOMPARE(parsed.failures.size(), 2);
+    QCOMPARE(parsed.failures.at(0).elementId, QStringLiteral("image_aspirational"));
+    QCOMPARE(parsed.failures.at(0).side, QStringLiteral("both"));
+    QVERIFY(parsed.failures.at(0).reason.contains(QStringLiteral("Crystal Queen")));
+    QCOMPARE(parsed.failures.at(1).elementId, QStringLiteral("image_detail_black"));
+    QCOMPARE(parsed.failures.at(1).side, QStringLiteral("desktop"));
+
+    // Deleting failed items must remove all versions + files for image_aspirational ("both"),
+    // and for image_detail_black ("desktop") must remove old versions and clear only desktop on current.
+    content.deleteFailedAssessmentItems(parsed.failures);
+
+    const APlusElement *asp = content.findElement(QStringLiteral("image_aspirational"));
+    QVERIFY(asp != nullptr);
+    QVERIFY(asp->versions.isEmpty());
+    QVERIFY(!QFileInfo::exists(aplusDir.filePath(QStringLiteral("image_aspirational/v_new_desktop.png"))));
+    QVERIFY(!QFileInfo::exists(aplusDir.filePath(QStringLiteral("image_aspirational/v_new_mobile.png"))));
+    QVERIFY(!QFileInfo::exists(aplusDir.filePath(QStringLiteral("image_aspirational/v_old_desktop.png"))));
+    QVERIFY(!QFileInfo::exists(aplusDir.filePath(QStringLiteral("image_aspirational/v_old_mobile.png"))));
+
+    const APlusElement *det = content.findElement(QStringLiteral("image_detail_black"));
+    QVERIFY(det != nullptr);
+    QCOMPARE(det->versions.size(), 1);
+    QVERIFY(det->current()->desktopFile.isEmpty());
+    QCOMPARE(det->current()->mobileFile, QStringLiteral("image_detail_black/v_new_mobile.png"));
+    QVERIFY(!QFileInfo::exists(aplusDir.filePath(QStringLiteral("image_detail_black/v_new_desktop.png"))));
+    QVERIFY(QFileInfo::exists(aplusDir.filePath(QStringLiteral("image_detail_black/v_new_mobile.png"))));
+    QVERIFY(!QFileInfo::exists(aplusDir.filePath(QStringLiteral("image_detail_black/v_old_desktop.png"))));
+}
 
 #ifdef DO_REAL_AMAZON_TESTS
 static QString envOrEmpty(const char* name)

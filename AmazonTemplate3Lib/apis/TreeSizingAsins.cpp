@@ -421,19 +421,57 @@ QCoro::Task<void> TreeSizingAsins::load(const QString& asinOrXlsxPath,
             probeChildAsin = family.children.first().asin;
 
             // Collect unique shoe widths from ALL children (shoe_width varies per size variant).
+            // Also inspect c.size (e.g. "39 EU Étroit" vs "39 EU"): regular children often omit
+            // the shoe_width attribute entirely, so without checking c.size a mixed regular+narrow
+            // family would only record ["Étroit"] and be mistaken for narrow-only.
             static const QString kWidthPrefix = QStringLiteral("Shoe width: ");
+            auto hasNarrowWord = [](const QString &s) {
+                const QString l = s.toLower();
+                return l == QLatin1String("n")
+                    || l.contains(QLatin1String("narrow"))
+                    || l.contains(QLatin1String("slim"))
+                    || l.contains(QStringLiteral("étroit"))
+                    || l.contains(QLatin1String("etroit"))
+                    || l.contains(QLatin1String("schmal"));
+            };
             QStringList shoeWidths;
+            bool anyNarrowChild  = false;
+            bool anyRegularChild = false;
             for (const auto& c : family.children) {
+                bool childHasWidthAttr = false;
+                bool childNarrow = false;
                 for (const QString& ma : c.materialAttrs) {
                     if (!ma.startsWith(kWidthPrefix)) continue;
                     const QStringList vals = ma.mid(kWidthPrefix.length()).split(
                         QStringLiteral(", "), Qt::SkipEmptyParts);
                     for (const QString& v : vals) {
                         const QString t = v.trimmed();
-                        if (!t.isEmpty() && !shoeWidths.contains(t, Qt::CaseInsensitive))
-                            shoeWidths.append(t);
+                        if (!t.isEmpty()) {
+                            childHasWidthAttr = true;
+                            if (hasNarrowWord(t)) childNarrow = true;
+                            if (!shoeWidths.contains(t, Qt::CaseInsensitive))
+                                shoeWidths.append(t);
+                        }
                     }
                 }
+                const QString sz = c.size.trimmed();
+                if (!sz.isEmpty()) {
+                    if (hasNarrowWord(sz)) {
+                        childNarrow = true;
+                        if (!childHasWidthAttr && !shoeWidths.contains(QStringLiteral("Narrow"), Qt::CaseInsensitive))
+                            shoeWidths.append(QStringLiteral("Narrow"));
+                    } else if (!childHasWidthAttr) {
+                        anyRegularChild = true;
+                    }
+                }
+                if (childNarrow)
+                    anyNarrowChild = true;
+                else if (childHasWidthAttr)
+                    anyRegularChild = true;
+            }
+            if (anyNarrowChild && anyRegularChild
+                && !shoeWidths.contains(QStringLiteral("Regular"), Qt::CaseInsensitive)) {
+                shoeWidths.append(QStringLiteral("Regular"));
             }
 
             // Remove shoe_width from the first child's material list to avoid duplication —

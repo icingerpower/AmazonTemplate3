@@ -27,6 +27,9 @@
 #define private public
 #include "fillers/FillerSize.h"
 #undef private
+#include "sizecategories/ShoesWomenCategory.h"
+#include "sizecategories/ShoesMenCategory.h"
+#include <QStandardItemModel>
 
 class FillerSizeTests : public QObject
 {
@@ -42,6 +45,10 @@ private slots:
     void testConvertSizeShoe();
     void testConvertUnit_data();
     void testConvertUnit();
+
+    void testShoesWomenDefaultCorrection();
+    void testShoesWomenCustomCorrection();
+    void testShoesMenCorrection();
 };
 
 void FillerSizeTests::testConvertClothingSize_data()
@@ -352,6 +359,90 @@ void FillerSizeTests::testConvertUnit()
     QVariant result = filler.convertUnit(countryTo, origValue);
 
     QCOMPARE(result.toString(), expected.toString());
+}
+
+void FillerSizeTests::testShoesWomenDefaultCorrection()
+{
+    ShoesWomenCategory cat;
+    const auto fields = cat.measurementFields();
+    QCOMPARE(fields.size(), 1);
+    QCOMPARE(fields[0].id, QStringLiteral("foot_length"));
+    QCOMPARE(fields[0].defaultCorrection, -1.0);
+    QCOMPARE(fields[0].defaultNarrowCorrection, -1.5);
+
+    // Build table for EU 37 without explicit measurements (uses defaultCorrection -1.0)
+    std::unique_ptr<QStandardItemModel> model(cat.buildTable("37", "37", {}));
+    QVERIFY(model != nullptr);
+
+    // Row 0: EU ("37")
+    QCOMPARE(model->item(0, 0)->text(), QStringLiteral("EU"));
+    QCOMPARE(model->item(0, 1)->text(), QStringLiteral("37"));
+
+    // Row 3: JP/MX (cm) — shoe size conversion to cm must NOT have -1 cm applied
+    QCOMPARE(model->item(3, 0)->text(), QStringLiteral("JP/MX (cm)"));
+    QCOMPARE(model->item(3, 1)->text(), QStringLiteral("23 cm / 9.1 in"));
+
+    // Row 4: Foot length (cm) — feet length line MUST have -1 cm applied (23 - 1 = 22)
+    QCOMPARE(model->item(4, 0)->text(), QStringLiteral("Foot length (cm)"));
+    QCOMPARE(model->item(4, 1)->text(), QStringLiteral("22 cm / 8.7 in"));
+}
+
+void FillerSizeTests::testShoesWomenCustomCorrection()
+{
+    ShoesWomenCategory cat;
+
+    // Apply custom correction of 0.0 (no offset)
+    QMap<QString, MeasurementInput> meas;
+    meas[QStringLiteral("foot_length")] = {0.0, 0.5, 0.0};
+
+    std::unique_ptr<QStandardItemModel> model(cat.buildTable("37", "37", meas));
+    QVERIFY(model != nullptr);
+
+    // JP/MX (cm) stays 23 cm / 9.1 in
+    QCOMPARE(model->item(3, 1)->text(), QStringLiteral("23 cm / 9.1 in"));
+
+    // Foot length with 0 offset is also 23 cm / 9.1 in
+    QCOMPARE(model->item(4, 1)->text(), QStringLiteral("23 cm / 9.1 in"));
+
+    // Apply narrow correction of -1.5 cm (23 - 1.5 = 21.5 cm / 8.5 in)
+    meas[QStringLiteral("foot_length")] = {cat.measurementFields()[0].defaultNarrowCorrection, 0.5, 0.0};
+    std::unique_ptr<QStandardItemModel> modelNarrow(cat.buildTable("37", "37", meas));
+    QVERIFY(modelNarrow != nullptr);
+    QCOMPARE(modelNarrow->item(3, 1)->text(), QStringLiteral("23 cm / 9.1 in"));
+    QCOMPARE(modelNarrow->item(4, 1)->text(), QStringLiteral("21.5 cm / 8.5 in"));
+}
+
+void FillerSizeTests::testShoesMenCorrection()
+{
+    ShoesMenCategory cat;
+    const auto fields = cat.measurementFields();
+    QCOMPARE(fields.size(), 1);
+    QCOMPARE(fields[0].id, QStringLiteral("foot_length"));
+    QCOMPARE(fields[0].defaultCorrection, 0.0);
+    QCOMPARE(fields[0].defaultNarrowCorrection, -0.5);
+
+    // Default for men is 0.0
+    std::unique_ptr<QStandardItemModel> modelDef(cat.buildTable("40", "40", {}));
+    QVERIFY(modelDef != nullptr);
+    // EU 40 -> JP 25.0 cm
+    QCOMPARE(modelDef->item(3, 1)->text(), QStringLiteral("25 cm / 9.8 in"));
+    QCOMPARE(modelDef->item(4, 1)->text(), QStringLiteral("25 cm / 9.8 in"));
+
+    // Narrow default correction for men of -0.5
+    QMap<QString, MeasurementInput> measNarrow;
+    measNarrow[QStringLiteral("foot_length")] = {fields[0].defaultNarrowCorrection, 0.5, 0.0};
+    std::unique_ptr<QStandardItemModel> modelNarrow(cat.buildTable("40", "40", measNarrow));
+    QVERIFY(modelNarrow != nullptr);
+    QCOMPARE(modelNarrow->item(3, 1)->text(), QStringLiteral("25 cm / 9.8 in"));
+    QCOMPARE(modelNarrow->item(4, 1)->text(), QStringLiteral("24.5 cm / 9.6 in"));
+
+    // Custom correction for men of -1.0
+    QMap<QString, MeasurementInput> meas;
+    meas[QStringLiteral("foot_length")] = {-1.0, 0.5, 0.0};
+    std::unique_ptr<QStandardItemModel> modelCorr(cat.buildTable("40", "40", meas));
+    QVERIFY(modelCorr != nullptr);
+    QCOMPARE(modelCorr->item(3, 1)->text(), QStringLiteral("25 cm / 9.8 in"));
+    QCOMPARE(modelCorr->item(4, 1)->text(), QStringLiteral("24 cm / 9.4 in"));
 }
 
 QTEST_MAIN(FillerSizeTests)

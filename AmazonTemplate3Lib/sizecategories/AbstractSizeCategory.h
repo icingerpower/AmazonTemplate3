@@ -13,9 +13,11 @@ class QObject;
 struct MeasurementField {
     QString id;
     QString label;
-    double  defaultStep = 2.0;
+    double  defaultStep             = 2.0;
     QString derivedKey;
-    bool    noRange     = false;
+    bool    noRange                 = false;
+    double  defaultCorrection       = 0.0;
+    double  defaultNarrowCorrection = -0.5;
 };
 
 struct CountryGroup {

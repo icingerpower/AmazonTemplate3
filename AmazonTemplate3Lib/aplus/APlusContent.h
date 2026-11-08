@@ -25,6 +25,17 @@ struct APlusElement {
     APlusVersion       *current();
 };
 
+struct APlusAssessmentFailure {
+    QString elementId;
+    QString side;   // "desktop", "mobile", "both", or "faq"
+    QString reason;
+};
+
+struct APlusAssessmentParseResult {
+    QString                       verdict;
+    QList<APlusAssessmentFailure> failures;
+};
+
 class APlusContent : public QObject
 {
     Q_OBJECT
@@ -63,6 +74,22 @@ public:
     // e.g. the plain desktop.png/mobile.png or superseded v_* files). The version
     // history referenced by index.json is preserved. Returns the count removed.
     int pruneOrphanFiles() const;
+
+    // Returns absolute paths of the current (active) version file for each FAQ
+    // element, omitting historical versions so assessment only inspects active FAQs.
+    QStringList activeFaqFilePaths() const;
+
+    // Parses the AI CLI assessment output into a verdict ("PASS",
+    // "PASS_WITH_WARNINGS", "FAIL") and a deduplicated list of failed items.
+    APlusAssessmentParseResult parseAssessmentOutput(
+        const QString &rawOutput,
+        const QStringList &expectedImageElementIds = {}) const;
+
+    // Deletes failed items from version history and disk so failed content
+    // cannot be uploaded by accident. For single-side image failures ("desktop"
+    // or "mobile"), only the failed side is cleared on the current version while
+    // older versions are removed so an older broken file does not become current.
+    void deleteFailedAssessmentItems(const QList<APlusAssessmentFailure> &failures);
 
 signals:
     void elementChanged(const QString &id);

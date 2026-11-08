@@ -165,8 +165,11 @@ QStandardItemModel* AbstractSizeCategory::buildTable(const QString &keyFrom,
 
         if (!field.derivedKey.isEmpty()) {
             const bool isCm = field.label.contains(QStringLiteral("cm"));
+            const double offset = measurements.contains(field.id)
+                ? measurements.value(field.id).refValue
+                : field.defaultCorrection;
             for (int i = 0; i < nSizes; ++i) {
-                const double v = rows[fromIdx + i].value(field.derivedKey);
+                const double v = rows[fromIdx + i].value(field.derivedKey) + offset;
                 auto *cell = new QStandardItem(
                     isCm ? fmtCmAndIn(v) : _formatVal(v, false, true));
                 cell->setFlags(noEditFlags);
@@ -389,7 +392,10 @@ QList<QPair<QString,QImage>> AbstractSizeCategory::renderGroupImages(
             QStringList cmVals;
             for (int i = 0; i < nSizes; ++i) {
                 if (!field.derivedKey.isEmpty()) {
-                    const double v = rows[fromIdx + i].value(field.derivedKey);
+                    const double offset = measurements.contains(field.id)
+                        ? measurements.value(field.id).refValue
+                        : field.defaultCorrection;
+                    const double v = rows[fromIdx + i].value(field.derivedKey) + offset;
                     cmVals << (v == qRound(v)
                         ? QString::number(static_cast<int>(qRound(v)))
                         : QString::number(v, 'f', 1));

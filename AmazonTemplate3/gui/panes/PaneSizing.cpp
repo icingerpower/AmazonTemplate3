@@ -794,6 +794,8 @@ void PaneSizing::_saveProductSettings()
     // Persist the product brand so the Load Sub Folder list can show it.
     if (!m_currentBrand.isEmpty())
         s.setValue(QStringLiteral("sizing/brand"), m_currentBrand);
+    if (!m_shoeWidths.isEmpty())
+        s.setValue(QStringLiteral("sizing/shoeWidths"), m_shoeWidths);
 
     s.setValue(QStringLiteral("sizing/mode"), ui->sizeRangeMain->mode());
     s.setValue(QStringLiteral("sizing/from"), ui->sizeRangeMain->from());
@@ -805,9 +807,18 @@ void PaneSizing::_saveProductSettings()
     const QString mPrefix = QStringLiteral("sizing/measurements/");
     for (const auto &w : m_measurementWidgets) {
         const QString base = mPrefix + w.fieldId;
-        s.setValue(base + QStringLiteral("/ref"),   w.refSpinBox->value());
-        s.setValue(base + QStringLiteral("/step"),  w.stepSpinBox->value());
-        if (w.rangeSpinBox) s.setValue(base + QStringLiteral("/range"), w.rangeSpinBox->value());
+        if (w.refSpinBox)        s.setValue(base + QStringLiteral("/ref"),       w.refSpinBox->value());
+        if (w.stepSpinBox)       s.setValue(base + QStringLiteral("/step"),      w.stepSpinBox->value());
+        if (w.rangeSpinBox)      s.setValue(base + QStringLiteral("/range"),     w.rangeSpinBox->value());
+        if (w.narrowCorrSpinBox) s.setValue(base + QStringLiteral("/narrowRef"), w.narrowCorrSpinBox->value());
+        if (w.fieldId == QLatin1String("foot_length")) {
+            if (w.refSpinBox)
+                s.setValue(QStringLiteral("sizing/footLengthCorrection"), w.refSpinBox->value());
+            if (w.narrowCorrSpinBox)
+                s.setValue(QStringLiteral("sizing/narrowFootLengthCorrection"), w.narrowCorrSpinBox->value());
+            if (w.narrowRadio)
+                s.setValue(QStringLiteral("sizing/useNarrowFootLengthCorrection"), w.narrowRadio->isChecked());
+        }
     }
 
     // Save SKUs from the tree model
@@ -867,15 +878,39 @@ void PaneSizing::_loadProductSettings()
         }
     }
 
-    if (!s.contains(QStringLiteral("sizing/type")))
+    if (m_shoeWidths.isEmpty() && s.contains(QStringLiteral("sizing/shoeWidths")))
+        m_shoeWidths = s.value(QStringLiteral("sizing/shoeWidths")).toStringList();
+
+    if (!s.contains(QStringLiteral("sizing/type"))) {
+        const bool useNarrow = s.contains(QStringLiteral("sizing/useNarrowFootLengthCorrection"))
+            ? s.value(QStringLiteral("sizing/useNarrowFootLengthCorrection")).toBool()
+            : _isNarrowOnlyShoe();
+        for (const auto &w : m_measurementWidgets) {
+            if (w.regularRadio && w.narrowRadio) {
+                QSignalBlocker b1(w.regularRadio);
+                QSignalBlocker b2(w.narrowRadio);
+                w.regularRadio->setChecked(!useNarrow);
+                w.narrowRadio->setChecked(useNarrow);
+            }
+        }
+        if (_currentCategory() && _currentCategory()->generatesSizeChart()
+            && ui->sizeRangeMain->isRangeSelected()) {
+            _rebuildSizeTable();
+            updateButtonStates();
+        }
         return;
+    }
 
     // Set size type — triggers onSizeTypeChanged → _populateSizeRangeCombos +
     // _rebuildMeasurementForm, which also restores generic measurement defaults.
     const QString savedType = s.value(QStringLiteral("sizing/type")).toString();
     const int typeIdx = ui->comboBoxSizeType->findText(savedType);
-    if (typeIdx >= 0)
-        ui->comboBoxSizeType->setCurrentIndex(typeIdx);
+    if (typeIdx >= 0) {
+        if (ui->comboBoxSizeType->currentIndex() != typeIdx)
+            ui->comboBoxSizeType->setCurrentIndex(typeIdx);
+        else
+            _rebuildMeasurementForm();
+    }
 
     const QString mode = s.value(QStringLiteral("sizing/mode")).toString();
     const QString from = s.value(QStringLiteral("sizing/from")).toString();
@@ -898,9 +933,51 @@ void PaneSizing::_loadProductSettings()
     for (const auto &w : m_measurementWidgets) {
         const QString base = mPrefix + w.fieldId;
         if (s.contains(base + QStringLiteral("/ref"))) {
-            w.refSpinBox->setValue( s.value(base + QStringLiteral("/ref")).toDouble());
-            w.stepSpinBox->setValue(s.value(base + QStringLiteral("/step")).toDouble());
-            if (w.rangeSpinBox) w.rangeSpinBox->setValue(s.value(base + QStringLiteral("/range")).toDouble());
+            if (w.refSpinBox) {
+                QSignalBlocker b(w.refSpinBox);
+                w.refSpinBox->setValue(s.value(base + QStringLiteral("/ref")).toDouble());
+            }
+            if (w.stepSpinBox) {
+                QSignalBlocker b(w.stepSpinBox);
+                w.stepSpinBox->setValue(s.value(base + QStringLiteral("/step")).toDouble());
+            }
+            if (w.rangeSpinBox) {
+                QSignalBlocker b(w.rangeSpinBox);
+                w.rangeSpinBox->setValue(s.value(base + QStringLiteral("/range")).toDouble());
+            }
+        }
+        if (w.narrowCorrSpinBox && s.contains(base + QStringLiteral("/narrowRef"))) {
+            QSignalBlocker b(w.narrowCorrSpinBox);
+            w.narrowCorrSpinBox->setValue(s.value(base + QStringLiteral("/narrowRef")).toDouble());
+        }
+    }
+    if (s.contains(QStringLiteral("sizing/footLengthCorrection"))) {
+        const double corr = s.value(QStringLiteral("sizing/footLengthCorrection")).toDouble();
+        for (const auto &w : m_measurementWidgets) {
+            if (w.fieldId == QLatin1String("foot_length") && w.refSpinBox) {
+                QSignalBlocker b(w.refSpinBox);
+                w.refSpinBox->setValue(corr);
+            }
+        }
+    }
+    if (s.contains(QStringLiteral("sizing/narrowFootLengthCorrection"))) {
+        const double narrowCorr = s.value(QStringLiteral("sizing/narrowFootLengthCorrection")).toDouble();
+        for (const auto &w : m_measurementWidgets) {
+            if (w.fieldId == QLatin1String("foot_length") && w.narrowCorrSpinBox) {
+                QSignalBlocker b(w.narrowCorrSpinBox);
+                w.narrowCorrSpinBox->setValue(narrowCorr);
+            }
+        }
+    }
+    const bool useNarrow = s.contains(QStringLiteral("sizing/useNarrowFootLengthCorrection"))
+        ? s.value(QStringLiteral("sizing/useNarrowFootLengthCorrection")).toBool()
+        : _isNarrowOnlyShoe();
+    for (const auto &w : m_measurementWidgets) {
+        if (w.regularRadio && w.narrowRadio) {
+            QSignalBlocker b1(w.regularRadio);
+            QSignalBlocker b2(w.narrowRadio);
+            w.regularRadio->setChecked(!useNarrow);
+            w.narrowRadio->setChecked(useNarrow);
         }
     }
 
@@ -1027,8 +1104,9 @@ void PaneSizing::_ensureModel(const QDir &dir)
                 // Reset product-specific state so the previous product's A+ content
                 // is not shown while the new product loads. The working dir is either
                 // restored below (if the folder already exists) or set by attributesFetched.
+                // (m_shoeWidths is cleared before load() and set by attributesFetched
+                // before modelReset fires, so do not clear it here.)
                 m_productWorkingDir = QDir{};
-                m_shoeWidths.clear();
                 ui->lineEditSubWorkingDir->clear();
                 if (m_brokenChildTable)
                     m_brokenChildTable->clear();
@@ -1287,14 +1365,10 @@ void PaneSizing::_rebuildMeasurementForm()
     }
 
     const auto *cat = _currentCategory();
-    QList<MeasurementField> inputFields;
-    if (cat) {
-        for (const auto &f : cat->measurementFields())
-            if (f.derivedKey.isEmpty()) inputFields << f;
-    }
+    const auto fields = cat ? cat->measurementFields() : QList<MeasurementField>{};
 
-    ui->widgetMeasurementForm->setVisible(!inputFields.isEmpty());
-    if (inputFields.isEmpty()) return;
+    ui->widgetMeasurementForm->setVisible(!fields.isEmpty());
+    if (fields.isEmpty()) return;
 
     QHBoxLayout *layout = qobject_cast<QHBoxLayout*>(ui->widgetMeasurementForm->layout());
     if (!layout) {
@@ -1302,39 +1376,84 @@ void PaneSizing::_rebuildMeasurementForm()
         layout->setContentsMargins(0, 4, 0, 4);
     }
 
-    for (const auto &field : inputFields) {
-        layout->addWidget(new QLabel(field.label + ":"));
+    for (const auto &field : fields) {
+        if (!field.derivedKey.isEmpty()) {
+            auto *regRadio = new QRadioButton(tr("Feet length correction:"));
+            layout->addWidget(regRadio);
 
-        auto *refSpin = new QDoubleSpinBox;
-        refSpin->setRange(0, 500);
-        refSpin->setDecimals(1);
-        refSpin->setSingleStep(field.defaultStep);
-        refSpin->setValue(field.defaultStep * 10);
-        refSpin->setPrefix(tr("ref "));
-        layout->addWidget(refSpin);
+            auto *corrSpin = new QDoubleSpinBox;
+            corrSpin->setRange(-20.0, 20.0);
+            corrSpin->setDecimals(1);
+            corrSpin->setSingleStep(0.5);
+            corrSpin->setSuffix(QStringLiteral(" cm"));
+            corrSpin->setValue(field.defaultCorrection);
+            layout->addWidget(corrSpin);
 
-        layout->addWidget(new QLabel(tr("step")));
+            layout->addSpacing(12);
 
-        auto *stepSpin = new QDoubleSpinBox;
-        stepSpin->setRange(0, 50);
-        stepSpin->setDecimals(1);
-        stepSpin->setSingleStep(0.5);
-        stepSpin->setValue(field.defaultStep);
-        layout->addWidget(stepSpin);
+            auto *narrowRadio = new QRadioButton(tr("Narrow feet length correction:"));
+            layout->addWidget(narrowRadio);
 
-        QDoubleSpinBox *rangeSpin = nullptr;
-        if (!field.noRange) {
-            layout->addWidget(new QLabel(tr("range")));
-            rangeSpin = new QDoubleSpinBox;
-            rangeSpin->setRange(0, 50);
-            rangeSpin->setDecimals(1);
-            rangeSpin->setSingleStep(0.5);
-            rangeSpin->setValue(0.0);
-            layout->addWidget(rangeSpin);
+            auto *narrowCorrSpin = new QDoubleSpinBox;
+            narrowCorrSpin->setRange(-20.0, 20.0);
+            narrowCorrSpin->setDecimals(1);
+            narrowCorrSpin->setSingleStep(0.5);
+            narrowCorrSpin->setSuffix(QStringLiteral(" cm"));
+            narrowCorrSpin->setValue(field.defaultNarrowCorrection);
+            layout->addWidget(narrowCorrSpin);
+
+            auto *corrGroup = new QButtonGroup(regRadio);
+            corrGroup->setExclusive(true);
+            corrGroup->addButton(regRadio);
+            corrGroup->addButton(narrowRadio);
+
+            bool useNarrow = _isNarrowOnlyShoe();
+            if (m_productWorkingDir.exists()) {
+                QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                             QSettings::IniFormat);
+                if (ps.contains(QStringLiteral("sizing/useNarrowFootLengthCorrection")))
+                    useNarrow = ps.value(QStringLiteral("sizing/useNarrowFootLengthCorrection")).toBool();
+            }
+            regRadio->setChecked(!useNarrow);
+            narrowRadio->setChecked(useNarrow);
+
+            layout->addSpacing(16);
+            m_measurementWidgets.append({field.id, corrSpin, nullptr, nullptr,
+                                         narrowCorrSpin, regRadio, narrowRadio});
+        } else {
+            layout->addWidget(new QLabel(field.label + ":"));
+
+            auto *refSpin = new QDoubleSpinBox;
+            refSpin->setRange(0, 500);
+            refSpin->setDecimals(1);
+            refSpin->setSingleStep(field.defaultStep);
+            refSpin->setValue(field.defaultStep * 10);
+            refSpin->setPrefix(tr("ref "));
+            layout->addWidget(refSpin);
+
+            layout->addWidget(new QLabel(tr("step")));
+
+            auto *stepSpin = new QDoubleSpinBox;
+            stepSpin->setRange(0, 50);
+            stepSpin->setDecimals(1);
+            stepSpin->setSingleStep(0.5);
+            stepSpin->setValue(field.defaultStep);
+            layout->addWidget(stepSpin);
+
+            QDoubleSpinBox *rangeSpin = nullptr;
+            if (!field.noRange) {
+                layout->addWidget(new QLabel(tr("range")));
+                rangeSpin = new QDoubleSpinBox;
+                rangeSpin->setRange(0, 50);
+                rangeSpin->setDecimals(1);
+                rangeSpin->setSingleStep(0.5);
+                rangeSpin->setValue(0.0);
+                layout->addWidget(rangeSpin);
+            }
+
+            layout->addSpacing(16);
+            m_measurementWidgets.append({field.id, refSpin, stepSpin, rangeSpin});
         }
-
-        layout->addSpacing(16);
-        m_measurementWidgets.append({field.id, refSpin, stepSpin, rangeSpin});
     }
     layout->addStretch();
 
@@ -1343,10 +1462,69 @@ void PaneSizing::_rebuildMeasurementForm()
     const QString prefix = QStringLiteral("sizeCat/") + cat->displayName() + QLatin1Char('/');
     for (const auto &w : m_measurementWidgets) {
         const QString base = prefix + w.fieldId;
-        if (s->contains(base + QStringLiteral("/ref"))) {
-            w.refSpinBox->setValue( s->value(base + QStringLiteral("/ref")).toDouble());
+        if (s->contains(base + QStringLiteral("/correction"))) {
+            if (w.refSpinBox) w.refSpinBox->setValue(s->value(base + QStringLiteral("/correction")).toDouble());
+        } else if (s->contains(base + QStringLiteral("/ref"))) {
+            if (w.refSpinBox) w.refSpinBox->setValue(s->value(base + QStringLiteral("/ref")).toDouble());
+        }
+        if (w.narrowCorrSpinBox && s->contains(base + QStringLiteral("/narrowCorrection")))
+            w.narrowCorrSpinBox->setValue(s->value(base + QStringLiteral("/narrowCorrection")).toDouble());
+        if (w.stepSpinBox && s->contains(base + QStringLiteral("/step")))
             w.stepSpinBox->setValue(s->value(base + QStringLiteral("/step")).toDouble());
-            if (w.rangeSpinBox) w.rangeSpinBox->setValue(s->value(base + QStringLiteral("/range")).toDouble());
+        if (w.rangeSpinBox && s->contains(base + QStringLiteral("/range")))
+            w.rangeSpinBox->setValue(s->value(base + QStringLiteral("/range")).toDouble());
+
+        // Wire live-update and persistence signals for derived (foot length) correction widgets
+        if (w.regularRadio && w.narrowRadio) {
+            const QString fieldId = w.fieldId;
+            if (w.refSpinBox) {
+                connect(w.refSpinBox, &QDoubleSpinBox::valueChanged, this,
+                        [this, cat, fieldId](double val) {
+                    auto gs = WorkingDirectoryManager::instance()->settings();
+                    const QString p = QStringLiteral("sizeCat/") + cat->displayName() + QLatin1Char('/');
+                    gs->setValue(p + fieldId + QStringLiteral("/ref"), val);
+                    gs->setValue(p + fieldId + QStringLiteral("/correction"), val);
+                    if (m_productWorkingDir.exists()) {
+                        QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                                     QSettings::IniFormat);
+                        ps.setValue(QStringLiteral("sizing/footLengthCorrection"), val);
+                        ps.setValue(QStringLiteral("sizing/measurements/") + fieldId + QStringLiteral("/ref"), val);
+                    }
+                    if (ui->sizeRangeMain->isRangeSelected()) {
+                        _rebuildSizeTable();
+                        updateButtonStates();
+                    }
+                });
+            }
+            if (w.narrowCorrSpinBox) {
+                connect(w.narrowCorrSpinBox, &QDoubleSpinBox::valueChanged, this,
+                        [this, cat, fieldId](double val) {
+                    auto gs = WorkingDirectoryManager::instance()->settings();
+                    const QString p = QStringLiteral("sizeCat/") + cat->displayName() + QLatin1Char('/');
+                    gs->setValue(p + fieldId + QStringLiteral("/narrowCorrection"), val);
+                    if (m_productWorkingDir.exists()) {
+                        QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                                     QSettings::IniFormat);
+                        ps.setValue(QStringLiteral("sizing/narrowFootLengthCorrection"), val);
+                        ps.setValue(QStringLiteral("sizing/measurements/") + fieldId + QStringLiteral("/narrowRef"), val);
+                    }
+                    if (ui->sizeRangeMain->isRangeSelected()) {
+                        _rebuildSizeTable();
+                        updateButtonStates();
+                    }
+                });
+            }
+            connect(w.narrowRadio, &QRadioButton::toggled, this, [this](bool checked) {
+                if (m_productWorkingDir.exists()) {
+                    QSettings ps(m_productWorkingDir.filePath(QStringLiteral("settings.ini")),
+                                 QSettings::IniFormat);
+                    ps.setValue(QStringLiteral("sizing/useNarrowFootLengthCorrection"), checked);
+                }
+                if (ui->sizeRangeMain->isRangeSelected()) {
+                    _rebuildSizeTable();
+                    updateButtonStates();
+                }
+            });
         }
     }
 }
@@ -1366,9 +1544,15 @@ bool PaneSizing::_rebuildSizeTable()
 
     if (useOneSize) {
         QMap<QString, MeasurementInput> measurements;
-        for (const auto &w : m_measurementWidgets)
-            measurements[w.fieldId] = {w.refSpinBox->value(), w.stepSpinBox->value(),
+        for (const auto &w : m_measurementWidgets) {
+            const bool useNarrow = w.narrowRadio && w.narrowRadio->isChecked() && w.narrowCorrSpinBox;
+            const double refVal = useNarrow
+                ? w.narrowCorrSpinBox->value()
+                : (w.refSpinBox ? w.refSpinBox->value() : 0.0);
+            measurements[w.fieldId] = {refVal,
+                                       w.stepSpinBox ? w.stepSpinBox->value() : 0.0,
                                        w.rangeSpinBox ? w.rangeSpinBox->value() : 0.0};
+        }
         try {
             ui->tableViewSizing->setModel(nullptr);
             delete m_sizeTableModel;
@@ -1407,9 +1591,15 @@ bool PaneSizing::_rebuildSizeTable()
     }
 
     QMap<QString, MeasurementInput> measurements;
-    for (const auto &w : m_measurementWidgets)
-        measurements[w.fieldId] = {w.refSpinBox->value(), w.stepSpinBox->value(),
+    for (const auto &w : m_measurementWidgets) {
+        const bool useNarrow = w.narrowRadio && w.narrowRadio->isChecked() && w.narrowCorrSpinBox;
+        const double refVal = useNarrow
+            ? w.narrowCorrSpinBox->value()
+            : (w.refSpinBox ? w.refSpinBox->value() : 0.0);
+        measurements[w.fieldId] = {refVal,
+                                   w.stepSpinBox ? w.stepSpinBox->value() : 0.0,
                                    w.rangeSpinBox ? w.rangeSpinBox->value() : 0.0};
+    }
 
     try {
         ui->tableViewSizing->setModel(nullptr);
@@ -1468,9 +1658,15 @@ void PaneSizing::onGenSizeTablesClicked()
         const QString prefix = QStringLiteral("sizeCat/") + cat->displayName() + QLatin1Char('/');
         for (const auto &w : m_measurementWidgets) {
             const QString base = prefix + w.fieldId;
-            s->setValue(base + QStringLiteral("/ref"),   w.refSpinBox->value());
-            s->setValue(base + QStringLiteral("/step"),  w.stepSpinBox->value());
+            if (w.refSpinBox)   s->setValue(base + QStringLiteral("/ref"),   w.refSpinBox->value());
+            if (w.stepSpinBox)  s->setValue(base + QStringLiteral("/step"),  w.stepSpinBox->value());
             if (w.rangeSpinBox) s->setValue(base + QStringLiteral("/range"), w.rangeSpinBox->value());
+            if (w.fieldId == QLatin1String("foot_length")) {
+                if (w.refSpinBox)
+                    s->setValue(base + QStringLiteral("/correction"), w.refSpinBox->value());
+                if (w.narrowCorrSpinBox)
+                    s->setValue(base + QStringLiteral("/narrowCorrection"), w.narrowCorrSpinBox->value());
+            }
         }
 
         if (m_aplusContent)
@@ -1645,6 +1841,7 @@ void PaneSizing::onAddFromAsinClicked()
         return;
 
     _refreshApi();
+    m_shoeWidths.clear();
     m_requestedAsin = asin.trimmed();
     m_treeModel->load(m_requestedAsin);
 }
@@ -1922,6 +2119,7 @@ void PaneSizing::onLoadSubFolderClicked()
     const QDir defaultDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
     _ensureModel(defaultDir);
     _refreshApi();
+    m_shoeWidths.clear();
     m_requestedAsin = asin;
     m_treeModel->load(m_requestedAsin);
 }
@@ -2711,15 +2909,27 @@ buildAplusElementInfos(const APlusContent &content)
         info.type        = elem.type;
 
         if (elem.type == APlusElementType::Faq) {
+            if (ver->desktopFile.isEmpty()) continue;
             const QString txtPath = aplusDir.filePath(ver->desktopFile);
             QFile f(txtPath);
             if (f.open(QIODevice::ReadOnly | QIODevice::Text))
                 info.textContent = QString::fromUtf8(f.readAll()).trimmed();
+            if (info.textContent.isEmpty()) continue;
+        } else if (elem.type == APlusElementType::Image) {
+            if (ver->desktopFile.isEmpty() || ver->mobileFile.isEmpty()) continue;
+            info.imagePath = aplusDir.filePath(ver->desktopFile);
+            if (!QFileInfo::exists(info.imagePath)
+                    || !QFileInfo::exists(aplusDir.filePath(ver->mobileFile)))
+                continue;
+            const QImage full(info.imagePath);
+            if (full.isNull()) continue;
+            info.thumbnail = full.scaled(120, 80, Qt::KeepAspectRatio, Qt::SmoothTransformation);
         } else {
+            if (ver->desktopFile.isEmpty()) continue;
             info.imagePath = aplusDir.filePath(ver->desktopFile);
             const QImage full(info.imagePath);
-            if (!full.isNull())
-                info.thumbnail = full.scaled(120, 80, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            if (full.isNull()) continue;
+            info.thumbnail = full.scaled(120, 80, Qt::KeepAspectRatio, Qt::SmoothTransformation);
         }
         infos.append(info);
     }
@@ -5483,9 +5693,6 @@ void PaneSizing::onAplusGenerateAll()
     // --- Build sequential task list ---
     QList<CliTask> tasks;
 
-    // Accumulates absolute paths of every image file produced, for the assessment step.
-    auto generatedImages = QSharedPointer<QStringList>::create();
-
     // Tracks image tasks that produced no output file, for the post-run recovery dialog.
     struct FailedEntry {
         CliTask              task;       // original task — can be re-run as-is
@@ -5494,20 +5701,36 @@ void PaneSizing::onAplusGenerateAll()
     };
     auto failedEntries = QSharedPointer<QList<FailedEntry>>::create();
 
-    // One desktop + mobile task pair per workflow slot.
-    // If the current version has exactly one side (the other was explicitly deleted),
-    // only regenerate the missing side and inherit the surviving file into the new version.
-    for (const ImageSlotSpec &spec : slotSpecs) {
-        const int vCount = spec.versionCount;
+    auto slotByElemId = QSharedPointer<QMap<QString, ImageSlotSpec>>::create();
+    QStringList expectedImageIds;
+    for (const ImageSlotSpec &spec : std::as_const(slotSpecs)) {
+        slotByElemId->insert(spec.elementId, spec);
+        if (!expectedImageIds.contains(spec.elementId))
+            expectedImageIds.append(spec.elementId);
+    }
+
+    QPointer<PaneSizing> selfPtr(this);
+
+    // Helper: appends desktop and/or mobile generation tasks for one image slot.
+    // If the current version has exactly one side (the other was explicitly deleted
+    // or cleared by an assessment failure), only regenerates the missing side and
+    // inherits the surviving file into the new version.
+    auto appendImageSlotTasks = [selfPtr, failedEntries](
+                                    QList<CliTask> &outTasks,
+                                    const ImageSlotSpec &spec,
+                                    const QString &extraFixReason,
+                                    bool trackMissingForDialog) {
+        if (!selfPtr || !selfPtr->m_aplusContent) return;
+        const int vCount = extraFixReason.isEmpty() ? spec.versionCount : 1;
         for (int v = 0; v < vCount; ++v) {
             const QString elemId = spec.elementId;
             const QString displayName = spec.displayName;
-            const QDir elemDir(m_aplusContent->dir().filePath(elemId));
+            const QDir elemDir(selfPtr->m_aplusContent->dir().filePath(elemId));
             elemDir.mkpath(QStringLiteral("."));
             const QString elemWorkDir = elemDir.absolutePath();
 
-            const APlusElement *elemPtr    = m_aplusContent->findElement(elemId);
-            const APlusVersion *curVer     = elemPtr ? elemPtr->current() : nullptr;
+            const APlusElement *elemPtr = selfPtr->m_aplusContent->findElement(elemId);
+            const APlusVersion *curVer  = elemPtr ? elemPtr->current() : nullptr;
             const bool curHasDesktop = curVer && !curVer->desktopFile.isEmpty();
             const bool curHasMobile  = curVer && !curVer->mobileFile.isEmpty();
             // Only skip one side when the current version has that side but lacks the other.
@@ -5517,29 +5740,32 @@ void PaneSizing::onAplusGenerateAll()
             const QString inheritedDesktopRel = !doDesktop ? curVer->desktopFile : QString{};
             const QString inheritedMobileRel  = !doMobile  ? curVer->mobileFile  : QString{};
 
+            const QString fixBlock = extraFixReason.isEmpty()
+                ? QString{}
+                : QStringLiteral("\n\nCRITICAL FIX REQUIRED (previous attempt failed quality check): ")
+                  + extraFixReason;
+
             auto filePair   = QSharedPointer<QPair<QString,QString>>::create();
             auto beforeSnap = QSharedPointer<QStringList>::create();
 
             if (doDesktop) {
                 CliTask desktopTask;
                 desktopTask.label   = (vCount > 1)
-                    ? tr("Desktop image — %1 (v%2)").arg(displayName).arg(v + 1)
-                    : tr("Desktop image — %1").arg(displayName);
-                desktopTask.prompt  = spec.desktopPrompt
+                    ? QObject::tr("Desktop image — %1 (v%2)").arg(displayName).arg(v + 1)
+                    : QObject::tr("Desktop image — %1").arg(displayName);
+                desktopTask.prompt  = spec.desktopPrompt + fixBlock
                     + QStringLiteral("\n\nOUTPUT: Save the final image to this EXACT absolute path and create NOTHING else. Do NOT read, create, or modify any other file \u2014 in particular do NOT touch index.json or any .json file, and do NOT generate a mobile or alternative version. After saving the single file, STOP. Path: ")
                     + elemDir.absoluteFilePath(QStringLiteral("desktop.png"));
                 desktopTask.workDir = elemWorkDir;
                 desktopTask.onBefore = [beforeSnap, elemDir]() {
-                    // Clear stale plain outputs (incl. any stray mobile.png a prior
-                    // over-agentic CLI run left behind) so success detection below
-                    // reflects ONLY this generation.
                     QFile::remove(elemDir.filePath(QStringLiteral("desktop.png")));
                     QFile::remove(elemDir.filePath(QStringLiteral("mobile.png")));
                     *beforeSnap = elemDir.entryList({QStringLiteral("*.png"),
                         QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files);
                 };
-                desktopTask.onDone = [this, elemDir, beforeSnap, filePair, elemId, displayName,
-                                       generatedImages, doMobile, inheritedMobileRel](CliRunResult r) {
+                desktopTask.onDone = [selfPtr, elemDir, beforeSnap, filePair, elemId, displayName,
+                                       doMobile, inheritedMobileRel](CliRunResult) {
+                    if (!selfPtr || !selfPtr->m_aplusContent) return;
                     const QString preferred = elemDir.filePath(QStringLiteral("desktop.png"));
                     if (QFileInfo::exists(preferred)) {
                         filePair->first = preferred;
@@ -5553,26 +5779,32 @@ void PaneSizing::onAplusGenerateAll()
                             }
                         }
                     }
-                    if (!filePair->first.isEmpty())
-                        generatedImages->append(filePair->first);
 
                     // If we're not doing a mobile task, push the result immediately using the inherited side.
                     if (!doMobile) {
                         const QImage img(filePair->first);
                         if (!img.isNull()) {
-                            _aplusPushImage(img, elemId, displayName, APlusElementType::Image);
-                            // Patch the new version to include the inherited mobile file.
-                            if (APlusElement *e = m_aplusContent->findElement(elemId)) {
-                                if (APlusVersion *v = e->current())
-                                    v->mobileFile = inheritedMobileRel;
+                            selfPtr->_aplusPushImage(img, elemId, displayName, APlusElementType::Image);
+                            if (APlusElement *e = selfPtr->m_aplusContent->findElement(elemId)) {
+                                if (APlusVersion *ver = e->current()) {
+                                    if (!ver->mobileFile.isEmpty() && ver->mobileFile != inheritedMobileRel)
+                                        QFile::remove(selfPtr->m_aplusContent->dir().filePath(ver->mobileFile));
+                                    ver->mobileFile = inheritedMobileRel;
+                                }
+                                if (e->versions.size() > 1
+                                        && (e->versions.at(1).desktopFile.isEmpty()
+                                            || e->versions.at(1).mobileFile.isEmpty())) {
+                                    selfPtr->m_aplusContent->deleteVersion(elemId, 1);
+                                }
+                                selfPtr->m_aplusContent->save();
                             }
+                            if (selfPtr->m_aplusModel) selfPtr->_rebuildAplusModel();
                         }
                     }
                 };
-                // Wrap to detect failure (file still empty after onDone ran).
-                {
+                if (trackMissingForDialog) {
                     auto origDone     = desktopTask.onDone;
-                    CliTask origTask  = desktopTask;  // snapshot with original onDone
+                    CliTask origTask  = desktopTask;
                     QDir capturedDir  = elemDir;
                     auto fillBlackFn  = [origDone, capturedDir]() {
                         QImage img(1920, 1080, QImage::Format_RGB888);
@@ -5589,28 +5821,26 @@ void PaneSizing::onAplusGenerateAll()
                         }
                     };
                 }
-                tasks.append(desktopTask);
+                outTasks.append(desktopTask);
             }
 
             if (doMobile) {
                 CliTask mobileTask;
                 mobileTask.label   = (vCount > 1)
-                    ? tr("Mobile image — %1 (v%2)").arg(displayName).arg(v + 1)
-                    : tr("Mobile image — %1").arg(displayName);
-                mobileTask.prompt  = spec.mobilePrompt
+                    ? QObject::tr("Mobile image — %1 (v%2)").arg(displayName).arg(v + 1)
+                    : QObject::tr("Mobile image — %1").arg(displayName);
+                mobileTask.prompt  = spec.mobilePrompt + fixBlock
                     + QStringLiteral("\n\nOUTPUT: Save the final image to this EXACT absolute path and create NOTHING else. Do NOT read, create, or modify any other file \u2014 in particular do NOT touch index.json or any .json file, and do NOT generate a mobile or alternative version. After saving the single file, STOP. Path: ")
                     + elemDir.absoluteFilePath(QStringLiteral("mobile.png"));
                 mobileTask.workDir = elemWorkDir;
                 mobileTask.onBefore = [beforeSnap, elemDir]() {
-                    // Remove only the plain mobile.png (a stray the desktop task's
-                    // CLI may have written); keep desktop.png — the combined push
-                    // still references it as filePair->first.
                     QFile::remove(elemDir.filePath(QStringLiteral("mobile.png")));
                     *beforeSnap = elemDir.entryList({QStringLiteral("*.png"),
                         QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")}, QDir::Files);
                 };
-                mobileTask.onDone = [this, elemDir, beforeSnap, filePair, elemId, displayName,
-                                      generatedImages, doDesktop, inheritedDesktopRel](CliRunResult r) {
+                mobileTask.onDone = [selfPtr, elemDir, beforeSnap, filePair, elemId, displayName,
+                                      doDesktop, inheritedDesktopRel](CliRunResult) {
+                    if (!selfPtr || !selfPtr->m_aplusContent) return;
                     const QString preferred = elemDir.filePath(QStringLiteral("mobile.png"));
                     if (QFileInfo::exists(preferred)) {
                         filePair->second = preferred;
@@ -5624,34 +5854,44 @@ void PaneSizing::onAplusGenerateAll()
                             }
                         }
                     }
-                    if (!filePair->second.isEmpty())
-                        generatedImages->append(filePair->second);
 
                     // Push the combined result.
-                    const QImage dImg(filePair->first.isEmpty() ? elemDir.filePath(inheritedDesktopRel) : filePair->first);
+                    const QDir aplusDir = selfPtr->m_aplusContent->dir();
+                    const QImage dImg(filePair->first.isEmpty()
+                                      ? (inheritedDesktopRel.isEmpty() ? QString{} : aplusDir.filePath(inheritedDesktopRel))
+                                      : filePair->first);
                     const QImage mImg(filePair->second);
                     if (!dImg.isNull() || !mImg.isNull()) {
-                        // _aplusPushImage expects a single image and scales it for both.
-                        // Here we have potentially two different images.
-                        // We'll use the desktop one as primary if available.
-                        _aplusPushImage(dImg.isNull() ? mImg : dImg, elemId, displayName, APlusElementType::Image);
-                        if (APlusElement *e = m_aplusContent->findElement(elemId)) {
-                            if (APlusVersion *v = e->current()) {
-                                // Re-save mobile if it was generated separately.
-                                if (!mImg.isNull()) {
-                                    const QString ts = _aplusTimestamp();
-                                    const QString relMobile = elemId + QStringLiteral("/v_") + ts + QStringLiteral("_mobile.png");
-                                    mImg.scaledToWidth(600, Qt::SmoothTransformation).save(m_aplusContent->dir().filePath(relMobile), "PNG");
-                                    v->mobileFile = relMobile;
+                        selfPtr->_aplusPushImage(dImg.isNull() ? mImg : dImg, elemId, displayName, APlusElementType::Image);
+                        if (APlusElement *e = selfPtr->m_aplusContent->findElement(elemId)) {
+                            if (APlusVersion *ver = e->current()) {
+                                if (!mImg.isNull() && !ver->mobileFile.isEmpty()) {
+                                    mImg.scaledToWidth(600, Qt::SmoothTransformation)
+                                        .save(aplusDir.filePath(ver->mobileFile), "PNG");
+                                } else if (mImg.isNull() && !ver->mobileFile.isEmpty()) {
+                                    QFile::remove(aplusDir.filePath(ver->mobileFile));
+                                    ver->mobileFile.clear();
                                 }
-                                if (!inheritedDesktopRel.isEmpty() && dImg.isNull())
-                                    v->desktopFile = inheritedDesktopRel;
+                                if (!inheritedDesktopRel.isEmpty()) {
+                                    if (!ver->desktopFile.isEmpty() && ver->desktopFile != inheritedDesktopRel)
+                                        QFile::remove(aplusDir.filePath(ver->desktopFile));
+                                    ver->desktopFile = inheritedDesktopRel;
+                                } else if (dImg.isNull() && !ver->desktopFile.isEmpty()) {
+                                    QFile::remove(aplusDir.filePath(ver->desktopFile));
+                                    ver->desktopFile.clear();
+                                }
                             }
+                            if (e->versions.size() > 1
+                                    && (e->versions.at(1).desktopFile.isEmpty()
+                                        || e->versions.at(1).mobileFile.isEmpty())) {
+                                selfPtr->m_aplusContent->deleteVersion(elemId, 1);
+                            }
+                            selfPtr->m_aplusContent->save();
                         }
+                        if (selfPtr->m_aplusModel) selfPtr->_rebuildAplusModel();
                     }
                 };
-                // Wrap to detect failure (file still empty after onDone ran).
-                {
+                if (trackMissingForDialog) {
                     auto origDone     = mobileTask.onDone;
                     CliTask origTask  = mobileTask;
                     QDir capturedDir  = elemDir;
@@ -5670,73 +5910,97 @@ void PaneSizing::onAplusGenerateAll()
                         }
                     };
                 }
-                tasks.append(mobileTask);
+                outTasks.append(mobileTask);
             }
         }
-    }
+    };
+
+    for (const ImageSlotSpec &spec : std::as_const(slotSpecs))
+        appendImageSlotTasks(tasks, spec, QString{}, /*trackMissingForDialog=*/true);
 
     // FAQ task — generates English FAQ and stores the result for translation tasks.
     // Codex exec writes output to a file in workDir rather than stdout, so we snapshot
     // the directory before the task and pick up any new .txt file as fallback.
     auto englishFaqText = QSharedPointer<QString>::create();
-    auto faqDirSnap     = QSharedPointer<QSet<QString>>::create();
-    CliTask faqTask;
-    faqTask.label   = tr("FAQ (English)");
-    faqTask.prompt  = finalFaq;
-    faqTask.workDir = workDir;
-    faqTask.onBefore = [faqDirSnap, workDir]() {
-        if (workDir.isEmpty()) return;
-        for (const QString &f : QDir(workDir).entryList(
-                 {QStringLiteral("*.txt"), QStringLiteral("*.md")}, QDir::Files))
-            faqDirSnap->insert(f);
-    };
-    faqTask.onDone  = [englishFaqText, faqDirSnap, workDir](CliRunResult r) {
-        QString text = r.output.trimmed();
-        if (text.isEmpty() && !workDir.isEmpty()) {
+
+    auto appendFaqEnTasks = [selfPtr, englishFaqText, finalFaq, workDir](
+                                QList<CliTask> &outTasks,
+                                const QString &extraFixReason) {
+        if (!selfPtr) return;
+        auto faqDirSnap = QSharedPointer<QSet<QString>>::create();
+        CliTask faqTask;
+        faqTask.label   = QObject::tr("FAQ (English)");
+        faqTask.prompt  = finalFaq
+            + (extraFixReason.isEmpty()
+               ? QString{}
+               : QStringLiteral("\n\nCRITICAL FIX REQUIRED (previous FAQ failed quality check): ")
+                 + extraFixReason);
+        faqTask.workDir = workDir;
+        faqTask.onBefore = [faqDirSnap, workDir]() {
+            if (workDir.isEmpty()) return;
             for (const QString &f : QDir(workDir).entryList(
-                     {QStringLiteral("*.txt"), QStringLiteral("*.md")}, QDir::Files)) {
-                if (!faqDirSnap->contains(f)) {
-                    QFile fFile(QDir(workDir).filePath(f));
-                    if (fFile.open(QIODevice::ReadOnly | QIODevice::Text))
-                        text = QString::fromUtf8(fFile.readAll()).trimmed();
-                    break;
+                     {QStringLiteral("*.txt"), QStringLiteral("*.md")}, QDir::Files))
+                faqDirSnap->insert(f);
+        };
+        faqTask.onDone  = [englishFaqText, faqDirSnap, workDir](CliRunResult r) {
+            QString text = r.output.trimmed();
+            if (text.isEmpty() && !workDir.isEmpty()) {
+                for (const QString &f : QDir(workDir).entryList(
+                         {QStringLiteral("*.txt"), QStringLiteral("*.md")}, QDir::Files)) {
+                    if (!faqDirSnap->contains(f)) {
+                        QFile fFile(QDir(workDir).filePath(f));
+                        if (fFile.open(QIODevice::ReadOnly | QIODevice::Text))
+                            text = QString::fromUtf8(fFile.readAll()).trimmed();
+                        break;
+                    }
                 }
             }
-        }
-        *englishFaqText = extractFaqContent(text);
+            *englishFaqText = extractFaqContent(text);
+        };
+        outTasks.append(faqTask);
+        selfPtr->_appendFaqFormatValidateTasks(outTasks, englishFaqText, workDir,
+            [selfPtr](const QString &finalText) {
+                if (!selfPtr || finalText.isEmpty() || !selfPtr->m_aplusContent) return;
+                QDir aplusDir = selfPtr->m_aplusContent->dir();
+                aplusDir.mkpath(QStringLiteral("faq"));
+                const QString relPath = QStringLiteral("faq/v_") + selfPtr->_aplusTimestamp()
+                                      + QStringLiteral(".txt");
+                QFile f(aplusDir.filePath(relPath));
+                if (f.open(QIODevice::WriteOnly | QIODevice::Text))
+                    f.write(finalText.toUtf8());
+                APlusVersion ver;
+                ver.generated   = QDateTime::currentDateTime();
+                ver.desktopFile = ver.mobileFile = relPath;
+                selfPtr->m_aplusContent->pushVersion(QStringLiteral("faq_en"), APlusElementType::Faq,
+                                                     QObject::tr("FAQ (English)"), ver);
+                if (selfPtr->m_aplusModel) selfPtr->_rebuildAplusModel();
+            });
     };
-    tasks.append(faqTask);
-    _appendFaqFormatValidateTasks(tasks, englishFaqText, workDir,
-        [this](const QString &finalText) {
-            if (finalText.isEmpty() || !m_aplusContent) return;
-            QDir aplusDir = m_aplusContent->dir();
-            aplusDir.mkpath(QStringLiteral("faq"));
-            const QString relPath = QStringLiteral("faq/v_") + _aplusTimestamp()
-                                  + QStringLiteral(".txt");
-            QFile f(aplusDir.filePath(relPath));
-            if (f.open(QIODevice::WriteOnly | QIODevice::Text))
-                f.write(finalText.toUtf8());
-            APlusVersion ver;
-            ver.generated   = QDateTime::currentDateTime();
-            ver.desktopFile = ver.mobileFile = relPath;
-            m_aplusContent->pushVersion(QStringLiteral("faq_en"), APlusElementType::Faq,
-                                        tr("FAQ (English)"), ver);
-            if (m_aplusModel) _rebuildAplusModel();
-        });
 
-    // FAQ translation tasks — one translate + format + validate per target language
-    for (const auto &[langCode, langName] : std::as_const(targetLangs)) {
+    auto appendFaqTransTasks = [selfPtr, englishFaqText, workDir](
+                                   QList<CliTask> &outTasks,
+                                   const QString &capturedLangCode,
+                                   const QString &capturedLangName,
+                                   const QString &extraFixReason) {
+        if (!selfPtr) return;
         auto rawTransHolder = QSharedPointer<QString>::create();
         CliTask transTask;
-        transTask.label  = tr("FAQ — %1").arg(langName);
+        transTask.label   = QObject::tr("FAQ — %1").arg(capturedLangName);
         transTask.workDir = workDir;
-        const QString capturedLangCode = langCode;
-        const QString capturedLangName = langName;
-        transTask.promptFn = [englishFaqText, capturedLangName]() -> QString {
-            const QString base = *englishFaqText;
+        transTask.promptFn = [selfPtr, englishFaqText, capturedLangName, extraFixReason]() -> QString {
+            QString base = *englishFaqText;
+            if (base.isEmpty() && selfPtr && selfPtr->m_aplusContent) {
+                if (const APlusElement *enEl = selfPtr->m_aplusContent->findElement(QStringLiteral("faq_en"))) {
+                    if (const APlusVersion *enVer = enEl->current(); enVer && !enVer->desktopFile.isEmpty()) {
+                        QFile f(selfPtr->m_aplusContent->dir().filePath(enVer->desktopFile));
+                        if (f.open(QIODevice::ReadOnly | QIODevice::Text))
+                            base = QString::fromUtf8(f.readAll()).trimmed();
+                    }
+                }
+            }
             if (base.isEmpty())
                 return QStringLiteral("(No English FAQ available to translate.)");
-            return QStringLiteral("Translate the following Amazon A+ Content FAQ to ")
+            QString p = QStringLiteral("Translate the following Amazon A+ Content FAQ to ")
                    + capturedLangName
                    + QStringLiteral(". Keep the question/answer format. "
                                     "Use metric units only — remove any imperial equivalents "
@@ -5744,17 +6008,22 @@ void PaneSizing::onAplusGenerateAll()
                                     "Do NOT use em-dashes (—) anywhere; use a comma or rewrite the sentence instead. "
                                     "Return only the translated text, no extra commentary.\n\n")
                    + base;
+            if (!extraFixReason.isEmpty()) {
+                p += QStringLiteral("\n\nCRITICAL FIX REQUIRED (previous translation failed quality check): ")
+                   + extraFixReason;
+            }
+            return p;
         };
         transTask.onDone = [rawTransHolder](CliRunResult r) {
             *rawTransHolder = extractFaqContent(r.output.trimmed());
         };
-        tasks.append(transTask);
-        _appendFaqFormatValidateTasks(tasks, rawTransHolder, workDir,
-            [this, capturedLangCode, capturedLangName](const QString &finalText) {
-                if (finalText.isEmpty() || !m_aplusContent) return;
-                QDir aplusDir = m_aplusContent->dir();
+        outTasks.append(transTask);
+        selfPtr->_appendFaqFormatValidateTasks(outTasks, rawTransHolder, workDir,
+            [selfPtr, capturedLangCode, capturedLangName](const QString &finalText) {
+                if (!selfPtr || finalText.isEmpty() || !selfPtr->m_aplusContent) return;
+                QDir aplusDir = selfPtr->m_aplusContent->dir();
                 aplusDir.mkpath(QStringLiteral("faq"));
-                const QString relPath = QStringLiteral("faq/v_") + _aplusTimestamp()
+                const QString relPath = QStringLiteral("faq/v_") + selfPtr->_aplusTimestamp()
                                       + QStringLiteral("_") + capturedLangCode
                                       + QStringLiteral(".txt");
                 QFile f(aplusDir.filePath(relPath));
@@ -5764,11 +6033,17 @@ void PaneSizing::onAplusGenerateAll()
                 ver.generated   = QDateTime::currentDateTime();
                 ver.desktopFile = ver.mobileFile = relPath;
                 const QString elemId = QStringLiteral("faq_") + capturedLangCode;
-                m_aplusContent->pushVersion(elemId, APlusElementType::Faq,
-                                            tr("FAQ (%1)").arg(capturedLangName), ver);
-                if (m_aplusModel) _rebuildAplusModel();
+                selfPtr->m_aplusContent->pushVersion(elemId, APlusElementType::Faq,
+                                                     QObject::tr("FAQ (%1)").arg(capturedLangName), ver);
+                if (selfPtr->m_aplusModel) selfPtr->_rebuildAplusModel();
             });
-    }
+    };
+
+    appendFaqEnTasks(tasks, QString{});
+
+    // FAQ translation tasks — one translate + format + validate per target language
+    for (const auto &[langCode, langName] : std::as_const(targetLangs))
+        appendFaqTransTasks(tasks, langCode, langName, QString{});
 
     // Size chart tasks — one per country group
     if (m_sizeTableModel) {
@@ -5868,112 +6143,245 @@ void PaneSizing::onAplusGenerateAll()
         appendLog(QObject::tr("▶ %1").arg(label));
     };
 
-    QPointer<PaneSizing>   selfPtr(this);
-    auto onDone = [selfPtr, statusLabelPtr, progressBarPtr, logEditPtr, appendLog,
-                   generatedImages, workDir, startOverPtr, failedEntries]
+    auto fixAttempt = QSharedPointer<int>::create(0);
+    auto accumulatedReasons = QSharedPointer<QHash<QString, QString>>::create();
+    auto runAssessmentPtr = QSharedPointer<std::function<void()>>::create();
+    QWeakPointer<std::function<void()>> weakAssess(runAssessmentPtr);
+
+    *runAssessmentPtr = [selfPtr, statusLabelPtr, progressBarPtr, appendLog,
+                         workDir, startOverPtr, slotByElemId, expectedImageIds,
+                         targetLangs, appendImageSlotTasks, appendFaqEnTasks,
+                         appendFaqTransTasks, fixAttempt, accumulatedReasons,
+                         weakAssess]() mutable {
+        if (!selfPtr || !selfPtr->m_aplusContent) return;
+
+        selfPtr->m_aplusContent->pruneOrphanFiles();
+
+        if (statusLabelPtr) statusLabelPtr->setText(
+            QObject::tr("Step %1 of %2: %3")
+                .arg(progressBarPtr ? progressBarPtr->maximum() : 0)
+                .arg(progressBarPtr ? progressBarPtr->maximum() : 0)
+                .arg(QObject::tr("Assessing content…")));
+        appendLog(QObject::tr("▶ Assessing generated content…"));
+
+        AbstractCli *assessCli =
+            selfPtr->ui->comboBoxCli->currentData().value<AbstractCli *>();
+        if (!assessCli) {
+            appendLog(QObject::tr("⚠ No CLI available for assessment."));
+            if (statusLabelPtr) statusLabelPtr->setText(QObject::tr("Done."));
+            if (progressBarPtr) progressBarPtr->setValue(progressBarPtr->maximum());
+            if (startOverPtr) startOverPtr->setEnabled(true);
+            return;
+        }
+
+        const QDir aplusDir = selfPtr->m_aplusContent->dir();
+        QString p = QStringLiteral(
+            "You just generated Amazon A+ content images and FAQs. "
+            "Please verify ONLY the following active output files (ignore any older v_* history files on disk):\n\n");
+
+        if (expectedImageIds.isEmpty()) {
+            p += QStringLiteral("(no image slots were configured)\n");
+        } else {
+            for (const QString &elemId : std::as_const(expectedImageIds)) {
+                const APlusElement *el = selfPtr->m_aplusContent->findElement(elemId);
+                const APlusVersion *ver = el ? el->current() : nullptr;
+
+                const QString dRel = ver ? ver->desktopFile : QString{};
+                const QString dAbs = dRel.isEmpty() ? QString{} : aplusDir.absoluteFilePath(dRel);
+                const bool dExists = !dAbs.isEmpty() && QFileInfo::exists(dAbs);
+                p += QStringLiteral("  [IMAGE element=%1 side=desktop] [%2] %3\n")
+                         .arg(elemId,
+                              dExists ? QStringLiteral("EXISTS") : QStringLiteral("MISSING"),
+                              dExists ? dAbs : QStringLiteral("(missing)"));
+
+                const QString mRel = ver ? ver->mobileFile : QString{};
+                const QString mAbs = mRel.isEmpty() ? QString{} : aplusDir.absoluteFilePath(mRel);
+                const bool mExists = !mAbs.isEmpty() && QFileInfo::exists(mAbs);
+                p += QStringLiteral("  [IMAGE element=%1 side=mobile]  [%2] %3\n")
+                         .arg(elemId,
+                              mExists ? QStringLiteral("EXISTS") : QStringLiteral("MISSING"),
+                              mExists ? mAbs : QStringLiteral("(missing)"));
+            }
+        }
+        p += QStringLiteral(
+            "\nFor each [EXISTS] image:\n"
+            "1. Confirm it is a valid, non-empty image file.\n"
+            "2. Briefly describe its content and whether it looks like a proper "
+               "Amazon A+ marketing image.\n"
+            "3. Flag any file that looks wrong, has third-party/mismatched brand logos "
+               "or text on the product, or is unexpectedly small.\n"
+            "\nFor each [MISSING] file, explain what likely went wrong.\n");
+
+        p += QStringLiteral("\nAlso check ONLY these active FAQ files:\n");
+        for (const APlusElement &el : selfPtr->m_aplusContent->elements()) {
+            if (el.type != APlusElementType::Faq) continue;
+            const APlusVersion *ver = el.current();
+            const QString fRel = ver ? ver->desktopFile : QString{};
+            const QString fAbs = fRel.isEmpty() ? QString{} : aplusDir.absoluteFilePath(fRel);
+            const bool fExists = !fAbs.isEmpty() && QFileInfo::exists(fAbs);
+            p += QStringLiteral("  [FAQ element=%1] [%2] %3\n")
+                     .arg(el.id,
+                          fExists ? QStringLiteral("EXISTS") : QStringLiteral("MISSING"),
+                          fExists ? fAbs : QStringLiteral("(missing)"));
+        }
+        p += QStringLiteral(
+            "For each FAQ: confirm it reads naturally in the correct language "
+            "and is relevant to the product.\n");
+
+        p += QStringLiteral(
+            "\nIf ANY check fails (verdict is FAIL), before the final FAIL line, "
+            "list every failed item on its own line using this EXACT format:\n"
+            "  FAILED_ITEM: <elementId> | <desktop|mobile|both|faq> | <concise instruction on what is wrong and how to fix it when regenerating>\n"
+            "\nFinish with a one-line verdict using exactly one of these three labels:\n"
+            "  PASS               — everything looks correct, no issues\n"
+            "  PASS_WITH_WARNINGS — minor issues only (slightly awkward phrasing, "
+                                   "small stylistic imperfections) that do not affect usability\n"
+            "  FAIL               — structural problems: missing files, broken images, "
+                                   "wrong language, mismatched branding, content unrelated to the product, "
+                                   "or anything that would prevent publication\n"
+            "Put the verdict label alone on its own line at the very end.");
+
+        auto strongAssess = weakAssess.toStrongRef();
+        assessCli->runPromptAsync(p, workDir, selfPtr,
+            [selfPtr, statusLabelPtr, progressBarPtr, appendLog, startOverPtr,
+             slotByElemId, expectedImageIds, targetLangs, appendImageSlotTasks,
+             appendFaqEnTasks, appendFaqTransTasks, fixAttempt, accumulatedReasons,
+             strongAssess]
+            (CliRunResult assessResult) mutable {
+                if (!selfPtr || !selfPtr->m_aplusContent) return;
+
+                const QString out = assessResult.output.trimmed();
+                const QString display = out.isEmpty()
+                                     ? assessResult.errorOutput.trimmed() : out;
+
+                APlusAssessmentParseResult parsed;
+                if (!display.isEmpty()) {
+                    parsed = selfPtr->m_aplusContent->parseAssessmentOutput(display, expectedImageIds);
+                    QString icon;
+                    if (parsed.verdict == QLatin1String("PASS"))
+                        icon = QStringLiteral("✓");
+                    else if (parsed.verdict == QLatin1String("PASS_WITH_WARNINGS"))
+                        icon = QStringLiteral("⚠");
+                    else
+                        icon = QStringLiteral("✗");
+                    appendLog(QStringLiteral("Assessment:\n") + display
+                              + QStringLiteral("\n") + icon + QStringLiteral(" ") + parsed.verdict);
+                } else {
+                    appendLog(QObject::tr("(assessment produced no output)"));
+                }
+
+                if (parsed.verdict == QLatin1String("FAIL") && !parsed.failures.isEmpty()) {
+                    constexpr int kMaxFixAttempts = 3;
+                    if (*fixAttempt < kMaxFixAttempts) {
+                        ++(*fixAttempt);
+
+                        for (const APlusAssessmentFailure &f : std::as_const(parsed.failures)) {
+                            QString &acc = (*accumulatedReasons)[f.elementId];
+                            if (!f.reason.isEmpty() && !acc.contains(f.reason)) {
+                                if (!acc.isEmpty()) acc += QStringLiteral("; ");
+                                acc += f.reason;
+                            }
+                        }
+
+                        // Remove the failed files/sides immediately so regenerating starts clean
+                        // and surviving sides (when only desktop or mobile failed) are inherited.
+                        selfPtr->m_aplusContent->deleteFailedAssessmentItems(parsed.failures);
+                        if (selfPtr->m_aplusModel) selfPtr->_rebuildAplusModel();
+
+                        QList<CliTask> fixTasks;
+                        bool regenFaqEn = false;
+                        QSet<QString> failedFaqIds;
+                        for (const APlusAssessmentFailure &f : std::as_const(parsed.failures)) {
+                            if (slotByElemId->contains(f.elementId)) {
+                                appendImageSlotTasks(fixTasks,
+                                                     (*slotByElemId)[f.elementId],
+                                                     accumulatedReasons->value(f.elementId),
+                                                     /*trackMissingForDialog=*/false);
+                            } else if (f.elementId == QLatin1String("faq_en")) {
+                                regenFaqEn = true;
+                            } else if (f.elementId.startsWith(QLatin1String("faq_"))) {
+                                failedFaqIds.insert(f.elementId);
+                            }
+                        }
+
+                        if (regenFaqEn) {
+                            appendFaqEnTasks(fixTasks, accumulatedReasons->value(QStringLiteral("faq_en")));
+                            for (const auto &[langCode, langName] : std::as_const(targetLangs)) {
+                                const QString faqId = QStringLiteral("faq_") + langCode;
+                                appendFaqTransTasks(fixTasks, langCode, langName,
+                                                    accumulatedReasons->value(faqId));
+                            }
+                        } else if (!failedFaqIds.isEmpty()) {
+                            for (const auto &[langCode, langName] : std::as_const(targetLangs)) {
+                                const QString faqId = QStringLiteral("faq_") + langCode;
+                                if (failedFaqIds.contains(faqId)) {
+                                    appendFaqTransTasks(fixTasks, langCode, langName,
+                                                        accumulatedReasons->value(faqId));
+                                }
+                            }
+                        }
+
+                        if (!fixTasks.isEmpty()) {
+                            const int n = fixTasks.size();
+                            const int attemptNum = *fixAttempt;
+                            if (progressBarPtr) {
+                                progressBarPtr->setRange(0, n + 1);
+                                progressBarPtr->setValue(0);
+                            }
+                            appendLog(QObject::tr("↻ Assessment FAILED — auto-fix attempt %1 of %2 (%3 task(s))…")
+                                          .arg(attemptNum).arg(kMaxFixAttempts).arg(n));
+
+                            selfPtr->_runSequentially(std::move(fixTasks),
+                                [statusLabelPtr, progressBarPtr, appendLog, attemptNum, kMaxFixAttempts]
+                                (int s, int tot, const QString &lbl) {
+                                    if (statusLabelPtr) statusLabelPtr->setText(
+                                        QObject::tr("Fix %1/%2 — Step %3 of %4: %5")
+                                            .arg(attemptNum).arg(kMaxFixAttempts).arg(s).arg(tot).arg(lbl));
+                                    if (progressBarPtr) progressBarPtr->setValue(s - 1);
+                                    appendLog(QObject::tr("▶ [Fix %1/%2] %3").arg(attemptNum).arg(kMaxFixAttempts).arg(lbl));
+                                },
+                                [strongAssess, appendLog](int s, int tot, const QString &lbl, CliRunResult r) mutable {
+                                    if (s == tot + 1) {
+                                        if (strongAssess && *strongAssess) (*strongAssess)();
+                                        return;
+                                    }
+                                    const qint64 secs = r.durationMs / 1000;
+                                    if (!r.processStarted)
+                                        appendLog(QObject::tr("  ✗ Failed to start CLI for: %1").arg(lbl));
+                                    else
+                                        appendLog(QObject::tr("  ✓ Done (%1s): %2").arg(secs).arg(lbl));
+                                    if (!r.errorOutput.trimmed().isEmpty())
+                                        appendLog(QObject::tr("    stderr: %1").arg(r.errorOutput.trimmed().left(200)));
+                                });
+                            return;
+                        }
+                    }
+
+                    // Still failing after 3 fix attempts (or no fix tasks could be built):
+                    // delete what failed so bad content is never uploaded by accident.
+                    selfPtr->m_aplusContent->deleteFailedAssessmentItems(parsed.failures);
+                    for (const APlusAssessmentFailure &f : std::as_const(parsed.failures)) {
+                        appendLog(QObject::tr("🗑 Deleted failed %1 (%2) after %3 unsuccessful fix attempt(s) so it cannot be uploaded by accident.")
+                                      .arg(f.elementId, f.side).arg(*fixAttempt));
+                    }
+                    if (selfPtr->m_aplusModel) {
+                        selfPtr->_rebuildAplusModel();
+                        selfPtr->_rebuildAplusMenu();
+                        selfPtr->_refreshAplusPreview();
+                    }
+                }
+
+                if (statusLabelPtr) statusLabelPtr->setText(QObject::tr("All done!"));
+                if (progressBarPtr) progressBarPtr->setValue(progressBarPtr->maximum());
+                if (startOverPtr) startOverPtr->setEnabled(true);
+            });
+    }; // end runAssessment
+
+    auto onDone = [selfPtr, statusLabelPtr, progressBarPtr, appendLog,
+                   failedEntries, runAssessmentPtr]
                   (int step, int total, const QString &label, CliRunResult result) mutable {
         if (step == total + 1) {
             // All content tasks done.
-
-            // --- Build the assessment runner (called after any recovery action) ---
-            auto runAssessment = [selfPtr, statusLabelPtr, progressBarPtr, logEditPtr, appendLog,
-                                  generatedImages, workDir, startOverPtr]() mutable {
-                if (statusLabelPtr) statusLabelPtr->setText(
-                    QObject::tr("Step %1 of %2: %3")
-                        .arg(progressBarPtr ? progressBarPtr->maximum() : 0)
-                        .arg(progressBarPtr ? progressBarPtr->maximum() : 0)
-                        .arg(QObject::tr("Assessing images…")));
-                appendLog(QObject::tr("▶ Assessing generated images…"));
-
-                if (!selfPtr) return;
-                AbstractCli *assessCli =
-                    selfPtr->ui->comboBoxCli->currentData().value<AbstractCli *>();
-                if (!assessCli) {
-                    appendLog(QObject::tr("⚠ No CLI available for assessment."));
-                    if (statusLabelPtr) statusLabelPtr->setText(QObject::tr("Done."));
-                    if (progressBarPtr) progressBarPtr->setValue(progressBarPtr->maximum());
-                    if (startOverPtr) startOverPtr->setEnabled(true);
-                    return;
-                }
-
-                QString p = QStringLiteral(
-                    "You just generated Amazon A+ content images. "
-                    "Please verify the following output files:\n\n");
-                if (generatedImages->isEmpty()) {
-                    p += QStringLiteral("(no image files were recorded — generation may have failed)\n");
-                } else {
-                    for (const QString &path : std::as_const(*generatedImages)) {
-                        const bool exists = QFileInfo::exists(path);
-                        p += (exists ? QStringLiteral("  [EXISTS]  ")
-                                     : QStringLiteral("  [MISSING] "))
-                             + path + QLatin1Char('\n');
-                    }
-                }
-                p += QStringLiteral(
-                    "\nFor each [EXISTS] image:\n"
-                    "1. Confirm it is a valid, non-empty image file.\n"
-                    "2. Briefly describe its content and whether it looks like a proper "
-                       "Amazon A+ marketing image.\n"
-                    "3. Flag any file that looks wrong or is unexpectedly small.\n"
-                    "\nFor each [MISSING] file, explain what likely went wrong.\n");
-
-                p += QStringLiteral("\nAlso check the FAQ files:\n");
-                if (selfPtr && selfPtr->m_aplusContent) {
-                    const QDir aplusDir = selfPtr->m_aplusContent->dir();
-                    const QDir faqDir(aplusDir.filePath(QStringLiteral("faq")));
-                    if (faqDir.exists()) {
-                        const QStringList faqFiles = faqDir.entryList(
-                            {QStringLiteral("*.txt")}, QDir::Files, QDir::Name);
-                        for (const QString &f : faqFiles)
-                            p += QStringLiteral("  ") + faqDir.absoluteFilePath(f)
-                                 + QLatin1Char('\n');
-                    }
-                }
-                p += QStringLiteral(
-                    "For each FAQ: confirm it reads naturally in the correct language "
-                    "and is relevant to the product.\n");
-
-                p += QStringLiteral(
-                    "\nFinish with a one-line verdict using exactly one of these three labels:\n"
-                    "  PASS               — everything looks correct, no issues\n"
-                    "  PASS_WITH_WARNINGS — minor issues only (slightly awkward phrasing, "
-                                           "small stylistic imperfections) that do not affect usability\n"
-                    "  FAIL               — structural problems: missing files, broken images, "
-                                           "wrong language, content unrelated to the product, "
-                                           "or anything that would prevent publication\n"
-                    "Put the verdict label alone on its own line at the very end.");
-
-                assessCli->runPromptAsync(p, workDir, selfPtr,
-                    [statusLabelPtr, progressBarPtr, logEditPtr, appendLog, startOverPtr]
-                    (CliRunResult assessResult) {
-                        const QString out = assessResult.output.trimmed();
-                        const QString display = out.isEmpty()
-                                             ? assessResult.errorOutput.trimmed() : out;
-                        if (!display.isEmpty()) {
-                            const QStringList lines = display.split(QLatin1Char('\n'));
-                            QString verdict;
-                            for (int i = lines.size() - 1; i >= 0; --i) {
-                                const QString t = lines.at(i).trimmed();
-                                if (!t.isEmpty()) { verdict = t; break; }
-                            }
-                            QString icon;
-                            if (verdict == QLatin1String("PASS"))
-                                icon = QStringLiteral("✓");
-                            else if (verdict == QLatin1String("PASS_WITH_WARNINGS"))
-                                icon = QStringLiteral("⚠");
-                            else
-                                icon = QStringLiteral("✗");
-                            appendLog(QStringLiteral("Assessment:\n") + display
-                                      + QStringLiteral("\n") + icon + QStringLiteral(" ") + verdict);
-                        } else {
-                            appendLog(QObject::tr("(assessment produced no output)"));
-                        }
-
-                        if (statusLabelPtr) statusLabelPtr->setText(QObject::tr("All done!"));
-                        if (progressBarPtr) progressBarPtr->setValue(progressBarPtr->maximum());
-                        if (startOverPtr) startOverPtr->setEnabled(true);
-                    });
-            }; // end runAssessment
 
             // --- Recovery dialog if any image tasks produced no output ---
             if (!failedEntries->isEmpty() && selfPtr) {
@@ -6018,8 +6426,8 @@ void PaneSizing::onAplusGenerateAll()
                             if (progressBarPtr) progressBarPtr->setValue(s - 1);
                             appendLog(QObject::tr("▶ %1").arg(lbl));
                         },
-                        [runAssessment, appendLog](int s, int tot, const QString &lbl, CliRunResult r) mutable {
-                            if (s == tot + 1) { runAssessment(); return; }
+                        [runAssessmentPtr, appendLog](int s, int tot, const QString &lbl, CliRunResult r) mutable {
+                            if (s == tot + 1) { if (runAssessmentPtr && *runAssessmentPtr) (*runAssessmentPtr)(); return; }
                             const qint64 secs = r.durationMs / 1000;
                             if (!r.processStarted)
                                 appendLog(QObject::tr("  ✗ Failed to start CLI for: %1").arg(lbl));
@@ -6044,7 +6452,7 @@ void PaneSizing::onAplusGenerateAll()
                 }
             }
 
-            runAssessment();
+            if (runAssessmentPtr && *runAssessmentPtr) (*runAssessmentPtr)();
             return;
         }
 
@@ -6242,9 +6650,10 @@ void PaneSizing::_renderAndSaveChart(const AbstractSizeCategory *cat,
     // Also skip when the category requires all groups to be visible together (e.g. shoes).
     const bool lettersMode  = ui->sizeRangeMain->mode() == QLatin1String("letters");
     const bool oneSizeMode  = ui->sizeRangeMain->mode() == QLatin1String("one_size");
+    const bool allGroups    = cat && cat->allGroupsAlwaysVisible();
     using RowData = QList<QStandardItem *>;
     QList<QPair<int, RowData>> removedGroupRows;
-    if (!lettersMode && !oneSizeMode && groupRow >= 0 && groupRow < groupCount) {
+    if (!lettersMode && !oneSizeMode && !allGroups && groupRow >= 0 && groupRow < groupCount) {
         for (int i = groupCount - 1; i >= 0; --i) {
             if (i == groupRow) continue;
             RowData rowItems;
@@ -8800,12 +9209,18 @@ void PaneSizing::onSavedSizeAddClicked()
         data.brandMode    = ui->sizeRangeBrand->mode();
         data.brandFromVal = ui->sizeRangeBrand->from();
         data.brandToVal   = ui->sizeRangeBrand->to();
-        for (const auto &w : m_measurementWidgets)
+        for (const auto &w : m_measurementWidgets) {
             data.measurements[w.fieldId] = {
-                w.refSpinBox->value(),
-                w.stepSpinBox->value(),
+                w.refSpinBox ? w.refSpinBox->value() : 0.0,
+                w.stepSpinBox ? w.stepSpinBox->value() : 0.0,
                 w.rangeSpinBox ? w.rangeSpinBox->value() : 0.0
             };
+            if (w.narrowCorrSpinBox) {
+                data.measurements[w.fieldId + QStringLiteral("_narrow")] = {
+                    w.narrowCorrSpinBox->value(), 0.0, 0.0
+                };
+            }
+        }
         m_templateModel->updateTemplate(row, data);
     }
 
@@ -8867,10 +9282,15 @@ void PaneSizing::onSavedSizeSaveClicked()
     newData.brandToVal   = ui->sizeRangeBrand->to();
     for (const auto &w : m_measurementWidgets) {
         newData.measurements[w.fieldId] = {
-            w.refSpinBox->value(),
-            w.stepSpinBox->value(),
+            w.refSpinBox ? w.refSpinBox->value() : 0.0,
+            w.stepSpinBox ? w.stepSpinBox->value() : 0.0,
             w.rangeSpinBox ? w.rangeSpinBox->value() : 0.0
         };
+        if (w.narrowCorrSpinBox) {
+            newData.measurements[w.fieldId + QStringLiteral("_narrow")] = {
+                w.narrowCorrSpinBox->value(), 0.0, 0.0
+            };
+        }
     }
 
     m_templateModel->updateTemplate(row, newData);
@@ -8942,9 +9362,13 @@ void PaneSizing::onSavedSizeLoadClicked()
     for (auto it = tmpl.measurements.constBegin(); it != tmpl.measurements.constEnd(); ++it) {
         for (const auto &w : m_measurementWidgets) {
             if (w.fieldId == it.key()) {
-                w.refSpinBox->setValue(it.value().refValue);
-                w.stepSpinBox->setValue(it.value().step);
+                if (w.refSpinBox)  w.refSpinBox->setValue(it.value().refValue);
+                if (w.stepSpinBox) w.stepSpinBox->setValue(it.value().step);
                 if (w.rangeSpinBox) w.rangeSpinBox->setValue(it.value().rangeVal);
+                break;
+            }
+            if (w.narrowCorrSpinBox && w.fieldId + QStringLiteral("_narrow") == it.key()) {
+                w.narrowCorrSpinBox->setValue(it.value().refValue);
                 break;
             }
         }

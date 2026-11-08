@@ -35,6 +35,7 @@ class AmazonWarningsApi;
 class TreeSizingAsins;
 class QStandardItemModel;
 class QDoubleSpinBox;
+class QRadioButton;
 class QTableWidget;
 class QTextEdit;
 class AbstractSizeCategory;
@@ -125,9 +126,12 @@ private:
 
     struct MeasurementWidgets {
         QString        fieldId;
-        QDoubleSpinBox *refSpinBox   = nullptr;
-        QDoubleSpinBox *stepSpinBox  = nullptr;
-        QDoubleSpinBox *rangeSpinBox = nullptr;
+        QDoubleSpinBox *refSpinBox        = nullptr;
+        QDoubleSpinBox *stepSpinBox       = nullptr;
+        QDoubleSpinBox *rangeSpinBox      = nullptr;
+        QDoubleSpinBox *narrowCorrSpinBox = nullptr;
+        QRadioButton   *regularRadio      = nullptr;
+        QRadioButton   *narrowRadio       = nullptr;
     };
 
     Ui::PaneSizing   *ui;

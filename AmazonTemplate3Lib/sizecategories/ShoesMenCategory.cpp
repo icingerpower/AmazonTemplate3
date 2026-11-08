@@ -10,7 +10,7 @@ QString ShoesMenCategory::displayName() const
 
 QList<MeasurementField> ShoesMenCategory::measurementFields() const
 {
-    return {{QStringLiteral("foot_length"), QObject::tr("Foot length (cm)"), 0.5, QStringLiteral("JP")}};
+    return {{QStringLiteral("foot_length"), QObject::tr("Foot length (cm)"), 0.5, QStringLiteral("JP"), false, 0.0, -0.5}};
 }
 
 QList<CountryGroup> ShoesMenCategory::countryGroups() const
