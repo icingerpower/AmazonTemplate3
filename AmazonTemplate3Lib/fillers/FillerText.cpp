@@ -1,4 +1,5 @@
 #include "../../common/openai/OpenAi2.h"
+#include "../../common/openai/ExceptionOpenAiError.h"
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -59,130 +60,154 @@ const QHash<QString, int> FillerText::FIELD_ID_MAX_CHAR
     , {"fabric_type#1.value", 100}
 };
 
+namespace {
+QString buildRetryValidationReminder(const QString &fieldIdTo, bool forbidParentheses)
+{
+    QString reminder = "\nIMPORTANT: Your previous reply failed validation. Reply ONLY with a valid JSON object {\"value\": \"...\"} containing a non-empty string";
+    if (FillerText::FIELD_ID_MAX_CHAR.contains(fieldIdTo))
+    {
+        reminder += QString(", strictly at most %1 characters").arg(FillerText::FIELD_ID_MAX_CHAR[fieldIdTo]);
+    }
+    if (fieldIdTo.contains("description", Qt::CaseInsensitive))
+    {
+        reminder += ", using ONLY allowed HTML tags (<p>, <br>, <b>, <ul>, <li>) with no HTML attributes";
+    }
+    else
+    {
+        reminder += ", with NO '<' or '>' characters";
+        if (forbidParentheses || fieldIdTo.contains("color", Qt::CaseInsensitive))
+        {
+            reminder += ", and strictly NO parentheses '(' ')' or full-width '（' '）'";
+        }
+    }
+    reminder += ".";
+    return reminder;
+}
+} // namespace
+
+bool FillerText::parseAndValidate(const QString &fieldIdTo, const QString &reply, QString &valFormatted)
+{
+    QJsonParseError error;
+    auto json = QJsonDocument::fromJson(reply.toUtf8(), &error);
+    if (error.error != QJsonParseError::NoError)
+    {
+        return false;
+    }
+    if (!json.isObject())
+    {
+        return false;
+    }
+    auto obj = json.object();
+    if (!obj.contains("value") || !obj["value"].isString())
+    {
+        return false;
+    }
+    valFormatted = obj["value"].toString().trimmed();
+    if (FIELD_ID_MAX_CHAR.contains(fieldIdTo)
+            && valFormatted.size() > FIELD_ID_MAX_CHAR[fieldIdTo])
+    {
+        return false;
+    }
+    if (valFormatted.isEmpty())
+    {
+        return false;
+    }
+    valFormatted[0] = valFormatted[0].toUpper();
+    if (fieldIdTo.contains("description", Qt::CaseInsensitive))
+    {
+        static const QSet<QString> allowedTags = {
+            "p", "/p",
+            "br", "br/",
+            "b", "/b",
+            "ul", "/ul",
+            "li", "/li"
+        };
+
+        // Find all tags like <...>
+        static const QRegularExpression tagRe(R"(<\s*([^>]+)\s*>)");
+        auto it = tagRe.globalMatch(valFormatted);
+        while (it.hasNext())
+        {
+            const auto m = it.next();
+            QString inside = m.captured(1).trimmed();
+
+            if (inside.isEmpty())
+            {
+                return false;
+            }
+
+            // Reject comments/doctype/etc.
+            if (inside.startsWith("!--") || inside.startsWith("!") || inside.startsWith("?"))
+            {
+                return false;
+            }
+
+            // Normalize: lowercase, collapse whitespace
+            inside = inside.toLower();
+            static const QRegularExpression reg(R"(\s+)");
+            inside.replace(reg, " ");
+
+            // Reject attributes: anything beyond the bare tag token (except self-closing br/)
+            // Example: "p class=x" -> reject, "br /" -> normalize to "br/"
+            const QString firstToken = inside.section(' ', 0, 0);
+            QString tagToken = firstToken;
+
+            // Handle "<br />" variants:
+            // inside could be "br /" (after whitespace collapse), or "br/" already
+            if (firstToken == "br" && inside.contains(" /"))
+            {
+                // only allow exactly "br /" (no other tokens)
+                if (inside != "br /")
+                {
+                    return false;
+                }
+                tagToken = "br/";
+            }
+            else if (firstToken == "br/" )
+            {
+                // ok
+            }
+            else
+            {
+                // If there is any space, it indicates attributes or extra tokens -> reject
+                if (inside.contains(' '))
+                {
+                    return false;
+                }
+            }
+
+            if (!allowedTags.contains(tagToken))
+            {
+                return false;
+            }
+        }
+    }
+    else
+    {
+        if (valFormatted.contains('<') || valFormatted.contains('>'))
+        {
+            return false;
+        }
+        if (fieldIdTo.contains("color", Qt::CaseInsensitive))
+        {
+            if (valFormatted.contains('(')
+                    || valFormatted.contains(')')
+                    || valFormatted.contains(QChar(0xFF08))
+                    || valFormatted.contains(QChar(0xFF09)))
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 std::function<bool (const QString &, QString &)> FillerText::_makeParseAndValidate(const QString &fieldIdTo) const
 {
-    auto parseAndValidate = [fieldIdTo](const QString &reply, QString &valFormatted) -> bool
+    return [fieldIdTo](const QString &reply, QString &valFormatted) -> bool
     {
-        QJsonParseError error;
-        auto json = QJsonDocument::fromJson(reply.toUtf8(), &error);
-        if (error.error != QJsonParseError::NoError)
-        {
-            return false;
-        }
-        if (!json.isObject())
-        {
-            return false;
-        }
-        auto obj = json.object();
-        if (!obj.contains("value"))
-        {
-            return false;
-        }
-        valFormatted = obj["value"].toString().trimmed();
-        if (FIELD_ID_MAX_CHAR.contains(fieldIdTo)
-                && valFormatted.size() > FIELD_ID_MAX_CHAR[fieldIdTo])
-        {
-            return false;
-        }
-        if (valFormatted.isEmpty())
-        {
-            return false;
-        }
-        valFormatted[0] = valFormatted[0].toUpper();
-        if (fieldIdTo.contains("description", Qt::CaseInsensitive))
-        {
-            static const QSet<QString> allowedTags = {
-                "p", "/p",
-                "br", "br/",
-                "b", "/b",
-                "ul", "/ul",
-                "li", "/li"
-            };
-
-            // Find all tags like <...>
-            static const QRegularExpression tagRe(R"(<\s*([^>]+)\s*>)");
-            auto it = tagRe.globalMatch(valFormatted);
-            while (it.hasNext())
-            {
-                const auto m = it.next();
-                QString inside = m.captured(1).trimmed();
-
-                if (inside.isEmpty())
-                {
-                    return false;
-                }
-
-                // Reject comments/doctype/etc.
-                if (inside.startsWith("!--") || inside.startsWith("!") || inside.startsWith("?"))
-                {
-                    return false;
-                }
-
-                // Normalize: lowercase, collapse whitespace
-                inside = inside.toLower();
-                static const QRegularExpression reg(R"(\s+)");
-                inside.replace(reg, " ");
-
-                // Reject attributes: anything beyond the bare tag token (except self-closing br/)
-                // Example: "p class=x" -> reject, "br /" -> normalize to "br/"
-                const QString firstToken = inside.section(' ', 0, 0);
-                QString tagToken = firstToken;
-
-                // Handle "<br />" variants:
-                // inside could be "br /" (after whitespace collapse), or "br/" already
-                if (firstToken == "br" && inside.contains(" /"))
-                {
-                    // only allow exactly "br /" (no other tokens)
-                    if (inside != "br /")
-                    {
-                        return false;
-                    }
-                    tagToken = "br/";
-                }
-                else if (firstToken == "br/" )
-                {
-                    // ok
-                }
-                else
-                {
-                    // If there is any space, it indicates attributes or extra tokens -> reject
-                    if (inside.contains(' '))
-                    {
-                        return false;
-                    }
-                }
-
-                if (!allowedTags.contains(tagToken))
-                {
-                    return false;
-                }
-            }
-        }
-        else if (fieldIdTo.contains("color", Qt::CaseInsensitive))
-        {
-            if (valFormatted.contains("("))
-            {
-                return false;
-            }
-            else if (valFormatted.contains(")"))
-            {
-                return false;
-            }
-        }
-        else
-        {
-            if (valFormatted.contains("<"))
-            {
-                return false;
-            }
-            if (valFormatted.contains(">"))
-            {
-                return false;
-            }
-        }
-        return true;
+        return FillerText::parseAndValidate(fieldIdTo, reply, valFormatted);
     };
-    return parseAndValidate;
 }
 
 void FillerText::_saveGptReplies(
@@ -281,7 +306,7 @@ QCoro::Task<void> FillerText::fill(
         {
             if (sku_fieldId_toValueslangCommon.contains(sku)
                     && sku_fieldId_toValueslangCommon[sku].contains(fieldIdTo)
-                    && !sku_fieldId_toValueslangCommon[sku].isEmpty())
+                    && !sku_fieldId_toValueslangCommon[sku][fieldIdTo].isEmpty())
             {
                 sku_fieldId_toValues[sku][fieldIdTo] = sku_fieldId_toValueslangCommon[sku][fieldIdTo];
             }
@@ -290,7 +315,7 @@ QCoro::Task<void> FillerText::fill(
 
                 QString variationForValueId = getVariationForValueId(sku, isParent);
 
-                const QString &valueId = getValueId(
+                const QString valueId = getValueId(
                             marketplaceTo
                             , countryCodeTo
                             , langCodeTo
@@ -328,14 +353,21 @@ QCoro::Task<void> FillerText::fill(
 
                     auto task = [=, &fieldId_gptReplies]() -> QCoro::Task<void>
                     {
-                        const auto &apply = [valueId, &fieldId_gptReplies](const QString &reply, const QString &valFormatted)
+                        // Copy loop-scoped captures into coroutine-frame-local variables
+                        // before any co_await to avoid GCC coroutine capture aliasing.
+                        const QString vid = valueId;
+                        const QString valFrom = valueFrom;
+                        const QMap<QString, QString> valsForAi = valuesForAi;
+
+                        const auto apply = [vid, &fieldId_gptReplies](const QString &reply, const QString &valFormatted)
                         {
-                            fieldId_gptReplies[valueId] = reply;
+                            Q_UNUSED(valFormatted)
+                            fieldId_gptReplies[vid] = reply;
                         };
 
                         QList<QSharedPointer<OpenAi2::StepMultipleAsk>> steps;
 
-                        if (!valueFrom.isEmpty())
+                        if (!valFrom.isEmpty())
                         {
                             QString prompt = "Translate the following text from " + langCodeFrom + " to "
                                     + langCodeTo + ".\n"
@@ -344,11 +376,36 @@ QCoro::Task<void> FillerText::fill(
                                     "Field ID: "
                                     + fieldIdTo + "\n"
                                     "Text to translate: \""
-                                    + valueFrom + "\"\n"
-                                    "Output a JSON object with the key \"value\" containing the translated text.";
+                                    + valFrom + "\"\n";
+                            if (FIELD_ID_MAX_CHAR.contains(fieldIdTo))
+                            {
+                                prompt += "Keep the translated text under "
+                                        + QString::number(FIELD_ID_MAX_CHAR[fieldIdTo])
+                                        + " characters.\n";
+                            }
+                            if (fieldIdTo.contains("description", Qt::CaseInsensitive))
+                            {
+                                prompt += "Simple HTML is allowed ONLY with these tags: <p>, <br>, <b>, <ul>, <li>. "
+                                          "Do NOT use any other tags or any HTML attributes.\n";
+                            }
+                            else
+                            {
+                                prompt += "Do NOT use any HTML tags or '<' / '>' characters.\n";
+                                if (fieldIdTo.contains("color", Qt::CaseInsensitive))
+                                {
+                                    prompt += "Do NOT use parentheses '(' or ')' (or full-width '（' or '）') anywhere in the translated color name; express nuances without parenthetical clarifications.\n";
+                                }
+                            }
+                            prompt += "Output ONLY a JSON object with the key \"value\" containing the translated text.";
                             auto step = QSharedPointer<OpenAi2::StepMultipleAsk>::create();
-                            qDebug() << "\n--\nFillerText getPrompt NO value FROM:" << prompt;
-                            step->getPrompt = [prompt](int){ return prompt; };
+                            qDebug() << "\n--\nFillerText getPrompt WITH valueFrom:" << prompt;
+                            step->getPrompt = [prompt, fieldIdTo](int attempt) {
+                                if (attempt <= 0)
+                                {
+                                    return prompt;
+                                }
+                                return prompt + buildRetryValidationReminder(fieldIdTo, false);
+                            };
                             step->maxRetries = 5;
                             step->neededReplies = 1;
                             step->validate = [parseAndValidate](const QString &reply, const QString &)
@@ -385,9 +442,9 @@ QCoro::Task<void> FillerText::fill(
                             bool isDescription = fieldIdTo.contains("product_description", Qt::CaseInsensitive);
                             prompt += "Lang: " + langCodeTo + ". Product Type: " + productTypeTo + ". Field: " + fieldIdTo + "\n";
                             prompt += "Attributes: ";
-                            for (auto it = valuesForAi.begin(); it != valuesForAi.end(); ++it)
+                            for (auto itAttr = valsForAi.begin(); itAttr != valsForAi.end(); ++itAttr)
                             {
-                                prompt += it.key() + ": " + it.value() + ", ";
+                                prompt += itAttr.key() + ": " + itAttr.value() + ", ";
                             }
                             prompt += "\n";
 
@@ -409,12 +466,18 @@ QCoro::Task<void> FillerText::fill(
                                 {
                                     prompt += "Write a short text for this field.";
                                 }
-                                prompt += "No parenthesis.";
+                                prompt += " Do NOT use parentheses or '<' / '>' characters.";
                             }
-                            prompt += "\nOutput a JSON object with the key \"value\" containing the generated text.";
+                            prompt += "\nOutput ONLY a JSON object with the key \"value\" containing the generated text.";
 
-                            qDebug() << "\n--\nFillerText getPrompt VALUE FROM:" << prompt;
-                            step->getPrompt = [prompt](int){ return prompt; };
+                            qDebug() << "\n--\nFillerText getPrompt NO valueFrom:" << prompt;
+                            step->getPrompt = [prompt, fieldIdTo, isDescription](int attempt) {
+                                if (attempt <= 0)
+                                {
+                                    return prompt;
+                                }
+                                return prompt + buildRetryValidationReminder(fieldIdTo, !isDescription);
+                            };
                             step->maxRetries = isDescription ? 8 : 5;
                             step->neededReplies = 2; // Ask for 2 replies
                             step->validate = [parseAndValidate](const QString &reply, const QString &)
@@ -480,8 +543,11 @@ QCoro::Task<void> FillerText::fill(
                             };
                             steps << step;
                         }
-                        co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2"); // std::move(steps) not needed as it is passed by const reference
-                        // co_return is not needed for void coroutine that falls off end
+                        try {
+                            co_await OpenAi2::instance()->askGptMultipleTimeCoro(steps, "gpt-5.2");
+                        } catch (const ExceptionOpenAiError &e) {
+                            qWarning() << "FillerText::fill AI step failed for" << fieldIdTo << vid << ":" << e.error();
+                        }
                     };
                     tasks << QSharedPointer<QCoro::Task<void>>::create(task());
                 }

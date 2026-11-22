@@ -94,6 +94,12 @@ target_include_directories(FillerTitleTests PRIVATE ../AmazonTemplate3Lib)
 add_test(NAME FillerTitleTests COMMAND FillerTitleTests)
 set_tests_properties(FillerTitleTests PROPERTIES TIMEOUT 15)
 
+add_executable(FillerTextTests tst_fillertext.cpp)
+target_link_libraries(FillerTextTests PRIVATE AmazonTemplate3Lib_Tests Qt6::Test QCoro6::Core)
+target_include_directories(FillerTextTests PRIVATE ../AmazonTemplate3Lib ../../common/openai/)
+add_test(NAME FillerTextTests COMMAND FillerTextTests)
+set_tests_properties(FillerTextTests PROPERTIES TIMEOUT 15)
+
 
 
 add_executable(AttributeFlagsTableTests tst_attributeflagstable.cpp)

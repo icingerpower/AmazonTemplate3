@@ -8,6 +8,7 @@ class FillerText : public AbstractFiller
 {
 public:
     static const QHash<QString, int> FIELD_ID_MAX_CHAR;
+    static bool parseAndValidate(const QString &fieldIdTo, const QString &reply, QString &valFormatted);
     bool canFill(const TemplateFiller *templateFiller
                  , const Attribute *attribute
                  , const QString &marketplaceFrom
