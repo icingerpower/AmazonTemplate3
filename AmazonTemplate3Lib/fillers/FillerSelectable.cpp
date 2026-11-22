@@ -421,7 +421,7 @@ QCoro::Task<void> FillerSelectable::_fillSameLangCountry(
                 {
                     const QString &cachedReply = templateFiller->getAiReply(settingsFileName, valueId);
                     // Validate cached reply using the step creation logic (re-using createSelectStep for validation logic)
-                    if (possibleValues.size() > 50)
+                    if (possibleValues.size() > 50 && !valueId.contains("special_feature"))
                     {
                         QList<QString> sortedValues = possibleValues.values();
                         std::sort(sortedValues.begin(), sortedValues.end());
