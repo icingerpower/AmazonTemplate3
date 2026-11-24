@@ -25,6 +25,14 @@ void AmazonPricingApiTests::currentPriceOnly_data() {
         << QByteArray(
                R"({"offers":[{"marketplaceId":"FR","offerType":"B2C","price":{"amount":18.5,"currency":"EUR"}}]})")
         << 18.5;
+    QTest::newRow("string-amount-listings-offer")
+        << QByteArray(
+               R"({"offers":[{"marketplaceId":"FR","offerType":"B2C","price":{"amount":"14.74","currencyCode":"EUR"}}]})")
+        << 14.74;
+    QTest::newRow("string-amount-nested-listing-price")
+        << QByteArray(
+               R"({"offers":[{"marketplaceId":"FR","price":{"listingPrice":{"amount":"28.54"}}}]})")
+        << 28.54;
     QTest::newRow("b2b-is-not-b2c")
         << QByteArray(
                R"({"offers":[{"marketplaceId":"FR","offerType":"B2B","price":{"amount":10}}],"attributes":{"purchasable_offer":[{"marketplace_id":"FR","audience":"B2B","our_price":[{"schedule":[{"value_with_tax":9}]}]}],"list_price":[{"value":99}]}})")

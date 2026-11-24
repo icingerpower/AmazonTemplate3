@@ -158,9 +158,21 @@ QCoro::Task<void> AmazonPricingApi::_rateLimit()
 // fetchListingPrice
 // ---------------------------------------------------------------------------
 
+static double parseJsonAmount(const QJsonValue &v)
+{
+    if (v.isDouble())
+        return v.toDouble(-1.0);
+    if (v.isString()) {
+        bool ok = false;
+        const double parsed = v.toString().trimmed().toDouble(&ok);
+        return ok && std::isfinite(parsed) ? parsed : -1.0;
+    }
+    return -1.0;
+}
+
 // Parse price and product type from Listings Items API JSON body.
 // Price path priority:
-//   1. offers[i].price.listingPrice.amount
+//   1. offers[i].price.amount / offers[i].price.listingPrice.amount
 //   2. offers[i].listingPrice.amount
 //   3. attributes.purchasable_offer[j].our_price[0].schedule[0].value_with_tax
 // Reference/list prices are deliberately excluded: they are not current prices.
@@ -188,17 +200,17 @@ double AmazonPricingApi::parseListingPrice(const QByteArray &json,
         if (offer.value("marketplaceId").toString() != marketplaceId)
             continue;
         if (offer.value("offerType").toString() == "B2B") continue;
-        const double direct = offer.value("price").toObject().value("amount").toDouble(-1);
-        if (direct > 0) return direct;
+        const double direct = parseJsonAmount(offer.value("price").toObject().value("amount"));
+        if (direct > 0.0) return direct;
         {
-            const double amt = offer.value("price").toObject()
-                                   .value("listingPrice").toObject()
-                                   .value("amount").toDouble(-1.0);
+            const double amt = parseJsonAmount(offer.value("price").toObject()
+                                                   .value("listingPrice").toObject()
+                                                   .value("amount"));
             if (amt > 0.0) return amt;
         }
         {
-            const double amt = offer.value("listingPrice").toObject()
-                                   .value("amount").toDouble(-1.0);
+            const double amt = parseJsonAmount(offer.value("listingPrice").toObject()
+                                                   .value("amount"));
             if (amt > 0.0) return amt;
         }
     }
@@ -210,10 +222,10 @@ double AmazonPricingApi::parseListingPrice(const QByteArray &json,
         if (po.value("marketplace_id").toString() != marketplaceId)
             continue;
         if (!po.value("audience").toString().isEmpty() && po.value("audience").toString() != "ALL") continue;
-        const double amt =
+        const double amt = parseJsonAmount(
             po.value("our_price").toArray().first().toObject()
               .value("schedule").toArray().first().toObject()
-              .value("value_with_tax").toDouble(-1.0);
+              .value("value_with_tax"));
         if (amt > 0.0) return amt;
     }
 
@@ -233,9 +245,9 @@ static double parsePurchasableSubPrice(const QByteArray &json,
         const QJsonObject po = v.toObject();
         if (po.value("marketplace_id").toString() != marketplaceId)
             continue;
-        return po.value(QLatin1String(field)).toArray().first().toObject()
-                 .value("schedule").toArray().first().toObject()
-                 .value("value_with_tax").toDouble(-1.0);
+        return parseJsonAmount(po.value(QLatin1String(field)).toArray().first().toObject()
+                                 .value("schedule").toArray().first().toObject()
+                                 .value("value_with_tax"));
     }
     return -1.0;
 }

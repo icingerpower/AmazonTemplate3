@@ -30,6 +30,7 @@ class TableAmazonPricing : public QAbstractTableModel {
     double proposed(const Pricing::Row &row, int market) const;
     void resetRows(const QSet<QString> &skus);
     void resetMarket(const QString &sku, const QString &mp);
+    void applySubmittedPrice(const QString &sku, const QString &mp, double price);
     void updateRow(const Pricing::Row &row);
     QString columnKey(int column) const;
     int columnForKey(const QString &key) const;

@@ -71,6 +71,7 @@ class PricingEditorTests : public QObject {
     void widgetPersistsSortingAndPresets();
     void exchangeRateParsing();
     void salesMissingIsNotZero();
+    void applySubmittedPriceUpdatesTableAndProposals();
 };
 void PricingEditorTests::priceEditorCommitsAndRefreshes() {
     QTemporaryDir dir;
@@ -671,6 +672,31 @@ void PricingEditorTests::salesMissingIsNotZero() {
     QCOMPARE(AmazonInventoryApi::parseSalesUnits(R"({"payload":[{}]})"), -1);
     QCOMPARE(AmazonInventoryApi::parseSalesUnits(R"({"payload":[{"unitCount":-1}]})"), -1);
     QCOMPARE(AmazonInventoryApi::parseSalesUnits("malformed"), -1);
+}
+void PricingEditorTests::applySubmittedPriceUpdatesTableAndProposals() {
+    TableAmazonPricing model;
+    model.setMarkets(markets());
+    model.setMode(TableAmazonPricing::AllCountry);
+    model.setRows({row()});
+    model.setRules(25, {}, Pricing::Direction::Both);
+    QCOMPARE(model.index(0, TableAmazonPricing::MainPrice).data().toString(), QString("FR · 20.00 €"));
+    QCOMPARE(model.index(0, TableAmazonPricing::Changes).data().toString(),
+             QString("↑ 25.00 € (DE / FR)\n↓ 25.00 € (US)"));
+    // Normal bulk update updates the displayed price, clears the proposal, and allows future rule edits.
+    model.applySubmittedPrice("sku-a", "FR", 25.0);
+    QCOMPARE(model.index(0, TableAmazonPricing::MainPrice).data().toString(), QString("FR · 25.00 €"));
+    QCOMPARE(model.index(0, model.columnForKey("FR:price")).data().toString(), QString("25.00"));
+    QCOMPARE(model.proposed(model.rows()[0], 0), -1.0);
+    QCOMPARE(model.index(0, TableAmazonPricing::Changes).data().toString(),
+             QString("↑ 25.00 € (DE)\n↓ 25.00 € (US)"));
+    model.setRules(30, {}, Pricing::Direction::Both);
+    QCOMPARE(model.proposed(model.rows()[0], 0), 30.0);
+    // Manual-edit update updates the price and suppresses immediate snap-back to the default rule.
+    QVERIFY(model.setData(model.index(0, model.columnForKey("DE:new")), 27.0));
+    model.applySubmittedPrice("sku-a", "DE", 27.0);
+    QCOMPARE(model.index(0, model.columnForKey("DE:price")).data().toString(), QString("27.00"));
+    QCOMPARE(model.proposed(model.rows()[0], 1), -1.0);
+    QVERIFY(!model.rows()[0].manualPrices.contains("DE"));
 }
 QTEST_MAIN(PricingEditorTests)
 #include "tst_pricingeditor.moc"

@@ -677,6 +677,39 @@ void PanePricing::viewAllPrices() {
     dialog->show();
 }
 QCoro::Task<void> PanePricing::retrieve() {
+    const auto activeFilter = filter();
+    QStringList filterSummary;
+    if (!activeFilter.region.isEmpty())
+        filterSummary << tr("Region: %1").arg(ui->comboBoxRegion->currentText());
+    if (!activeFilter.sku.isEmpty())
+        filterSummary << tr("SKU contains: %1").arg(activeFilter.sku);
+    if (!activeFilter.title.isEmpty())
+        filterSummary << tr("Title contains: %1").arg(activeFilter.title);
+    if (!activeFilter.brand.isEmpty())
+        filterSummary << tr("Brand: %1").arg(activeFilter.brand);
+    if (!activeFilter.productTypes.isEmpty())
+        filterSummary << tr("Product type: %1").arg(activeFilter.productTypes.join(", "));
+    if (!activeFilter.sizeFrom.isEmpty() || !activeFilter.sizeTo.isEmpty())
+        filterSummary << tr("Size: %1 – %2")
+                             .arg(activeFilter.sizeFrom.isEmpty() ? tr("Any") : activeFilter.sizeFrom,
+                                  activeFilter.sizeTo.isEmpty() ? tr("Any") : activeFilter.sizeTo);
+    if (activeFilter.minPrice > 0 || activeFilter.maxPrice > 0)
+        filterSummary << tr("Price: %1 – %2 EUR")
+                             .arg(activeFilter.minPrice > 0 ? QString::number(activeFilter.minPrice, 'f', 2)
+                                                            : tr("Any"),
+                                  activeFilter.maxPrice > 0 ? QString::number(activeFilter.maxPrice, 'f', 2)
+                                                            : tr("Any"));
+    if (activeFilter.minDays > 0)
+        filterSummary << tr("Min days inv.: %1").arg(activeFilter.minDays);
+    const QString message =
+        filterSummary.isEmpty()
+            ? tr("Retrieve data for all products in the checked countries?")
+            : tr("Prices and data will be retrieved only for products matching the current filter:\n\n%1\n\n"
+                 "Do you want to continue?")
+                  .arg(filterSummary.join('\n'));
+    if (QMessageBox::question(this, tr("Retrieve data"), message, QMessageBox::Yes | QMessageBox::No,
+                              QMessageBox::Yes) != QMessageBox::Yes)
+        co_return;
     m_busy = true;
     setEnabled(false);
     m_cancelled = std::make_shared<bool>(false);
@@ -783,7 +816,7 @@ QCoro::Task<void> PanePricing::update() {
         co_await m_repository->update(updates, m_cancelled, log,
                                       [this, dialog, &completed, &updates](const auto &u, bool success) {
                                           if (success)
-                                              m_model->resetMarket(u.sku, u.marketplace);
+                                              m_model->applySubmittedPrice(u.sku, u.marketplace, u.after);
                                           ++completed;
                                           if (dialog)
                                               dialog->progress(tr("Price updates"), completed, updates.size(),

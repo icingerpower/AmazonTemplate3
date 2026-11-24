@@ -19,6 +19,72 @@
 #include <QSaveFile>
 #include <QUuid>
 
+namespace {
+QJsonObject withUpdatedListingPrice(QJsonObject body, const QString &marketplaceId, double price) {
+    if (body.contains("offers")) {
+        QJsonArray offers = body.value("offers").toArray();
+        for (int i = 0; i < offers.size(); ++i) {
+            QJsonObject offer = offers[i].toObject();
+            if (offer.value("marketplaceId").toString() != marketplaceId ||
+                offer.value("offerType").toString() == "B2B")
+                continue;
+            if (offer.contains("price")) {
+                QJsonObject p = offer.value("price").toObject();
+                if (p.contains("amount"))
+                    p["amount"] = price;
+                if (p.contains("listingPrice")) {
+                    QJsonObject lp = p.value("listingPrice").toObject();
+                    if (lp.contains("amount")) {
+                        lp["amount"] = price;
+                        p["listingPrice"] = lp;
+                    }
+                }
+                offer["price"] = p;
+            }
+            if (offer.contains("listingPrice")) {
+                QJsonObject lp = offer.value("listingPrice").toObject();
+                if (lp.contains("amount")) {
+                    lp["amount"] = price;
+                    offer["listingPrice"] = lp;
+                }
+            }
+            offers[i] = offer;
+        }
+        body["offers"] = offers;
+    }
+    if (body.contains("attributes")) {
+        QJsonObject attrs = body.value("attributes").toObject();
+        if (attrs.contains("purchasable_offer")) {
+            QJsonArray pos = attrs.value("purchasable_offer").toArray();
+            for (int i = 0; i < pos.size(); ++i) {
+                QJsonObject po = pos[i].toObject();
+                const QString audience = po.value("audience").toString();
+                if (po.value("marketplace_id").toString() != marketplaceId ||
+                    (!audience.isEmpty() && audience != "ALL"))
+                    continue;
+                QJsonArray ourPrice = po.value("our_price").toArray();
+                if (!ourPrice.isEmpty()) {
+                    QJsonObject entry = ourPrice[0].toObject();
+                    QJsonArray schedule = entry.value("schedule").toArray();
+                    if (!schedule.isEmpty()) {
+                        QJsonObject slot = schedule[0].toObject();
+                        slot["value_with_tax"] = price;
+                        schedule[0] = slot;
+                        entry["schedule"] = schedule;
+                        ourPrice[0] = entry;
+                        po["our_price"] = ourPrice;
+                    }
+                }
+                pos[i] = po;
+            }
+            attrs["purchasable_offer"] = pos;
+            body["attributes"] = attrs;
+        }
+    }
+    return body;
+}
+} // namespace
+
 AmazonPricingRepository::AmazonPricingRepository(QDir working, Credentials credentials,
                                                  InventoryFactory inventoryFactory,
                                                  PricingFactory pricingFactory)
@@ -478,7 +544,18 @@ QCoro::Task<void> AmazonPricingRepository::update(QList<Update> updates, std::sh
         if (success) {
             ++submitted;
             QString error;
-            if (!m_cache.invalidate("listing", AmazonDataCache::listingKey(u.marketplace, u.sku), &error))
+            const QString cacheKey = AmazonDataCache::listingKey(u.marketplace, u.sku);
+            const double updatedPrice = Pricing::rounded(u.after);
+            const QJsonObject payload{{"sku", u.sku},
+                                      {"marketplace", u.marketplace},
+                                      {"price", updatedPrice},
+                                      {"exists", true},
+                                      {"body", withUpdatedListingPrice(body, u.marketplace, updatedPrice)}};
+            // Invalidate first so write() replaces any newer timestamp with an expired observation
+            // (fetchedUtc = 1): the UI/cache immediately reflects the submitted price, while the next
+            // "Retrieve data" still re-fetches live from Amazon to verify propagation.
+            if (!m_cache.invalidate("listing", cacheKey, &error) ||
+                !m_cache.write("listing", cacheKey, payload, 1, &error))
                 record("CACHE WARNING " + detail + " | " + error);
             record("SUBMITTED " + detail +
                    " | Accepted by Amazon; awaiting propagation, not yet verified live.");

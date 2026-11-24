@@ -112,6 +112,22 @@ void TableAmazonPricing::resetMarket(const QString &sku, const QString &mp) {
             break;
         }
 }
+void TableAmazonPricing::applySubmittedPrice(const QString &sku, const QString &mp, double price) {
+    if (!Pricing::validPrice(price))
+        return;
+    for (int i = 0; i < m_rows.size(); ++i)
+        if (m_rows[i].sku == sku) {
+            auto &listing = m_rows[i].listings[mp];
+            listing.exists = true;
+            listing.price = Pricing::rounded(price);
+            if (m_rows[i].manualPrices.remove(mp) > 0)
+                m_rows[i].resetMarkets.insert(mp);
+            else
+                m_rows[i].resetMarkets.remove(mp);
+            emit dataChanged(index(i, 0), index(i, columnCount() - 1));
+            break;
+        }
+}
 int TableAmazonPricing::rowCount(const QModelIndex &p) const {
     return p.isValid() ? 0 : m_rows.size();
 }

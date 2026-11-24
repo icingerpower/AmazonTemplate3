@@ -223,3 +223,25 @@ still need a live account smoke test; no live price changes were made.
   saved rules. Committed main-table edits worked with eligible fixture data.
 - Release and Qt Creator Debug builds passed; AmazonPricingApiTests,
   PricingEditorTests and PricingRetrievalTests passed. No live API writes.
+
+## 2026-11-24 — Bulk update refreshes table and cache immediately
+
+- Supersedes the earlier behavior where accepted submissions only cleared
+  proposals via `resetMarket` and deleted the cached listing record.
+- `TableAmazonPricing::applySubmittedPrice` now updates `listings[mp].price`
+  immediately upon accepted PATCH so Main price, All (EUR) Price, per-country
+  prices, and any open Preview all prices dialog reflect the submitted price.
+  For rule-driven updates, `resetMarkets` is not set so subsequent rule changes
+  can propose new prices immediately; for manual-edit updates, `resetMarkets`
+  prevents immediate snap-back to the default rule.
+- `AmazonPricingRepository::update` now invalidates and rewrites the cached
+  listing record with the updated price in `body` and `fetchedUtc = 1`
+  (expired), so region/country switches and restarts show the submitted price
+  while the next "Retrieve data" still re-fetches live from Amazon to verify
+  propagation.
+- `AmazonPricingApi::parseListingPrice` (and `parsePurchasableSubPrice`) now
+  accept both JSON numbers and JSON strings for `amount` / `value_with_tax`
+  (SP-API `Money.amount` is serialized as a string, e.g. `"14.74"`).
+- `PanePricing::retrieve()` now shows a Yes/No confirmation dialog before
+  starting retrieval, summarizing the active filter so it is explicit that
+  prices/data will only be synced for products matching the current filter.

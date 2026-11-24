@@ -289,6 +289,19 @@ void PricingRetrievalTests::updateAuditIncludesBeforeAfterAndEveryOutcome() {
     QFile audit(logs.filePath(logs.entryList({"*.log"}, QDir::Files).first()));
     QVERIFY(audit.open(QIODevice::ReadOnly));
     QCOMPARE(QString::fromUtf8(audit.readAll()), text + '\n');
+    // Successful submissions update the cached listing price while marking it expired for retrieval.
+    const QList<Pricing::Market> seededMarkets{
+        {"A13V1IB3VIYZZH", "FR", "EUR", "Europe", 1, true},
+        {"A1PA6795UKMFR9", "DE", "EUR", "Europe", 1, true}};
+    const auto seeded = repository.cachedRows(seededMarkets);
+    QCOMPARE(seeded.size(), 1);
+    QCOMPARE(seeded[0].sku, QString("SAME-SKU"));
+    QCOMPARE(seeded[0].listings.value("A13V1IB3VIYZZH").price, 25.0);
+    QCOMPARE(seeded[0].listings.value("A1PA6795UKMFR9").price, 15.0);
+    const auto frRecord =
+        repository.cache().read("listing", AmazonDataCache::listingKey("A13V1IB3VIYZZH", "SAME-SKU"));
+    QVERIFY(!frRecord.isEmpty());
+    QVERIFY(!AmazonDataCache::fresh(frRecord, 3600, QDateTime::currentSecsSinceEpoch()));
 }
 void PricingRetrievalTests::updateCancellation_data() {
     QTest::addColumn<QString>("stage");
